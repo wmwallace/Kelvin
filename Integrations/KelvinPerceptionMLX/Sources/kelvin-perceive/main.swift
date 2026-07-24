@@ -90,15 +90,16 @@ if first == "label" {
 
         let stats = try ImageStatistics.compute(image)
 
-        // Subject segmentation → local lift. Generate the mask once; measure the subject's
-        // brightness so the engine decides whether it needs lifting.
-        let subjectMask = SubjectMask.person(in: image)
-        let subjectLuma = subjectMask.flatMap { SubjectMask.maskedMeanLuma(image: image, mask: $0) }
-        if let luma = subjectLuma { note(String(format: "subject present, mean luma %.3f", luma)) }
-        let maskBitmaps = subjectMask.map { ["subject": $0] } ?? [:]
+        // Local masks (subject + sky) and their metered brightness → the engine's local
+        // decisions. One pass produces the bitmaps and the lumas (skin-aware for the subject).
+        let measured = LocalMasks.measure(in: image)
+        if let luma = measured.subjectLuma { note(String(format: "subject present, metered luma %.3f", luma)) }
+        if let luma = measured.skyLuma { note(String(format: "sky present, mean luma %.3f", luma)) }
+        let maskBitmaps = measured.bitmaps
 
         let candidates = RecipeEngine.candidates(
-            perception: perception, statistics: stats, subjectLuma: subjectLuma,
+            perception: perception, statistics: stats,
+            subjectLuma: measured.subjectLuma, skyLuma: measured.skyLuma,
             perceptionHash: PerceptionIO.hash(perception),
             generatedAt: ISO8601DateFormatter().string(from: Date())
         )
