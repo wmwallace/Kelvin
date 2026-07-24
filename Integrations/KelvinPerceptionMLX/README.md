@@ -47,8 +47,10 @@ but do **not** declare those packages themselves, so they are listed here direct
 - The target **compiles** (`swift build` → *Build complete*, ~71 s cold), so the provider
   type-checks against the real `mlx-swift-lm` 3.31.4 API (`ChatSession`, `respond(to:image:)`,
   `GenerateParameters`, `UserInput.Image.ciImage`, the `#huggingFaceLoadModelContainer` macro).
-- **Live inference is not yet exercised here** — the first `perceive(_:)` call downloads the
-  model (~2–3 GB) from Hugging Face and runs it on the GPU.
+- **Live inference verified end-to-end.** `swift run kelvin-perceive <image> [out-dir]` loads
+  the model, perceives a real photo, and the model emits valid closed-vocabulary perception
+  JSON (categorical only — no numbers), which parses cleanly and drives the engine + renderer.
+  First run downloads ~2.9 GB to `~/.cache/huggingface`; after that, inference is seconds.
 
 ### Metal Toolchain prerequisite
 

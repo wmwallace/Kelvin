@@ -18,7 +18,9 @@ let package = Package(
         .macOS(.v14)   // required by mlx-swift-lm
     ],
     products: [
-        .library(name: "KelvinPerceptionMLX", targets: ["KelvinPerceptionMLX"])
+        .library(name: "KelvinPerceptionMLX", targets: ["KelvinPerceptionMLX"]),
+        // A tiny driver that proves the on-device loop: perceive a photo → engine → render.
+        .executable(name: "kelvin-perceive", targets: ["kelvin-perceive"])
     ],
     dependencies: [
         .package(name: "Kelvin", path: "../.."),
@@ -41,6 +43,13 @@ let package = Package(
                 .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
                 .product(name: "Tokenizers", package: "swift-transformers"),
                 .product(name: "HuggingFace", package: "swift-huggingface")
+            ]
+        ),
+        .executableTarget(
+            name: "kelvin-perceive",
+            dependencies: [
+                "KelvinPerceptionMLX",
+                .product(name: "KelvinCore", package: "Kelvin")
             ]
         )
     ]
