@@ -63,6 +63,23 @@ public extension RecipeEngine {
         let wb = whiteBalance(p, s, strengthScale: style.wbStrengthScale)
         g.temperatureK = wb.temperatureK
         g.tint = wb.tint
+        // A style may also shift temperature OUTRIGHT, not just scale the correction.
+        //
+        // `wbStrengthScale` alone can only under- or over-correct a cast that is already there.
+        // On a neutrally-lit frame — overcast, shade, most of any given shoot — `whiteBalance`
+        // returns nil, the scale multiplies nothing, and the styles named Warm and Cool came out
+        // colour-identical to Natural. The curator then dropped them as near-duplicates, so a
+        // neutral scene silently offered fewer distinct looks than a cast one.
+        //
+        // The shift is measured in the renderer's Kelvin convention, where LOWER is warmer
+        // (verified in `WhiteBalanceDirectionTests`, not assumed). 6500 is the no-op point, so it
+        // is the base when there was no correction to make. Styles with no shift keep `nil` and
+        // the all-neutral no-op invariant with it.
+        if style.temperatureShiftK != 0 {
+            let base = wb.temperatureK ?? 6500
+            g.temperatureK = roundedClamp(base + style.temperatureShiftK,
+                                          to: Ranges.temperatureK, step: 10)
+        }
 
         // --- Style layer ---
         g.contrast = styledContrast(p, s, style)
@@ -154,7 +171,12 @@ public struct CandidateStyle: Sendable, Equatable {
     let whitesBias: Double
     let blacksBias: Double
     /// Multiplies white-balance correction strength. < 1 keeps some of the cast (warmer/moodier).
+    /// Only meaningful when there IS a cast — see `temperatureShiftK` for the absolute move.
     let wbStrengthScale: Double
+    /// An outright temperature move in the renderer's Kelvin convention, where **lower is warmer**.
+    /// Applied whether or not a cast correction fired, so a look named Warm actually warms a
+    /// neutrally-lit photo. 0 for every style whose character isn't colour temperature.
+    var temperatureShiftK: Double = 0
     /// Scales the S-curve depth — the style's contrast character.
     let curveScale: Double
     /// Lifts the black end of the curve (0…255) for a matte / film toe.
@@ -219,22 +241,26 @@ public struct CandidateStyle: Sendable, Equatable {
         curveScale: 1.1, matteToe: 0
     )
 
-    /// Warm and flattering — keeps some of the light's own colour rather than neutralising it.
-    /// Golden hour, tungsten interiors, skin.
+    /// Warm and flattering — golden hour, tungsten interiors, skin. Under-corrects a cast slightly
+    /// (keeping some of the light's own colour) *and* moves the temperature warm outright, so the
+    /// look still reads as warm on a neutrally-lit frame where there is no cast to keep.
     public static let warm = CandidateStyle(
         id: "warm", label: "Warm",
         contrastScale: 0.95, contrastBias: 2,
         vibranceScale: 1.0, vibranceBias: 2, saturationBias: 0,
-        whitesBias: 3, blacksBias: -3, wbStrengthScale: 0.45,
+        whitesBias: 3, blacksBias: -3, wbStrengthScale: 0.8,
+        temperatureShiftK: -420,
         curveScale: 0.95, matteToe: 4
     )
 
-    /// Cool and clean — corrects the cast fully and holds colour back. Blue hour, snow, architecture.
+    /// Cool and clean — blue hour, snow, architecture. Corrects a cast fully, holds colour back,
+    /// and shifts cool outright for the same reason Warm shifts warm.
     public static let cool = CandidateStyle(
         id: "cool", label: "Cool",
         contrastScale: 1.05, contrastBias: 4,
         vibranceScale: 0.85, vibranceBias: -4, saturationBias: -4,
-        whitesBias: 5, blacksBias: -5, wbStrengthScale: 1.15,
+        whitesBias: 5, blacksBias: -5, wbStrengthScale: 1.1,
+        temperatureShiftK: 360,
         curveScale: 1.0, matteToe: 0
     )
 

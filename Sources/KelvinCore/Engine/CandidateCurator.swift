@@ -93,9 +93,15 @@ public enum CandidateCurator {
         d += abs(x.whites - y.whites) * 0.5
         d += abs(x.clarity - y.clarity) * 0.4
         // A white-balance difference reads strongly; 300 K is roughly a visible step.
-        if let ta = x.temperatureK, let tb = y.temperatureK {
-            d += abs(ta - tb) / 300.0 * 6.0
-        }
+        //
+        // `nil` means "no correction", which renders as 6500 K — so it must compare as 6500 rather
+        // than being skipped. This previously required BOTH sides to be non-nil, which made the
+        // comparison that matters most invisible: on a neutrally-lit scene Natural is nil and Warm
+        // is ~6080 K, and the single thing distinguishing them contributed exactly zero to how
+        // different the curator thought they were.
+        let ta = x.temperatureK ?? 6500
+        let tb = y.temperatureK ?? 6500
+        d += abs(ta - tb) / 300.0 * 6.0
         return d
     }
 }

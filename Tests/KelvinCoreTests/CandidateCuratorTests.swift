@@ -75,3 +75,33 @@ final class CandidateCuratorTests: XCTestCase {
         XCTAssertEqual(picked.count, 3, "four near-identical options still beat two")
     }
 }
+
+/// Divergence has to be able to *see* a white-balance difference, or a look whose whole character
+/// is colour temperature reads as identical to the faithful one.
+final class CuratorTemperatureDistanceTests: XCTestCase {
+
+    private func recipe(id: String, temperatureK: Double?) -> Recipe {
+        var g = GlobalAdjustments.neutral
+        g.temperatureK = temperatureK
+        return Recipe(schemaVersion: 1, id: id, label: id, provenance: nil,
+                      global: g, curve: nil, hsl: nil, masks: nil, detail: nil, geometry: nil)
+    }
+
+    /// `nil` means "no correction applied", which renders as 6500 K. Comparing it against a real
+    /// temperature must therefore register the difference. It used to require both sides to be
+    /// non-nil, so nil-vs-6080 scored zero distance — exactly the Natural-vs-Warm case on a
+    /// neutrally-lit photo.
+    func testNilTemperatureComparesAsNeutralRatherThanBeingIgnored() {
+        let natural = recipe(id: "natural", temperatureK: nil)
+        let warm = recipe(id: "warm", temperatureK: 6080)
+        XCTAssertGreaterThan(CandidateCurator.distance(natural, warm), 0,
+                             "a 420 K shift away from neutral must count as a difference")
+    }
+
+    /// And two genuinely equivalent renderings still measure as identical.
+    func testNilAndExplicitNeutralAreTheSameDistanceApart() {
+        let implicitNeutral = recipe(id: "a", temperatureK: nil)
+        let explicitNeutral = recipe(id: "b", temperatureK: 6500)
+        XCTAssertEqual(CandidateCurator.distance(implicitNeutral, explicitNeutral), 0, accuracy: 0.001)
+    }
+}
