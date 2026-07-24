@@ -85,8 +85,27 @@ public struct Perception: Codable, Equatable, Sendable {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             present = try c.decodeIfPresent(Bool.self, forKey: .present) ?? false
             type = try c.decodeIfPresent(SubjectType.self, forKey: .type) ?? .none
-            count = try c.decodeIfPresent(SubjectCount.self, forKey: .count) ?? .none
+            count = Self.decodeCount(c)
             placement = try c.decodeIfPresent(Placement.self, forKey: .placement) ?? .center
+        }
+
+        /// The VLM is asked for a `count` *word* (none/single/few/crowd) but a small model will
+        /// sometimes answer with a literal number ("count": 2). Accept both rather than throwing
+        /// away the whole perception over one field — the same leniency the enums get for
+        /// off-vocabulary strings, extended to a type mismatch.
+        private static func decodeCount(_ c: KeyedDecodingContainer<CodingKeys>) -> SubjectCount {
+            if let word = try? c.decode(SubjectCount.self, forKey: .count) { return word }
+            let n: Int?
+            if let i = try? c.decode(Int.self, forKey: .count) { n = i }
+            else if let d = try? c.decode(Double.self, forKey: .count) { n = Int(d.rounded()) }
+            else { n = nil }
+            guard let count = n else { return .none }
+            switch count {
+            case ..<1:  return .none
+            case 1:     return .single
+            case 2...4: return .few
+            default:    return .crowd
+            }
         }
 
         enum CodingKeys: String, CodingKey { case present, type, count, placement }

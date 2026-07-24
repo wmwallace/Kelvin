@@ -52,6 +52,19 @@ final class PerceptionSeamTests: XCTestCase {
         XCTAssertEqual(p.intent, .portraitFlattering)
     }
 
+    func testParsesNumericSubjectCount() throws {
+        // A small model sometimes answers subject.count with a literal number instead of the enum
+        // word. It must map to the nearest bucket, not throw away the whole perception.
+        func count(_ json: String) throws -> SubjectCount {
+            try PerceptionParser.parse(json).subject.count
+        }
+        let base = "\"scene\":\"street\",\"lighting\":{\"condition\":\"harsh-sun\",\"direction\":\"side\",\"contrast_range\":\"high\"},\"problems\":[],\"intent\":\"natural\",\"confidence\":0.7"
+        XCTAssertEqual(try count("{\"subject\":{\"present\":true,\"type\":\"person\",\"count\":1,\"placement\":\"center\"},\(base)}"), .single)
+        XCTAssertEqual(try count("{\"subject\":{\"present\":true,\"type\":\"person\",\"count\":3,\"placement\":\"center\"},\(base)}"), .few)
+        XCTAssertEqual(try count("{\"subject\":{\"present\":true,\"type\":\"person\",\"count\":12,\"placement\":\"center\"},\(base)}"), .crowd)
+        XCTAssertEqual(try count("{\"subject\":{\"present\":true,\"type\":\"person\",\"count\":\"single\",\"placement\":\"center\"},\(base)}"), .single)
+    }
+
     func testParsesJSONInMarkdownFenceWithProse() throws {
         let raw = """
         Sure! Here is my analysis of the photograph:
