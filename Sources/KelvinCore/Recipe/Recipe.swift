@@ -15,6 +15,8 @@ public struct Recipe: Codable, Equatable, Sendable {
     public var global: GlobalAdjustments
     public var curve: Curve?
     public var hsl: [String: HSLAdjustment]?
+    /// Black-and-white conversion with per-hue control. `nil` keeps the photo in colour.
+    public var blackAndWhite: BlackAndWhiteMix?
     public var masks: [Mask]?
     public var detail: Detail?
     public var geometry: Geometry?
@@ -67,6 +69,7 @@ public struct Recipe: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
         case id, label, provenance, global, curve, hsl, masks, detail, geometry, heal
+        case blackAndWhite = "black_and_white"
     }
 
     public init(from decoder: Decoder) throws {
@@ -79,6 +82,7 @@ public struct Recipe: Codable, Equatable, Sendable {
         global = try c.decodeIfPresent(GlobalAdjustments.self, forKey: .global) ?? .neutral
         curve = try c.decodeIfPresent(Curve.self, forKey: .curve)
         hsl = try c.decodeIfPresent([String: HSLAdjustment].self, forKey: .hsl)
+        blackAndWhite = try c.decodeIfPresent(BlackAndWhiteMix.self, forKey: .blackAndWhite)
         masks = try c.decodeIfPresent([Mask].self, forKey: .masks)
         detail = try c.decodeIfPresent(Detail.self, forKey: .detail)
         geometry = try c.decodeIfPresent(Geometry.self, forKey: .geometry)
@@ -225,6 +229,29 @@ public struct Curve: Codable, Equatable, Sendable {
     public var red: [[Double]]?
     public var green: [[Double]]?
     public var blue: [[Double]]?
+}
+
+/// A black-and-white conversion, the way a photographer means it: not "remove the colour" but
+/// *choose how each colour becomes a shade of grey*. This is the digital equivalent of the coloured
+/// filters film shooters put in front of the lens — a red filter darkens blue sky to near-black and
+/// makes clouds leap out; a yellow-green one lifts foliage. Straight desaturation throws that
+/// control away and is why naive B&W looks muddy.
+///
+/// `bands` maps a hue band (`red`/`orange`/…/`magenta`) to −100…100: how much pixels of that hue
+/// are darkened or lightened in the grey result. Absent or all-zero still converts to grey, using
+/// the plain luminance mix.
+public struct BlackAndWhiteMix: Codable, Equatable, Sendable {
+    public var bands: [String: Double]
+
+    public init(bands: [String: Double] = [:]) { self.bands = bands }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let raw = try c.decodeIfPresent([String: Double].self, forKey: .bands) ?? [:]
+        bands = raw.mapValues { clamp($0, to: Ranges.signed100) }
+    }
+
+    enum CodingKeys: String, CodingKey { case bands }
 }
 
 /// Per-color HSL adjustment. Each channel clamps to −100…100.

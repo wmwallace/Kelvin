@@ -144,6 +144,45 @@ final class RendererFieldsTests: XCTestCase {
                        "no person → the skin mask must not touch the image")
     }
 
+    // MARK: - Black & white (a translation, not a subtraction)
+
+    private func bwRecipe(_ bands: [String: Double]) -> Recipe {
+        var r = Recipe.neutral
+        r.blackAndWhite = BlackAndWhiteMix(bands: bands)
+        return r
+    }
+
+    func testBlackAndWhiteRemovesColour() throws {
+        let source = redBlueImage()
+        let out = Renderer.render(source, with: bwRecipe([:]))
+        let data = try ImageWriter.rgba8Sampled(out, width: 16, height: 16)
+        data.withUnsafeBytes { rp in
+            let px = rp.bindMemory(to: UInt8.self)
+            for i in stride(from: 0, to: data.count, by: 4) {
+                XCTAssertEqual(Int(px[i]), Int(px[i + 1]), accuracy: 2, "R≈G — result must be grey")
+                XCTAssertEqual(Int(px[i + 1]), Int(px[i + 2]), accuracy: 2, "G≈B — result must be grey")
+            }
+        }
+    }
+
+    /// The whole point of a real B&W: a red filter must drive blue sky darker while leaving red
+    /// alone — two colours that convert to similar greys are pulled apart.
+    func testRedFilterDarkensBlueNotRed() throws {
+        let source = redBlueImage()          // left red, right blue
+        let plain = Renderer.render(source, with: bwRecipe([:]))
+        let filtered = Renderer.render(source, with: bwRecipe(["blue": -70]))
+        let redPlain = try sampledLuma(plain, at: 3, 8), redFiltered = try sampledLuma(filtered, at: 3, 8)
+        let bluePlain = try sampledLuma(plain, at: 12, 8), blueFiltered = try sampledLuma(filtered, at: 12, 8)
+        XCTAssertLessThan(blueFiltered, bluePlain - 15, "blue should darken under a red-filter mix")
+        XCTAssertEqual(redFiltered, redPlain, accuracy: 4, "red should be left alone")
+    }
+
+    func testNoBlackAndWhiteKeepsColour() throws {
+        let source = redBlueImage()
+        XCTAssertEqual(try bytes(Renderer.render(source, with: .neutral)), try bytes(source),
+                       "absent black_and_white must keep the photo in colour (no-op)")
+    }
+
     func testShapeMaskNeedsNoSuppliedBitmap() throws {
         // The whole point: a parametric mask renders with an EMPTY maskBitmaps dict.
         let mask = Mask(id: "r", type: "r", source: "gradient", invert: false, feather: 0,

@@ -150,6 +150,16 @@ public enum Renderer {
             ])
         }
 
+        // Black & white. Applied after all colour work (which shapes what the greys become) and
+        // before masks, so a mask's saturation adjustment can't reintroduce colour.
+        if let bw = recipe.blackAndWhite, let cube = MonochromeCube.makeData(bw) {
+            img = img.applyingFilter("CIColorCubeWithColorSpace", parameters: [
+                "inputCubeDimension": MonochromeCube.dimension,
+                "inputCubeData": cube,
+                "inputColorSpace": ImageWriter.outputColorSpace
+            ])
+        }
+
         // Masked local adjustments (schema order: … HSL → masks). Applied only when the caller
         // supplied the mask bitmap for that mask.
         for mask in recipe.masks ?? [] {
