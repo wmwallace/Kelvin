@@ -53,6 +53,28 @@ final class SkyMaskTests: XCTestCase {
         XCTAssertNil(SkyMask.detect(in: image), "a dark frame should yield no sky mask")
     }
 
+    func testBrightMidFrameBandIsNotSky() {
+        // Dark top, a bright smooth desaturated band across the middle (a waterfall / white wall /
+        // snowfield), dark bottom. The band looks sky-like locally but doesn't touch the top edge,
+        // so top-connectivity must reject it.
+        let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+        let w = 120, h = 120, bpr = w * 4
+        var bytes = [UInt8](repeating: 0, count: bpr * h)
+        for y in 0..<h {
+            let band = y >= h * 2 / 5 && y < h * 3 / 5     // bright band in the vertical middle
+            let c: (UInt8, UInt8, UInt8) = band ? (225, 228, 232) : (28, 30, 28)
+            for x in 0..<w {
+                let i = y * bpr + x * 4
+                bytes[i] = c.0; bytes[i+1] = c.1; bytes[i+2] = c.2; bytes[i+3] = 255
+            }
+        }
+        let ctx = CGContext(data: &bytes, width: w, height: h, bitsPerComponent: 8,
+                            bytesPerRow: bpr, space: cs,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        let image = CIImage(cgImage: ctx.makeImage()!)
+        XCTAssertNil(SkyMask.detect(in: image), "a bright band not touching the top edge is not sky")
+    }
+
     func testNoSkyForColourfulGroundOnly() {
         // Saturated colour high in the frame is a surface, not sky — the desaturation gate rejects it.
         let image = halfImage(top: (200, 60, 40), bottom: (60, 120, 40))

@@ -20,7 +20,7 @@ public enum SkyMask {
 
     /// Grayscale sky mask (white = sky) at `image`'s extent, or nil when the frame holds little
     /// or no sky (coverage below `coverageFloor`, 0…1 fraction of the frame).
-    public static func detect(in image: CIImage, coverageFloor: Double = 0.03) -> CIImage? {
+    public static func detect(in image: CIImage, coverageFloor: Double = 0.015) -> CIImage? {
         let ext = image.extent
         guard !ext.isInfinite, ext.width > 0, ext.height > 0 else { return nil }
 
@@ -52,7 +52,6 @@ public enum SkyMask {
 
         // Score = colour × smoothness × position, quantised to 8-bit.
         var score = [UInt8](repeating: 0, count: gw * gh)
-        var coverage = 0.0
         for y in 0..<gh {
             let yn = gh > 1 ? Double(y) / Double(gh - 1) : 0     // 0 = top row (top-left sampling)
             let pos = yn < 0.45 ? 1.0 : max(0, 1 - (yn - 0.45) / 0.27)   // full to 45%, gone by ~72%
@@ -64,10 +63,33 @@ public enum SkyMask {
                 if y > 0      { grad += abs(luma[i] - luma[i - gw]) }
                 if y < gh - 1 { grad += abs(luma[i] - luma[i + gw]) }
                 let smooth = max(0, 1 - grad * 6.0)
-                let s = colour[i] * pos * smooth
-                score[i] = UInt8(min(255, max(0, s * 255)))
-                coverage += s
+                score[i] = UInt8(min(255, max(0, colour[i] * pos * smooth * 255)))
             }
+        }
+
+        // Keep only sky connected to the top edge. Real sky borders the top of the frame; a bright
+        // smooth feature lower down — a waterfall, a snowfield, a white wall — does not, and would
+        // otherwise be mistaken for sky. Flood-fill down from the top rows through plausibly-sky
+        // cells and discard everything the fill can't reach.
+        let skyish: (Int) -> Bool = { score[$0] > 48 }
+        var keep = [Bool](repeating: false, count: gw * gh)
+        var stack: [Int] = []
+        for y in 0..<min(3, gh) {                     // seed from the top few rows
+            for x in 0..<gw where skyish(y * gw + x) && !keep[y * gw + x] {
+                keep[y * gw + x] = true; stack.append(y * gw + x)
+            }
+        }
+        while let i = stack.popLast() {
+            let x = i % gw, y = i / gw
+            let neighbours = [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
+            for (nx, ny) in neighbours where nx >= 0 && nx < gw && ny >= 0 && ny < gh {
+                let ni = ny * gw + nx
+                if !keep[ni] && skyish(ni) { keep[ni] = true; stack.append(ni) }
+            }
+        }
+        var coverage = 0.0
+        for i in 0..<(gw * gh) {
+            if keep[i] { coverage += Double(score[i]) / 255 } else { score[i] = 0 }
         }
         guard coverage / Double(gw * gh) >= coverageFloor else { return nil }
 
