@@ -23,6 +23,7 @@ func printUsage() {
       \(tool) render --in <image> --recipe <recipe.json> --out <output>
       \(tool) engine --in <image> --perception <perception.json> --out <recipe.json>
       \(tool) candidates --in <image> --perception <perception.json> --out-dir <dir>
+      \(tool) batch --in-dir <dir> --recipe <recipe.json> --out-dir <dir> [--format png|jpg]
       \(tool) eval --corpus <dir> [--out <report.json>] [--engine-version <v>]
 
     render options:
@@ -39,6 +40,12 @@ func printUsage() {
       --in          Path to the source image (RAW, JPEG, or PNG). Required.
       --perception  Path to a hand-labelled perception JSON (Stage 1). Required.
       --out-dir     Directory to write one <style>.json per candidate. Required.
+
+    batch options:
+      --in-dir      Directory of source images to propagate the recipe across. Required.
+      --recipe      Path to a recipe JSON sidecar. Required.
+      --out-dir     Directory to write rendered outputs (originals untouched). Required.
+      --format      png (default) or jpg.
 
     eval options:
       --corpus          Directory containing a manifest.json. Required.
@@ -141,6 +148,36 @@ case "candidates":
         }
         let labels = recipes.map { $0.label ?? "?" }.joined(separator: ", ")
         print("Wrote \(recipes.count) candidates to \(outDir.path) [\(labels)]")
+    } catch {
+        fail("\(error)")
+    }
+
+case "batch":
+    let rest = Array(arguments.dropFirst())
+
+    guard let inDirPath = value(for: "--in-dir", in: rest) else { fail("batch requires --in-dir") }
+    guard let recipePath = value(for: "--recipe", in: rest) else { fail("batch requires --recipe") }
+    guard let outDirPath = value(for: "--out-dir", in: rest) else { fail("batch requires --out-dir") }
+
+    let format: ImageWriter.Format
+    switch value(for: "--format", in: rest)?.lowercased() {
+    case "jpg", "jpeg": format = .jpeg(quality: 0.92)
+    case "png", nil: format = .png
+    case let other?: fail("unknown --format '\(other)' (use png or jpg)")
+    }
+
+    do {
+        let recipe = try RecipeIO.load(from: URL(fileURLWithPath: recipePath))
+        let outcome = try BatchApply.run(
+            inputDir: URL(fileURLWithPath: inDirPath, isDirectory: true),
+            recipe: recipe,
+            outputDir: URL(fileURLWithPath: outDirPath, isDirectory: true),
+            format: format
+        )
+        print("Applied recipe to \(outcome.succeeded) image(s), \(outcome.failed) failed.")
+        for failure in outcome.failures {
+            FileHandle.standardError.write(Data("  skipped \(failure.source.lastPathComponent): \(failure.message)\n".utf8))
+        }
     } catch {
         fail("\(error)")
     }
