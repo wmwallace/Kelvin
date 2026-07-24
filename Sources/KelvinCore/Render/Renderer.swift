@@ -226,7 +226,7 @@ public enum Renderer {
 
     /// Straighten (rotate about the centre) then crop. With a rotation and no explicit crop, the
     /// frame is auto-cropped to the largest centred rectangle that contains no empty corners.
-    static func applyGeometry(_ image: CIImage, _ geo: Geometry) -> CIImage {
+    public static func applyGeometry(_ image: CIImage, _ geo: Geometry) -> CIImage {
         let extent = image.extent
         guard !extent.isInfinite, extent.width > 0, extent.height > 0 else { return image }
         var img = image
@@ -251,9 +251,78 @@ public enum Renderer {
         return img.cropped(to: crop.integral)
     }
 
+    /// Map a point in the FRAMED (post-geometry) image back to the SOURCE image, both normalised
+    /// 0…1 with a top-left origin.
+    ///
+    /// Masks are applied *before* geometry (they describe the photo, not the crop), so a UI that
+    /// lets the user place a mask by clicking the straightened preview must undo the rotate+crop
+    /// to get the coordinate the mask actually stores. This is the exact inverse of
+    /// `applyGeometry`, and lives beside it so the two can't drift apart.
+    public static func sourceNormalized(
+        fromFramed p: CGPoint, geometry geo: Geometry?, sourceExtent ext: CGRect
+    ) -> CGPoint {
+        guard let geo, !ext.isInfinite, ext.width > 0, ext.height > 0,
+              geo.rotateDeg != 0 || geo.crop != nil else { return p }
+
+        let crop: CGRect
+        if let r = geo.crop {
+            crop = CGRect(x: ext.origin.x + r.x * ext.width,
+                          y: ext.origin.y + (1 - r.y - r.height) * ext.height,
+                          width: r.width * ext.width, height: r.height * ext.height)
+        } else {
+            crop = largestInscribedRect(ext, angleDeg: geo.rotateDeg)
+        }
+
+        // Framed-normalised → a point in the rotated space (Core Image's bottom-left origin).
+        let rx = crop.minX + p.x * crop.width
+        let ry = crop.minY + (1 - p.y) * crop.height
+
+        // Undo the rotation `applyGeometry` applied about the source centre.
+        let rad = -geo.rotateDeg * .pi / 180          // same sign convention as applyGeometry
+        let c = CGPoint(x: ext.midX, y: ext.midY)
+        let dx = rx - c.x, dy = ry - c.y
+        let cosA = cos(-rad), sinA = sin(-rad)
+        let sx = c.x + dx * cosA - dy * sinA
+        let sy = c.y + dx * sinA + dy * cosA
+
+        return CGPoint(x: (sx - ext.origin.x) / ext.width,
+                       y: 1 - (sy - ext.origin.y) / ext.height)
+    }
+
+    /// The forward pair of `sourceNormalized`: where a point on the SOURCE image appears in the
+    /// FRAMED (post-geometry) image. Used to draw a mask's handles on the straightened preview.
+    public static func framedNormalized(
+        fromSource p: CGPoint, geometry geo: Geometry?, sourceExtent ext: CGRect
+    ) -> CGPoint {
+        guard let geo, !ext.isInfinite, ext.width > 0, ext.height > 0,
+              geo.rotateDeg != 0 || geo.crop != nil else { return p }
+
+        let crop: CGRect
+        if let r = geo.crop {
+            crop = CGRect(x: ext.origin.x + r.x * ext.width,
+                          y: ext.origin.y + (1 - r.y - r.height) * ext.height,
+                          width: r.width * ext.width, height: r.height * ext.height)
+        } else {
+            crop = largestInscribedRect(ext, angleDeg: geo.rotateDeg)
+        }
+        guard crop.width > 0, crop.height > 0 else { return p }
+
+        // Source-normalised → Core Image point, then rotate exactly as applyGeometry does.
+        let sx = ext.origin.x + p.x * ext.width
+        let sy = ext.origin.y + (1 - p.y) * ext.height
+        let rad = -geo.rotateDeg * .pi / 180
+        let c = CGPoint(x: ext.midX, y: ext.midY)
+        let dx = sx - c.x, dy = sy - c.y
+        let rx = c.x + dx * cos(rad) - dy * sin(rad)
+        let ry = c.y + dx * sin(rad) + dy * cos(rad)
+
+        return CGPoint(x: (rx - crop.minX) / crop.width,
+                       y: 1 - (ry - crop.minY) / crop.height)
+    }
+
     /// The largest axis-aligned rectangle (same aspect as `r`) that fits inside `r` after it is
     /// rotated by `angleDeg`, centred — so straightening leaves no black wedges in the corners.
-    static func largestInscribedRect(_ r: CGRect, angleDeg: Double) -> CGRect {
+    public static func largestInscribedRect(_ r: CGRect, angleDeg: Double) -> CGRect {
         let angle = abs(angleDeg) * .pi / 180
         let w = r.width, h = r.height
         guard angle > 1e-6 else { return r }

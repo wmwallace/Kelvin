@@ -404,12 +404,26 @@ final class AppState: ObservableObject {
 
     // MARK: Canvas coordinate mapping (view ⇄ normalised image space)
 
+    /// The geometry currently applied to the preview (nil when the photo isn't straightened).
+    var activeGeometry: Geometry? {
+        straighten != 0 ? Geometry(rotateDeg: straighten, crop: nil, lensCorrection: false) : nil
+    }
+
+    /// The extent of the image AS DISPLAYED — after straighten/crop. The preview shows the framed
+    /// result, so the letterbox must use its aspect, not the uncropped source's.
+    private var framedExtent: CGRect {
+        guard let proxy = proxyCI else { return .zero }
+        guard straighten != 0 else { return proxy.extent }
+        return Renderer.largestInscribedRect(proxy.extent, angleDeg: straighten)
+    }
+
     /// The rectangle the image actually occupies inside the padded preview area, accounting for
     /// the current zoom + pan — so on-canvas masks and brush strokes stay aligned when zoomed.
     func imageRect(in container: CGSize, pad: CGFloat = 24) -> CGRect {
         let availW = container.width - 2 * pad, availH = container.height - 2 * pad
-        guard let proxy = proxyCI, availW > 0, availH > 0 else { return .zero }
-        let aspect = proxy.extent.width / proxy.extent.height
+        let framed = framedExtent
+        guard framed.width > 0, framed.height > 0, availW > 0, availH > 0 else { return .zero }
+        let aspect = framed.width / framed.height
         var w = availW, h = availH
         if aspect > availW / availH { h = availW / aspect } else { w = availH * aspect }
         w *= zoom; h *= zoom
@@ -420,11 +434,21 @@ final class AppState: ObservableObject {
 
     func resetZoom() { zoom = 1; pan = .zero }
     func setZoom(_ z: Double) { zoom = min(8, max(1, z)); if zoom == 1 { pan = .zero } }
+    /// Mask coordinates are stored in SOURCE space (masks are applied before geometry), while the
+    /// preview shows the FRAMED image — so both directions route through the renderer's geometry
+    /// transform. Without this a mask placed on a straightened photo lands offset.
     func normToView(_ nx: Double, _ ny: Double, in rect: CGRect) -> CGPoint {
-        CGPoint(x: rect.minX + nx * rect.width, y: rect.minY + ny * rect.height)
+        let f = Renderer.framedNormalized(fromSource: CGPoint(x: nx, y: ny),
+                                          geometry: activeGeometry,
+                                          sourceExtent: proxyCI?.extent ?? .zero)
+        return CGPoint(x: rect.minX + f.x * rect.width, y: rect.minY + f.y * rect.height)
     }
     func viewToNorm(_ p: CGPoint, in rect: CGRect) -> (Double, Double) {
-        (Double((p.x - rect.minX) / rect.width), Double((p.y - rect.minY) / rect.height))
+        guard rect.width > 0, rect.height > 0 else { return (0.5, 0.5) }
+        let framed = CGPoint(x: (p.x - rect.minX) / rect.width, y: (p.y - rect.minY) / rect.height)
+        let s = Renderer.sourceNormalized(fromFramed: framed, geometry: activeGeometry,
+                                          sourceExtent: proxyCI?.extent ?? .zero)
+        return (Double(s.x), Double(s.y))
     }
 
     private func withMask(_ id: UUID, _ body: (inout UserMaskVM) -> Void) {
@@ -439,8 +463,13 @@ final class AppState: ObservableObject {
         guard let m = userMasks.first(where: { $0.id == id }) else { return }
         let c = normToView(m.cx, m.cy, in: rect)
         let distPx = ((p.x - c.x) * (p.x - c.x) + (p.y - c.y) * (p.y - c.y)).squareRoot()
-        let minEdge = min(rect.width, rect.height)
-        withMask(id) { $0.radius = min(1.2, max(0.05, Double(distPx / minEdge))) }
+        // The drag is measured against the FRAMED image on screen, but `radius` is a fraction of
+        // the SOURCE image's short edge (masks live in source space) — rescale when cropped.
+        let framed = framedExtent, source = proxyCI?.extent ?? framed
+        let frac = distPx / min(rect.width, rect.height)
+        let scale = min(source.width, source.height) > 0
+            ? min(framed.width, framed.height) / min(source.width, source.height) : 1
+        withMask(id) { $0.radius = min(1.2, max(0.05, Double(frac) * Double(scale))) }
     }
     /// Rotate a linear mask so its gradient direction points at the dragged handle.
     func rotateLinear(_ id: UUID, handleAt p: CGPoint, in rect: CGRect) {
@@ -481,20 +510,22 @@ final class AppState: ObservableObject {
     /// stamps.
     func paintAt(_ loc: CGPoint, container: CGSize, pad: CGFloat = 24) {
         guard let pid = paintingMaskId,
-              let idx = userMasks.firstIndex(where: { $0.id == pid }),
-              let proxy = proxyCI else { return }
-        let availW = container.width - 2 * pad, availH = container.height - 2 * pad
-        guard availW > 0, availH > 0 else { return }
-        let imgAspect = proxy.extent.width / proxy.extent.height
-        var dispW = availW, dispH = availH
-        if imgAspect > availW / availH { dispH = availW / imgAspect } else { dispW = availH * imgAspect }
-        let ox = pad + (availW - dispW) / 2, oy = pad + (availH - dispH) / 2
-        let nx = (loc.x - ox) / dispW, ny = (loc.y - oy) / dispH
+              let idx = userMasks.firstIndex(where: { $0.id == pid }) else { return }
+        // Use the SHARED mapping so painting honours zoom, pan, and straighten exactly like the
+        // on-canvas handles do. (It used to do its own letterbox math and ignored all three.)
+        let rect = imageRect(in: container, pad: pad)
+        guard rect.width > 0, rect.height > 0 else { return }
+        let framedX = (loc.x - rect.minX) / rect.width
+        let framedY = (loc.y - rect.minY) / rect.height
+        guard framedX >= 0, framedX <= 1, framedY >= 0, framedY <= 1 else { return }
+        let (nx, ny) = viewToNorm(loc, in: rect)
         guard nx >= 0, nx <= 1, ny >= 0, ny <= 1 else { return }
-        // Throttle: skip if the last stamp is closer than ~⅓ of the brush radius.
+        // Throttle: skip if the last stamp is closer than ~⅓ of the brush radius. Scale by zoom so
+        // the stroke stays smooth when zoomed in (a screen-inch covers less of the image).
+        let minStep = brushRadius * 0.33 / max(1, zoom)
         if let last = userMasks[idx].stamps.last {
             let dx = last.x - nx, dy = last.y - ny
-            if (dx * dx + dy * dy).squareRoot() < brushRadius * 0.33 { return }
+            if (dx * dx + dy * dy).squareRoot() < minStep { return }
         }
         userMasks[idx].stamps.append(BrushStamp(x: nx, y: ny, radius: brushRadius, hardness: 0.6))
         onEdit()
@@ -629,6 +660,7 @@ final class AppState: ObservableObject {
                                                         style: style, subjectLuma: m.subjectLuma,
                                                         skyLuma: m.skyLuma, iso: ExifReader.iso(url: file))
                     applyTweaks(tweaks, to: &recipe.global)
+                    applyLookBeyondGlobals(to: &recipe)
                     // Sensor dust sits at the same normalised position on every frame of a shoot,
                     // so the spots found on the reference photo heal the whole batch.
                     recipe.heal = (removeDust && !healSpots.isEmpty) ? healSpots : nil
@@ -636,7 +668,7 @@ final class AppState: ObservableObject {
                     let out = outputDir.appendingPathComponent(file.deletingPathExtension().lastPathComponent)
                         .appendingPathExtension("jpg")
                     try ImageWriter.write(Renderer.render(image, with: recipe, maskBitmaps: masks),
-                                          to: out, format: .jpeg(quality: 0.92))
+                                          to: out, format: .jpeg(quality: 0.97))
                     written.append(out)
                 } catch {
                     failures.append(BatchApply.Failure(source: file, message: "\(error)"))
@@ -649,6 +681,32 @@ final class AppState: ObservableObject {
             statusMessage = "Batch failed — \(error.localizedDescription)"
         }
         isProcessing = false
+    }
+
+    /// Carry the parts of the look that AREN'T global slider values onto a batch photo: the colour
+    /// mixer, straighten, the user's hand-made masks, and their on/off + strength decisions for the
+    /// auto masks. Without this, "apply this look to the shoot" silently dropped everything except
+    /// the basic sliders.
+    ///
+    /// Note the split that makes batch intelligent: the auto subject/sky masks are REGENERATED per
+    /// photo by the engine (so they land on this frame's subject and sky), while the user's masks
+    /// carry over as authored — semantic ones (colour/luma/skin/background) re-select against each
+    /// new photo automatically, and positional ones (radial/graduated/brush) hold their placement,
+    /// which is what syncing a local adjustment across a shoot means.
+    private func applyLookBeyondGlobals(to recipe: inout Recipe) {
+        if !hsl.isEmpty { recipe.hsl = hsl }
+        if straighten != 0 {
+            recipe.geometry = Geometry(rotateDeg: straighten, crop: nil, lensCorrection: false)
+        }
+        // Honour the reference photo's auto-mask toggles/strengths, then append the user's masks.
+        var ms = (recipe.masks ?? []).compactMap { m -> Mask? in
+            guard maskEnabled[m.id] ?? true else { return nil }
+            var m = m
+            if let pct = maskStrength[m.id] { m.opacity = min(1, max(0, pct / 100)) }
+            return m
+        }
+        ms += userMasks.map { $0.toMask() }
+        recipe.masks = ms.isEmpty ? nil : ms
     }
 
     /// The manual edits as a DIFF from the candidate Kelvin generated — carried onto every batch
