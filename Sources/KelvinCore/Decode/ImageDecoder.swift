@@ -46,6 +46,12 @@ public enum ImageDecoder {
             guard let filter = CIRAWFilter(imageURL: url) else {
                 throw Error.rawDecodeFailed(url)
             }
+            // Apply the vendor's lens profile when the file carries one: geometric distortion and
+            // vignette correction, computed by Apple from per-lens data. This is exactly the RAW
+            // work we don't build ourselves (non-negotiable #2) — enable it and take it for free.
+            if filter.isLensCorrectionSupported {
+                filter.isLensCorrectionEnabled = true
+            }
             guard let image = filter.outputImage else {
                 throw Error.rawDecodeFailed(url)
             }
