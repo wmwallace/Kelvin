@@ -60,7 +60,12 @@ public enum Evaluator {
             // The engine — the thing under test — is scored only when the entry carries a
             // hand-labelled perception JSON. Statistics are measured from the source, so the
             // engine sees exactly what it will see in production: judgments + a histogram.
-            if let perceptionURL = corpus.perceptionURL(for: entry) {
+            // Score the engine only when a perception label is actually present. A manifest may
+            // reference labels that haven't been generated yet (e.g. a degradation corpus written
+            // before `kelvin-perceive label` runs), so a missing file skips the engine rather
+            // than failing the whole eval.
+            if let perceptionURL = corpus.perceptionURL(for: entry),
+               FileManager.default.fileExists(atPath: perceptionURL.path) {
                 let perception = try PerceptionIO.load(from: perceptionURL)
                 let stats = try ImageStatistics.compute(source)
 

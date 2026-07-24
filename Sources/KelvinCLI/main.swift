@@ -25,6 +25,7 @@ func printUsage() {
       \(tool) candidates --in <image> --perception <perception.json> --out-dir <dir>
       \(tool) batch --in-dir <dir> --recipe <recipe.json> --out-dir <dir> [--format png|jpg]
       \(tool) corpus-init --root <dir> --references <a,b,c> [--source <dir>] [--perception <dir>]
+      \(tool) corpus-degrade --in-dir <good-photos> --out-dir <corpus>
       \(tool) eval --corpus <dir> [--out <report.json>] [--engine-version <v>]
 
     render options:
@@ -55,6 +56,10 @@ func printUsage() {
       --perception  Optional subfolder of per-image perception JSON (<id>.json).
       --camera      Optional subfolder of manufacturer JPEGs (<id>.jpg).
       --out         Where to write manifest.json. Default <root>/manifest.json.
+
+    corpus-degrade options (commercial-clean: good photos → degraded sources + originals):
+      --in-dir      Folder of good photographs you own (references). Required.
+      --out-dir     Where to write reference/, source/, and manifest.json. Required.
 
     eval options:
       --corpus          Directory containing a manifest.json. Required.
@@ -214,6 +219,28 @@ case "corpus-init":
         print("Wrote manifest with \(manifest.entries.count) entries "
             + "(\(references.count) experts each, \(labelled) with perception labels) to "
             + (outURL?.path ?? root.appendingPathComponent("manifest.json").path))
+    } catch {
+        fail("\(error)")
+    }
+
+case "corpus-degrade":
+    let rest = Array(arguments.dropFirst())
+
+    guard let inDir = value(for: "--in-dir", in: rest) else { fail("corpus-degrade requires --in-dir") }
+    guard let outDir = value(for: "--out-dir", in: rest) else { fail("corpus-degrade requires --out-dir") }
+
+    do {
+        let photos = try BatchApply.imageFiles(in: URL(fileURLWithPath: inDir, isDirectory: true))
+        guard !photos.isEmpty else { fail("no images in \(inDir)") }
+        let manifest = try DegradationCorpus.build(
+            goodPhotos: photos,
+            outputDir: URL(fileURLWithPath: outDir, isDirectory: true)
+        )
+        let photoCount = Set(manifest.entries.map { $0.id.components(separatedBy: "__").first ?? $0.id }).count
+        print("Built degradation corpus: \(photoCount) photo(s) × \(DegradationCorpus.standard.count) "
+            + "degradations = \(manifest.entries.count) entries in \(outDir)")
+        print("Next: kelvin-perceive label --in-dir \(outDir)/source --out-dir \(outDir)/perception")
+        print("Then: \(tool) eval --corpus \(outDir)")
     } catch {
         fail("\(error)")
     }
