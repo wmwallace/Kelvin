@@ -52,9 +52,9 @@ public enum Renderer {
             let w = g.whites / 100.0
             img = img.applyingFilter("CIToneCurve", parameters: [
                 "inputPoint0": CIVector(x: 0.0, y: 0.0),
-                "inputPoint1": CIVector(x: 0.25, y: clamp01(0.25 + b * 0.15)),
+                "inputPoint1": CIVector(x: 0.25, y: clamp01(0.25 + b * 0.22)),
                 "inputPoint2": CIVector(x: 0.5, y: 0.5),
-                "inputPoint3": CIVector(x: 0.75, y: clamp01(0.75 + w * 0.15)),
+                "inputPoint3": CIVector(x: 0.75, y: clamp01(0.75 + w * 0.22)),
                 "inputPoint4": CIVector(x: 1.0, y: 1.0)
             ])
         }
@@ -62,7 +62,7 @@ public enum Renderer {
         // Contrast and saturation (CIColorControls, neutral 1.0 / 1.0). Brightness stays 0.
         if g.contrast != 0 || g.saturation != 0 {
             img = img.applyingFilter("CIColorControls", parameters: [
-                kCIInputContrastKey: 1.0 + (g.contrast / 100.0) * 0.5,
+                kCIInputContrastKey: 1.0 + (g.contrast / 100.0) * 0.6,
                 kCIInputSaturationKey: 1.0 + (g.saturation / 100.0),
                 kCIInputBrightnessKey: 0.0
             ])
