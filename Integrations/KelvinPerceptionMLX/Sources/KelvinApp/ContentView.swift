@@ -139,6 +139,62 @@ final class AppState: ObservableObject {
     @Published var maskEnabled: [String: Bool] = [:]
     @Published var maskStrength: [String: Double] = [:]
     private var baseMasks: [Mask] = []
+    /// Per-mask local adjustments the user has edited, keyed by mask id then by adjustment name.
+    /// The engine proposes values (a sky mask arrives with highlights pulled down); these are the
+    /// overrides on top, so an untouched mask keeps exactly what the engine chose.
+    @Published var maskAdjustments: [String: [String: Double]] = [:]
+    @Published var maskFeather: [String: Double] = [:]
+    @Published var maskInvert: [String: Bool] = [:]
+
+    /// Every local adjustment the renderer honours inside a mask, in the order a photographer
+    /// works: light first, then colour. Keys must match `Renderer.applyMaskedAdjustments`.
+    static let maskAdjustmentSpecs: [(key: String, label: String, range: ClosedRange<Double>, unit: String)] = [
+        ("exposure_ev", "Exposure",   -3...3,      " EV"),
+        // RECOVERY ONLY, and the range says so. `CIHighlightShadowAdjust`'s highlight amount is
+        // documented 0…1 with 1.0 meaning "no change", so the renderer's `1.0 + highlights/100`
+        // clamps for any positive value and does exactly nothing — measured at ΔE 0.0. Offering a
+        // slider that is dead across half its travel is worse than offering a shorter one.
+        ("highlights",  "Highlight recovery", -100...0, ""),
+        ("shadows",     "Shadows",    -100...100,  ""),
+        ("contrast",    "Contrast",   -100...100,  ""),
+        ("saturation",  "Saturation", -100...100,  ""),
+        ("vibrance",    "Vibrance",   -100...100,  "")
+    ]
+
+    /// Binding for one adjustment of one mask, falling back to the engine's own value.
+    func maskAdjustmentBinding(_ maskId: String, _ key: String) -> Binding<Double> {
+        Binding(
+            get: {
+                if let v = self.maskAdjustments[maskId]?[key] { return v }
+                return self.baseMasks.first { $0.id == maskId }?.adjustments[key] ?? 0
+            },
+            set: { newValue in
+                var all = self.maskAdjustments[maskId]
+                    ?? self.baseMasks.first { $0.id == maskId }?.adjustments ?? [:]
+                all[key] = newValue
+                self.maskAdjustments[maskId] = all
+            })
+    }
+
+    func maskFeatherBinding(_ maskId: String) -> Binding<Double> {
+        Binding(get: { self.maskFeather[maskId]
+                        ?? self.baseMasks.first { $0.id == maskId }?.feather ?? 0 },
+                set: { self.maskFeather[maskId] = $0 })
+    }
+
+    func maskInvertBinding(_ maskId: String) -> Binding<Bool> {
+        Binding(get: { self.maskInvert[maskId]
+                        ?? self.baseMasks.first { $0.id == maskId }?.invert ?? false },
+                set: { self.maskInvert[maskId] = $0 })
+    }
+
+    /// Put one mask back to exactly what the engine proposed.
+    func resetMask(_ maskId: String) {
+        maskAdjustments.removeValue(forKey: maskId)
+        maskFeather.removeValue(forKey: maskId)
+        maskInvert.removeValue(forKey: maskId)
+        onEdit()
+    }
     /// Hand-added parametric gradient masks (radial / linear) — the user's own local edits.
     @Published var userMasks: [UserMaskVM] = []
 
@@ -726,6 +782,7 @@ final class AppState: ObservableObject {
         baseMasks = candidate.baseRecipe.masks ?? []
         maskEnabled = Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, true) })
         maskStrength = Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, $0.opacity * 100) })
+        maskAdjustments = [:]; maskFeather = [:]; maskInvert = [:]
         updateActiveRecipe()
         resetHistory()          // the chosen candidate is the new base for undo
         // NOTE: selecting/browsing candidates does NOT record a pick — only a deliberate
@@ -741,6 +798,7 @@ final class AppState: ObservableObject {
         activeLookId = nil
         maskEnabled = Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, true) })
         maskStrength = Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, $0.opacity * 100) })
+        maskAdjustments = [:]; maskFeather = [:]; maskInvert = [:]
         updateActiveRecipe()
     }
 
@@ -1085,6 +1143,11 @@ final class AppState: ObservableObject {
             guard maskEnabled[m.id] ?? true else { return nil }
             var m = m
             m.opacity = clampStep((maskStrength[m.id] ?? m.opacity * 100) / 100, 0...1, 0.01)
+            // Whatever the user has dialled in for this mask overrides the engine's proposal.
+            // Absent = untouched, so the engine's own values stand.
+            if let edited = maskAdjustments[m.id] { m.adjustments = edited }
+            if let f = maskFeather[m.id] { m.feather = f }
+            if let inv = maskInvert[m.id] { m.invert = inv }
             return m
         }
         ms += userMasks.map { $0.toMask() }
@@ -2061,7 +2124,12 @@ struct ContentView: View {
                                           set: { appState.maskEnabled[mid] = $0 }),
                             strength: Binding(get: { appState.maskStrength[mid] ?? 100 },
                                               set: { appState.maskStrength[mid] = $0 }),
-                            onChange: appState.onEdit)
+                            onChange: appState.onEdit,
+                            maskId: mid,
+                            adjustment: { key in appState.maskAdjustmentBinding(mid, key) },
+                            feather: appState.maskFeatherBinding(mid),
+                            invert: appState.maskInvertBinding(mid),
+                            onReset: { appState.resetMask(mid) })
                     }
                     // Hand-drawn masks: gradient geometry or brush strokes + local adjustments.
                     ForEach($appState.userMasks) { $m in
@@ -2556,6 +2624,16 @@ struct MaskControl: View {
     @Binding var isOn: Bool
     @Binding var strength: Double
     let onChange: () -> Void
+    /// The full local adjustment set for this mask. Optional so the control still works for
+    /// callers that only want the toggle.
+    var maskId: String? = nil
+    var adjustment: ((String) -> Binding<Double>)? = nil
+    var feather: Binding<Double>? = nil
+    var invert: Binding<Bool>? = nil
+    var onReset: (() -> Void)? = nil
+    /// Folded by default. A subject mask usually needs nothing beyond the strength Kelvin chose,
+    /// and six sliders per mask unfolded would rebuild the wall of controls the sidebar just lost.
+    @State private var showAdjustments = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -2573,6 +2651,54 @@ struct MaskControl: View {
                 }
                 Slider(value: $strength, in: 0...100, step: 1) { editing in if !editing { onChange() } }
                     .tint(Theme.glow).controlSize(.small)
+
+                if let adjustment {
+                    Button {
+                        withAnimation(.easeOut(duration: 0.14)) { showAdjustments.toggle() }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 7, weight: .bold))
+                                .rotationEffect(.degrees(showAdjustments ? 90 : 0))
+                            Text("Adjust").font(Theme.mono(9, .semibold)).tracking(1)
+                            Spacer()
+                            if onReset != nil && showAdjustments {
+                                Button("Reset") { onReset?() }
+                                    .buttonStyle(.plain)
+                                    .font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
+                            }
+                        }
+                        .foregroundColor(Theme.inkDim)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    if showAdjustments {
+                        VStack(spacing: 10) {
+                            ForEach(AppState.maskAdjustmentSpecs, id: \.key) { spec in
+                                ToneSlider(label: spec.label,
+                                           value: adjustment(spec.key),
+                                           range: spec.range,
+                                           step: spec.key == "exposure_ev" ? 0.05 : 1,
+                                           unit: spec.unit,
+                                           onChange: onChange)
+                            }
+                            if let feather {
+                                ToneSlider(label: "Feather", value: feather, range: 0...100,
+                                           step: 1, unit: "", onChange: onChange)
+                            }
+                            if let invert {
+                                Toggle(isOn: invert) {
+                                    Text("Invert — adjust everything else")
+                                        .font(Theme.ui(11)).foregroundColor(Theme.inkDim)
+                                }
+                                .toggleStyle(.switch).tint(Theme.glow)
+                                .onChange(of: invert.wrappedValue) { _ in onChange() }
+                            }
+                        }
+                        .padding(.top, 2)
+                    }
+                }
             }
         }
         .padding(10)
