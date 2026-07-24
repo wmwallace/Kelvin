@@ -60,7 +60,8 @@ let package = Package(
             dependencies: [
                 "KelvinPerceptionMLX",
                 .product(name: "KelvinCore", package: "Kelvin")
-            ]
+            ],
+            resources: [.process("Resources")]   // AppIcon.png → Dock icon at runtime
         )
     ]
 )
