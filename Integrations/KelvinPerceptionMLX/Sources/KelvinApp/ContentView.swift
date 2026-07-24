@@ -695,6 +695,13 @@ final class AppState: ObservableObject {
             edit.blacks = c(edit.blacks - 6, -100...100)
         case .colorCast:
             edit.temperatureK = 5500; edit.tint = 0            // neutralise white balance
+        case .shadowDetailLost:
+            // A large part of the picture has gone to featureless black — not merely clipped, but
+            // too dark to read. Lift the shadow end and ease the contrast that drove it there;
+            // `.crushedShadows` is the same family, so the moves match, weighted toward the lift.
+            edit.shadows = c(edit.shadows + 20, -100...100)
+            edit.blacks = c(edit.blacks + 12, -100...100)
+            edit.contrast = c(edit.contrast - 6, -100...100)
 
         // Subject problems are fixed ON THE SUBJECT. Brightening the whole frame to rescue a
         // backlit face washes out the sky that made the picture worth taking — the correction has
