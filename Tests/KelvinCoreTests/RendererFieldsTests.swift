@@ -126,6 +126,54 @@ final class RendererFieldsTests: XCTestCase {
                           "a gradient mask should render from its shape with no supplied bitmap")
     }
 
+    // MARK: - Selection masks (colour / luminance range)
+
+    /// Left half red, right half blue.
+    private func redBlueImage(width: Int = 96, height: Int = 96) -> CIImage {
+        let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+        let bpr = width * 4
+        var px = [UInt8](repeating: 0, count: bpr * height)
+        for y in 0..<height {
+            for x in 0..<width {
+                let i = y * bpr + x * 4
+                if x < width / 2 { px[i] = 220; px[i + 1] = 30; px[i + 2] = 30 }
+                else { px[i] = 30; px[i + 1] = 30; px[i + 2] = 220 }
+                px[i + 3] = 255
+            }
+        }
+        let ctx = CGContext(data: &px, width: width, height: height, bitsPerComponent: 8,
+                            bytesPerRow: bpr, space: cs,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        return CIImage(cgImage: ctx.makeImage()!)
+    }
+
+    func testColorSelectionMaskTargetsOneHue() throws {
+        let source = redBlueImage()
+        let redBefore = try sampledLuma(source, at: 3, 8)
+        let blueBefore = try sampledLuma(source, at: 12, 8)
+        let mask = Mask(id: "c", type: "color", source: "selection", invert: false, feather: 0,
+                        opacity: 1.0, adjustments: ["exposure_ev": -2.2],
+                        selection: MaskSelection(kind: .color, center: 0.0, range: 0.12, softness: 0.1))
+        var r = Recipe.neutral; r.masks = [mask]
+        let out = Renderer.render(source, with: r, maskBitmaps: [:])
+        let redAfter = try sampledLuma(out, at: 3, 8)
+        let blueAfter = try sampledLuma(out, at: 12, 8)
+        XCTAssertLessThan(redAfter, redBefore - 15, "the red region (selected) should darken")
+        XCTAssertEqual(blueAfter, blueBefore, accuracy: 6, "the blue region should be untouched")
+    }
+
+    func testLuminanceSelectionMaskTargetsBrightness() throws {
+        // Select the highlights (~0.85) and darken. A bright frame is hit; a dark frame isn't.
+        let mask = Mask(id: "l", type: "luminance", source: "selection", invert: false, feather: 0,
+                        opacity: 1.0, adjustments: ["exposure_ev": -2.0],
+                        selection: MaskSelection(kind: .luminance, center: 0.85, range: 0.2, softness: 0.15))
+        var r = Recipe.neutral; r.masks = [mask]
+        let brightOut = try sampledLuma(Renderer.render(TestSupport.makeSolidImage(r: 235, g: 235, b: 235), with: r, maskBitmaps: [:]), at: 8, 8)
+        let darkOut = try sampledLuma(Renderer.render(TestSupport.makeSolidImage(r: 45, g: 45, b: 45), with: r, maskBitmaps: [:]), at: 8, 8)
+        XCTAssertLessThan(brightOut, 210, "bright pixels (selected) darken from 235")
+        XCTAssertEqual(darkOut, 45, accuracy: 8, "dark pixels are untouched")
+    }
+
     // MARK: - Geometry (straighten + crop)
 
     func testStraightenAutoCropsCorners() throws {

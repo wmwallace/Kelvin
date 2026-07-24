@@ -265,15 +265,18 @@ public struct Mask: Codable, Equatable, Sendable {
     /// A brush mask: the union of soft circular stamps laid down along the user's strokes. Still
     /// pure numbers (like HealSpot) — the renderer composites the stamps into the mask.
     public var stamps: [BrushStamp]?
+    /// A selection mask generated FROM the image by colour or luminance range — "adjust the reds",
+    /// "adjust the highlights". Parametric (a target + range), the renderer bakes it into a cube.
+    public var selection: MaskSelection?
 
     public init(
         id: String, type: String, source: String?, invert: Bool,
         feather: Double, opacity: Double, adjustments: [String: Double],
-        shape: MaskShape? = nil, stamps: [BrushStamp]? = nil
+        shape: MaskShape? = nil, stamps: [BrushStamp]? = nil, selection: MaskSelection? = nil
     ) {
         self.id = id; self.type = type; self.source = source; self.invert = invert
         self.feather = feather; self.opacity = opacity; self.adjustments = adjustments
-        self.shape = shape; self.stamps = stamps
+        self.shape = shape; self.stamps = stamps; self.selection = selection
     }
 
     public init(from decoder: Decoder) throws {
@@ -287,11 +290,37 @@ public struct Mask: Codable, Equatable, Sendable {
         adjustments = try c.decodeIfPresent([String: Double].self, forKey: .adjustments) ?? [:]
         shape = try c.decodeIfPresent(MaskShape.self, forKey: .shape)
         stamps = try c.decodeIfPresent([BrushStamp].self, forKey: .stamps)
+        selection = try c.decodeIfPresent(MaskSelection.self, forKey: .selection)
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, type, source, invert, feather, opacity, adjustments, shape, stamps
+        case id, type, source, invert, feather, opacity, adjustments, shape, stamps, selection
     }
+}
+
+/// A selection generated from the image itself: pixels within a colour (hue) or luminance range.
+/// `center`, `range`, `softness` are all normalised 0…1 (hue is 0…1 around the wheel). Parametric,
+/// so it serialises as numbers; the renderer bakes it into a colour cube.
+public struct MaskSelection: Codable, Equatable, Sendable {
+    public enum Kind: String, Codable, Sendable { case color, luminance }
+    public var kind: Kind
+    public var center: Double
+    public var range: Double
+    public var softness: Double
+
+    public init(kind: Kind, center: Double, range: Double = 0.08, softness: Double = 0.08) {
+        self.kind = kind; self.center = center; self.range = range; self.softness = softness
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        kind = (try? c.decode(Kind.self, forKey: .kind)) ?? .color
+        center = clamp(try c.decodeIfPresent(Double.self, forKey: .center) ?? 0.5, to: 0...1)
+        range = clamp(try c.decodeIfPresent(Double.self, forKey: .range) ?? 0.08, to: 0...1)
+        softness = clamp(try c.decodeIfPresent(Double.self, forKey: .softness) ?? 0.08, to: 0...1)
+    }
+
+    enum CodingKeys: String, CodingKey { case kind, center, range, softness }
 }
 
 /// One dab of the brush: a soft circle, normalised top-left origin. `radius` is a fraction of the

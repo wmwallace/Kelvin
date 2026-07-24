@@ -394,6 +394,8 @@ final class AppState: ObservableObject {
     func addUserMask(_ kind: UserMaskVM.Kind) {
         var m = UserMaskVM(kind: kind)
         m.exposure = -0.6
+        if kind == .colorRange { m.selCenter = 0.0; m.selRange = 0.1 }    // reds by default
+        if kind == .luminance { m.selCenter = 0.78; m.selRange = 0.2 }    // highlights by default
         userMasks.append(m)
         selectedUserMaskId = m.id                      // show its canvas handles
         if kind == .brush { paintingMaskId = m.id }    // brush: start painting right away
@@ -862,7 +864,7 @@ struct ContentView: View {
                 handle(at: CGPoint(x: center.x + dir.x * 54, y: center.y + dir.y * 54), small: true) {
                     appState.rotateLinear(mid, handleAt: $0, in: rect)
                 }
-            case .brush:
+            case .brush, .colorRange, .luminance:
                 EmptyView()
             }
         }
@@ -1071,13 +1073,17 @@ struct ContentView: View {
                             brushRadius: Binding(get: { appState.brushRadius },
                                                  set: { appState.brushRadius = $0 }))
                     }
-                    HStack(spacing: 8) {
-                        Button(action: { appState.addUserMask(.radial) }) { addMaskLabel("+ Radial") }
-                            .buttonStyle(.plain)
-                        Button(action: { appState.addUserMask(.linear) }) { addMaskLabel("+ Grad") }
-                            .buttonStyle(.plain)
-                        Button(action: { appState.addUserMask(.brush) }) { addMaskLabel("+ Brush") }
-                            .buttonStyle(.plain)
+                    VStack(spacing: 6) {
+                        HStack(spacing: 6) {
+                            Button(action: { appState.addUserMask(.radial) }) { addMaskLabel("+ Radial") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.linear) }) { addMaskLabel("+ Grad") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.brush) }) { addMaskLabel("+ Brush") }.buttonStyle(.plain)
+                        }
+                        HStack(spacing: 6) {
+                            Button(action: { appState.addUserMask(.colorRange) }) { addMaskLabel("+ Colour") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.luminance) }) { addMaskLabel("+ Luma") }.buttonStyle(.plain)
+                            Color.clear.frame(maxWidth: .infinity)
+                        }
                     }
                 }
 
@@ -1322,14 +1328,21 @@ struct EditSnapshot: Equatable {
 }
 
 struct UserMaskVM: Identifiable, Equatable {
-    enum Kind { case radial, linear, brush }
+    enum Kind { case radial, linear, brush, colorRange, luminance }
     let id = UUID()
     var kind: Kind
     var cx = 0.5, cy = 0.5, radius = 0.35, angle = 0.0, softness = 0.35
-    var stamps: [BrushStamp] = []          // brush only
+    var stamps: [BrushStamp] = []                       // brush only
+    var selCenter = 0.0, selRange = 0.1, selSoftness = 0.1   // colour / luminance selection
     var exposure = 0.0, contrast = 0.0, saturation = 0.0
 
-    var label: String { kind == .radial ? "Radial" : kind == .linear ? "Graduated" : "Brush" }
+    var label: String {
+        switch kind {
+        case .radial: return "Radial"; case .linear: return "Graduated"; case .brush: return "Brush"
+        case .colorRange: return "Colour range"; case .luminance: return "Luminance"
+        }
+    }
+    var hasCanvasHandles: Bool { kind == .radial || kind == .linear }
 
     func toMask() -> Mask {
         var adj: [String: Double] = [:]
@@ -1345,6 +1358,11 @@ struct UserMaskVM: Identifiable, Equatable {
             return Mask(id: id.uuidString, type: sk.rawValue, source: "gradient", invert: false,
                         feather: 0, opacity: 1, adjustments: adj,
                         shape: MaskShape(kind: sk, cx: cx, cy: cy, radius: radius, angle: angle, softness: softness))
+        case .colorRange, .luminance:
+            let k: MaskSelection.Kind = kind == .colorRange ? .color : .luminance
+            return Mask(id: id.uuidString, type: k.rawValue, source: "selection", invert: false,
+                        feather: 0, opacity: 1, adjustments: adj,
+                        selection: MaskSelection(kind: k, center: selCenter, range: selRange, softness: selSoftness))
         }
     }
 }
@@ -1402,6 +1420,15 @@ struct UserMaskEditor: View {
                 ToneSlider(label: "Center Y", value: $mask.cy, range: 0...1, step: 0.01, unit: "", onChange: onChange)
                 ToneSlider(label: "Angle", value: $mask.angle, range: 0...360, step: 1, unit: "°", onChange: onChange)
                 ToneSlider(label: "Softness", value: $mask.softness, range: 0...1, step: 0.01, unit: "", onChange: onChange)
+            case .colorRange:
+                // Hue picker (0…1 → the colour wheel) + how wide a band + edge softness.
+                ToneSlider(label: "Hue", value: $mask.selCenter, range: 0...1, step: 0.005, unit: "", onChange: onChange)
+                ToneSlider(label: "Range", value: $mask.selRange, range: 0.01...0.5, step: 0.005, unit: "", onChange: onChange)
+                ToneSlider(label: "Softness", value: $mask.selSoftness, range: 0...0.3, step: 0.005, unit: "", onChange: onChange)
+            case .luminance:
+                ToneSlider(label: "Brightness", value: $mask.selCenter, range: 0...1, step: 0.01, unit: "", onChange: onChange)
+                ToneSlider(label: "Range", value: $mask.selRange, range: 0.01...0.5, step: 0.005, unit: "", onChange: onChange)
+                ToneSlider(label: "Softness", value: $mask.selSoftness, range: 0...0.3, step: 0.005, unit: "", onChange: onChange)
             }
 
             Rectangle().fill(Theme.hairline).frame(height: 1)

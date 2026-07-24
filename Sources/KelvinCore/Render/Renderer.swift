@@ -154,10 +154,17 @@ public enum Renderer {
         // supplied the mask bitmap for that mask.
         for mask in recipe.masks ?? [] {
             guard mask.opacity > 0 else { continue }
-            // Parametric masks (brush stamps, gradients) generate their own bitmap here;
-            // segmentation masks (subject/sky) use the bitmap the caller supplied.
+            // Parametric masks (colour/luma selection, brush stamps, gradients) generate their own
+            // bitmap here; segmentation masks (subject/sky) use the bitmap the caller supplied.
             let bitmap: CIImage?
-            if let stamps = mask.stamps, !stamps.isEmpty {
+            if let sel = mask.selection, let cube = SelectionMask.makeData(sel) {
+                // The cube turns the current image into a white-where-selected mask.
+                bitmap = img.applyingFilter("CIColorCubeWithColorSpace", parameters: [
+                    "inputCubeDimension": SelectionMask.dimension,
+                    "inputCubeData": cube,
+                    "inputColorSpace": ImageWriter.outputColorSpace
+                ])
+            } else if let stamps = mask.stamps, !stamps.isEmpty {
                 bitmap = brushMask(stamps, extent: img.extent)
             } else if let shape = mask.shape {
                 bitmap = gradientMask(shape, extent: img.extent)
