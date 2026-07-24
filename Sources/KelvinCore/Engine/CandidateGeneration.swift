@@ -23,13 +23,14 @@ public extension RecipeEngine {
     static func candidates(
         perception p: Perception,
         statistics s: ImageStatistics,
+        subjectLuma: Double? = nil,
         engineVersion: String = version,
         perceptionHash: String? = nil,
         generatedAt: String? = nil
     ) -> [Recipe] {
         CandidateStyle.all.map { style in
             candidate(
-                perception: p, statistics: s, style: style,
+                perception: p, statistics: s, style: style, subjectLuma: subjectLuma,
                 engineVersion: engineVersion, perceptionHash: perceptionHash,
                 generatedAt: generatedAt
             )
@@ -41,6 +42,7 @@ public extension RecipeEngine {
         perception p: Perception,
         statistics s: ImageStatistics,
         style: CandidateStyle,
+        subjectLuma: Double? = nil,
         engineVersion: String = version,
         perceptionHash: String? = nil,
         generatedAt: String? = nil
@@ -76,7 +78,8 @@ public extension RecipeEngine {
             global: g,
             curve: nil,
             hsl: nil,
-            masks: nil,
+            // The subject lift is corrective — shared across every style.
+            masks: subjectMask(p, subjectLuma: subjectLuma).map { [$0] },
             detail: detail(p),
             geometry: nil
         )

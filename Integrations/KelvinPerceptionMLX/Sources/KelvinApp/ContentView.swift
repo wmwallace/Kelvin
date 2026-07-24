@@ -86,6 +86,9 @@ final class AppState: ObservableObject {
     @Published var imageURL: URL?
     @Published var fullResCI: CIImage?
     @Published var proxyCI: CIImage?
+    // Subject mask at proxy resolution (for live previews) and the measured subject brightness.
+    private var subjectMaskProxy: CIImage?
+    private var subjectLuma: Double?
     @Published var imageId: String = ""
     @Published var perception: Perception?
     @Published var candidates: [CandidateViewModel] = []
@@ -167,14 +170,22 @@ final class AppState: ObservableObject {
             let sampleBytes = try ImageMetrics.sample(proxy)
             let stats = ImageStatistics.compute(from: sampleBytes)
 
+            // Subject mask (for local edits). Generated on the proxy for fast previews; the
+            // measured subject brightness tells the engine whether to lift it.
+            let mask = SubjectMask.person(in: proxy)
+            self.subjectMaskProxy = mask
+            self.subjectLuma = mask.flatMap { SubjectMask.maskedMeanLuma(image: proxy, mask: $0) }
+            let proxyMasks = mask.map { ["subject": $0] } ?? [:]
+
             statusMessage = "Composing candidates…"
             // Clean candidates straight from the engine — no cross-image "profile". The way to
             // reuse an edit is to pick/tune one photo, then Batch apply that exact look.
-            let recipes = RecipeEngine.candidates(perception: perceptionRead, statistics: stats)
+            let recipes = RecipeEngine.candidates(perception: perceptionRead, statistics: stats,
+                                                  subjectLuma: self.subjectLuma)
 
             var models: [CandidateViewModel] = []
             for recipe in recipes {
-                let renderedCI = Renderer.render(proxy, with: recipe)
+                let renderedCI = Renderer.render(proxy, with: recipe, maskBitmaps: proxyMasks)
                 if let nsImage = ciToNSImage(renderedCI) {
                     models.append(CandidateViewModel(
                         id: recipe.id ?? UUID().uuidString,
@@ -220,7 +231,8 @@ final class AppState: ObservableObject {
         var finalRecipe = candidate.baseRecipe
         finalRecipe.global = g
         self.activeRecipe = finalRecipe
-        self.activePreviewImage = ciToNSImage(Renderer.render(proxy, with: finalRecipe))
+        let masks = subjectMaskProxy.map { ["subject": $0] } ?? [:]
+        self.activePreviewImage = ciToNSImage(Renderer.render(proxy, with: finalRecipe, maskBitmaps: masks))
     }
 
     func recordCurrentPick() {
@@ -247,7 +259,10 @@ final class AppState: ObservableObject {
         isProcessing = true
         statusMessage = "Rendering full resolution…"
         do {
-            try ImageWriter.write(Renderer.render(fullRes, with: recipe), to: exportURL)
+            // Regenerate the mask at full resolution so the local edit is crisp on export.
+            let masks = (recipe.masks?.isEmpty == false)
+                ? (SubjectMask.person(in: fullRes).map { ["subject": $0] } ?? [:]) : [:]
+            try ImageWriter.write(Renderer.render(fullRes, with: recipe, maskBitmaps: masks), to: exportURL)
             statusMessage = "Exported \(exportURL.lastPathComponent)"
             recordCurrentPick()   // exporting a look IS the deliberate choice worth learning from
         } catch {
@@ -278,11 +293,18 @@ final class AppState: ObservableObject {
                     let proxy = PerceptionProxy.downsample(image)
                     let perception = try await perceptionProvider.perceive(proxy)
                     let stats = try ImageStatistics.compute(proxy)
-                    var recipe = RecipeEngine.candidate(perception: perception, statistics: stats, style: style)
+                    // Per-photo subject mask — each frame gets its own local subject decision.
+                    let proxyMask = SubjectMask.person(in: proxy)
+                    let luma = proxyMask.flatMap { SubjectMask.maskedMeanLuma(image: proxy, mask: $0) }
+                    var recipe = RecipeEngine.candidate(perception: perception, statistics: stats,
+                                                        style: style, subjectLuma: luma)
                     applyTweaks(tweaks, to: &recipe.global)
+                    let masks = (recipe.masks?.isEmpty == false)
+                        ? (SubjectMask.person(in: image).map { ["subject": $0] } ?? [:]) : [:]
                     let out = outputDir.appendingPathComponent(file.deletingPathExtension().lastPathComponent)
                         .appendingPathExtension("jpg")
-                    try ImageWriter.write(Renderer.render(image, with: recipe), to: out, format: .jpeg(quality: 0.92))
+                    try ImageWriter.write(Renderer.render(image, with: recipe, maskBitmaps: masks),
+                                          to: out, format: .jpeg(quality: 0.92))
                     written.append(out)
                 } catch {
                     failures.append(BatchApply.Failure(source: file, message: "\(error)"))

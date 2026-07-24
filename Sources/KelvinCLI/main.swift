@@ -245,6 +245,32 @@ case "corpus-degrade":
         fail("\(error)")
     }
 
+case "mask":
+    // Debug/inspection: segment the subject and preview a local lift through the mask.
+    let rest = Array(arguments.dropFirst())
+    guard let inPath = value(for: "--in", in: rest) else { fail("mask requires --in") }
+    guard let outDirPath = value(for: "--out-dir", in: rest) else { fail("mask requires --out-dir") }
+    let outDir = URL(fileURLWithPath: outDirPath, isDirectory: true)
+    do {
+        let image = try ImageDecoder.decode(url: URL(fileURLWithPath: inPath))
+        guard let mask = SubjectMask.person(in: image) else { fail("no person found in \(inPath)") }
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        try ImageWriter.write(mask, to: outDir.appendingPathComponent("mask.png"), format: .png)
+        if let luma = SubjectMask.maskedMeanLuma(image: image, mask: mask) {
+            print(String(format: "subject mean luma: %.3f", luma))
+        }
+        let subjectMask = Mask(id: "subject", type: "subject", source: "segmentation",
+                               invert: false, feather: 15, opacity: 1.0,
+                               adjustments: ["exposure_ev": 0.7, "shadows": 25])
+        var recipe = Recipe.neutral
+        recipe.masks = [subjectMask]
+        let lifted = Renderer.render(image, with: recipe, maskBitmaps: ["subject": mask])
+        try ImageWriter.write(lifted, to: outDir.appendingPathComponent("lifted.png"), format: .png)
+        print("Wrote mask.png + lifted.png to \(outDir.path)")
+    } catch {
+        fail("\(error)")
+    }
+
 case "eval":
     let rest = Array(arguments.dropFirst())
 

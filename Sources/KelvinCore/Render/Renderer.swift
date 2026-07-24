@@ -17,6 +17,14 @@ public enum Renderer {
     /// white balance → exposure → highlight/shadow → whites/blacks → contrast/saturation →
     /// clarity → vibrance → curve. (Curve precedes HSL in the schema; HSL is a later milestone.)
     public static func render(_ image: CIImage, with recipe: Recipe) -> CIImage {
+        render(image, with: recipe, maskBitmaps: [:])
+    }
+
+    /// Render with local masks applied. `maskBitmaps` maps a recipe mask's `id` (or `type`) to a
+    /// grayscale mask image (white = affected) — supplied by the caller, since masks are
+    /// references, not stored bitmaps (invariant #6). A recipe mask with no supplied bitmap is
+    /// skipped, so the plain `render(_:with:)` remains a pure global render and the no-op holds.
+    public static func render(_ image: CIImage, with recipe: Recipe, maskBitmaps: [String: CIImage]) -> CIImage {
         let g = recipe.global
         var img = image
 
@@ -104,7 +112,63 @@ public enum Renderer {
             ])
         }
 
+        // Masked local adjustments (schema order: … HSL → masks). Applied only when the caller
+        // supplied the mask bitmap for that mask.
+        for mask in recipe.masks ?? [] {
+            guard mask.opacity > 0, let bitmap = maskBitmaps[mask.id] ?? maskBitmaps[mask.type] else { continue }
+            img = applyMaskedAdjustments(img, mask: mask, maskBitmap: bitmap)
+        }
+
         return img
+    }
+
+    /// Composite a locally-adjusted layer over `base` through a feathered mask.
+    static func applyMaskedAdjustments(_ base: CIImage, mask: Mask, maskBitmap: CIImage) -> CIImage {
+        let a = mask.adjustments
+        var layer = base
+        if let ev = a["exposure_ev"], ev != 0 {
+            layer = layer.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: ev])
+        }
+        if (a["highlights"] ?? 0) != 0 || (a["shadows"] ?? 0) != 0 {
+            layer = layer.applyingFilter("CIHighlightShadowAdjust", parameters: [
+                "inputHighlightAmount": 1.0 + (a["highlights"] ?? 0) / 100.0,
+                "inputShadowAmount": (a["shadows"] ?? 0) / 100.0
+            ])
+        }
+        if (a["contrast"] ?? 0) != 0 || (a["saturation"] ?? 0) != 0 {
+            layer = layer.applyingFilter("CIColorControls", parameters: [
+                kCIInputContrastKey: 1.0 + (a["contrast"] ?? 0) / 100.0 * 0.6,
+                kCIInputSaturationKey: 1.0 + (a["saturation"] ?? 0) / 100.0,
+                kCIInputBrightnessKey: 0.0
+            ])
+        }
+        if let vib = a["vibrance"], vib != 0 {
+            layer = layer.applyingFilter("CIVibrance", parameters: ["inputAmount": vib / 100.0])
+        }
+
+        // Prepare the mask: invert, feather, then scale by opacity.
+        var m = mask.invert ? maskBitmap.applyingFilter("CIColorInvert") : maskBitmap
+        if mask.feather > 0 {
+            // Feather is 0…100; interpret it relative to image size so the soft edge looks the
+            // same on a 768px proxy and a full-res export.
+            let minEdge = min(maskBitmap.extent.width, maskBitmap.extent.height)
+            let radius = max(1.0, mask.feather / 100.0 * Double(minEdge) * 0.06)
+            m = m.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: radius])
+                 .cropped(to: maskBitmap.extent)
+        }
+        if mask.opacity < 1.0 {
+            let o = mask.opacity
+            m = m.applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: o, y: 0, z: 0, w: 0),
+                "inputGVector": CIVector(x: 0, y: o, z: 0, w: 0),
+                "inputBVector": CIVector(x: 0, y: 0, z: o, w: 0)
+            ])
+        }
+
+        return layer.applyingFilter("CIBlendWithMask", parameters: [
+            "inputBackgroundImage": base,
+            "inputMaskImage": m
+        ])
     }
 
     // MARK: - Helpers

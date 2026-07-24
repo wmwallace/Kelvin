@@ -29,6 +29,7 @@ public enum RecipeEngine {
     public static func recipe(
         perception p: Perception,
         statistics s: ImageStatistics,
+        subjectLuma: Double? = nil,
         engineVersion: String = version,
         perceptionHash: String? = nil,
         generatedAt: String? = nil
@@ -72,9 +73,32 @@ public enum RecipeEngine {
             global: g,
             curve: nil,
             hsl: nil,
-            masks: nil,
+            masks: subjectMask(p, subjectLuma: subjectLuma).map { [$0] },
             detail: detail(p),
             geometry: nil
+        )
+    }
+
+    /// A local subject lift — the classic professional move: brighten a backlit or underexposed
+    /// person without touching the background. Emitted (as a shared, corrective mask) when the
+    /// measured subject is darker than a flattering target, or perception flagged the subject as
+    /// underexposed. The actual mask bitmap is generated at render time (`SubjectMask`).
+    static func subjectMask(_ p: Perception, subjectLuma: Double?) -> Mask? {
+        guard let luma = subjectLuma, p.subject.present,
+              p.subject.type == .person || p.subject.type == .animal else { return nil }
+
+        let target = 0.55   // a flattering brightness for a face/subject
+        let needsLift = luma < target - 0.04 || p.problems.contains(.underexposedSubject)
+        guard needsLift else { return nil }
+
+        // Gentle local lift in stops, from how far the subject sits below target.
+        let ev = roundedClamp(log2(target / max(0.06, luma)) * 0.7, to: 0...1.1, step: 0.01)
+        guard ev > 0.06 else { return nil }
+
+        return Mask(
+            id: "subject", type: "subject", source: "segmentation", invert: false,
+            feather: 35, opacity: 1.0,
+            adjustments: ["exposure_ev": ev, "shadows": roundedClamp(ev * 30, to: 0...25, step: 1)]
         )
     }
 

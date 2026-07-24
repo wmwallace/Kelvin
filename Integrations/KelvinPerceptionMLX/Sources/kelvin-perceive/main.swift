@@ -89,8 +89,16 @@ if first == "label" {
         print(String(data: try encoder.encode(perception), encoding: .utf8) ?? "{}")
 
         let stats = try ImageStatistics.compute(image)
+
+        // Subject segmentation → local lift. Generate the mask once; measure the subject's
+        // brightness so the engine decides whether it needs lifting.
+        let subjectMask = SubjectMask.person(in: image)
+        let subjectLuma = subjectMask.flatMap { SubjectMask.maskedMeanLuma(image: image, mask: $0) }
+        if let luma = subjectLuma { note(String(format: "subject present, mean luma %.3f", luma)) }
+        let maskBitmaps = subjectMask.map { ["subject": $0] } ?? [:]
+
         let candidates = RecipeEngine.candidates(
-            perception: perception, statistics: stats,
+            perception: perception, statistics: stats, subjectLuma: subjectLuma,
             perceptionHash: PerceptionIO.hash(perception),
             generatedAt: ISO8601DateFormatter().string(from: Date())
         )
@@ -108,7 +116,7 @@ if first == "label" {
             let dir = URL(fileURLWithPath: args[1], isDirectory: true)
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             for recipe in candidates {
-                let rendered = Renderer.render(image, with: recipe)
+                let rendered = Renderer.render(image, with: recipe, maskBitmaps: maskBitmaps)
                 try ImageWriter.write(rendered, to: dir.appendingPathComponent((recipe.id ?? "candidate") + ".jpg"),
                                       format: .jpeg(quality: 0.9))
             }
