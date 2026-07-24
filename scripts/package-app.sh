@@ -8,9 +8,11 @@
 #
 # NOTE: live perception works when the app is launched from the package via
 #   `cd Integrations/KelvinPerceptionMLX && swift run kelvin-app`.
-# The double-clicked bundle currently crashes during MLX model load under LaunchServices
-# (no crash report; not resources or signing) — a known issue to resolve on-device with
-# Console/lldb. The bundle otherwise launches and the icon is correct.
+# The bundle launches fine (empty state, correct icon), but the FIRST perceive() —
+# loading the 2.9 GB model — terminates with NO crash report (ruled out: icon/Bundle.module,
+# metallib/resources, code-signing, foreground role). A SIGKILL with no report points at
+# jetsam/memory pressure or an MLX-in-GUI abort; diagnose on-device with Activity Monitor
+# (watch memory during load) or Console (filter for jetsam / the kelvin-app process).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

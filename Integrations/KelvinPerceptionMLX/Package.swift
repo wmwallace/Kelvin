@@ -60,8 +60,9 @@ let package = Package(
             dependencies: [
                 "KelvinPerceptionMLX",
                 .product(name: "KelvinCore", package: "Kelvin")
-            ],
-            resources: [.process("Resources")]   // AppIcon.png → Dock icon at runtime
+            ]
+            // Icon comes from the packaged .app's .icns (CFBundleIconFile) — no runtime
+            // Bundle.module lookup, which fatal-errors inside a hand-assembled bundle.
         )
     ]
 )
