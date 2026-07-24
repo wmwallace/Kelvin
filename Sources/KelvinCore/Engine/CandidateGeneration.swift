@@ -143,31 +143,31 @@ public struct CandidateStyle: Sendable, Equatable {
         whitesBias: 0, blacksBias: 0, wbStrengthScale: 1.0
     )
 
-    /// Colourful and punchy — noticeably more contrast and vibrance, brighter whites, deeper
-    /// blacks. The "make it pop" pick.
+    /// Colourful and clean — a touch more contrast and vibrance, slightly brighter whites and
+    /// deeper blacks. Punchy without going garish.
     public static let vivid = CandidateStyle(
         id: "vivid", label: "Vivid",
-        contrastScale: 1.2, contrastBias: 22,
-        vibranceScale: 1.4, vibranceBias: 18, saturationBias: 8,
-        whitesBias: 12, blacksBias: -16, wbStrengthScale: 1.0
+        contrastScale: 1.15, contrastBias: 12,
+        vibranceScale: 1.3, vibranceBias: 10, saturationBias: 3,
+        whitesBias: 6, blacksBias: -8, wbStrengthScale: 1.0
     )
 
-    /// Muted and airy — soft contrast, restrained colour, lifted (matte) blacks. A faded,
-    /// editorial film look that reads clearly apart from the others.
+    /// Muted and airy — softer contrast, restrained colour, gently lifted (matte) blacks. A
+    /// calm, editorial film look that still reads clearly apart from the others.
     public static let soft = CandidateStyle(
         id: "soft", label: "Soft",
-        contrastScale: 0.4, contrastBias: -26,
-        vibranceScale: 0.5, vibranceBias: -14, saturationBias: -16,
-        whitesBias: -10, blacksBias: 22, wbStrengthScale: 1.0
+        contrastScale: 0.6, contrastBias: -14,
+        vibranceScale: 0.65, vibranceBias: -8, saturationBias: -9,
+        whitesBias: -5, blacksBias: 13, wbStrengthScale: 1.0
     )
 
-    /// Moody and filmic — strong contrast, deep crushed blacks, restrained colour, and a hint
-    /// of the original cast kept for atmosphere.
+    /// Moody and filmic — deeper contrast and shadows, restrained colour, and a hint of the
+    /// original cast kept for atmosphere. Rich, not crushed.
     public static let dramatic = CandidateStyle(
         id: "dramatic", label: "Dramatic",
-        contrastScale: 1.35, contrastBias: 36,
-        vibranceScale: 0.85, vibranceBias: -6, saturationBias: -10,
-        whitesBias: 14, blacksBias: -30, wbStrengthScale: 0.7
+        contrastScale: 1.2, contrastBias: 20,
+        vibranceScale: 0.9, vibranceBias: -3, saturationBias: -5,
+        whitesBias: 7, blacksBias: -18, wbStrengthScale: 0.8
     )
 
     /// The candidate set, in display order (faithful first).

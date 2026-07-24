@@ -139,10 +139,6 @@ final class AppState: ObservableObject {
         statusMessage = "Decoding…"
         imageURL = url
         do {
-            let picks = (try? await store.loadAll()) ?? []
-            let profile = PreferenceLearner.learn(from: picks)
-            self.learnedProfile = profile
-
             let fullRes = try ImageDecoder.decode(url: url)
             self.fullResCI = fullRes
 
@@ -172,7 +168,9 @@ final class AppState: ObservableObject {
             let stats = ImageStatistics.compute(from: sampleBytes)
 
             statusMessage = "Composing candidates…"
-            let recipes = RecipeEngine.candidates(perception: perceptionRead, statistics: stats, profile: profile)
+            // Clean candidates straight from the engine — no cross-image "profile". The way to
+            // reuse an edit is to pick/tune one photo, then Batch apply that exact look.
+            let recipes = RecipeEngine.candidates(perception: perceptionRead, statistics: stats)
 
             var models: [CandidateViewModel] = []
             for recipe in recipes {
@@ -188,10 +186,7 @@ final class AppState: ObservableObject {
             self.candidates = models
             if let first = models.first { selectCandidate(id: first.id) }
 
-            let learned = profile.sampleCount >= PreferenceLearner.minSamples
-            statusMessage = learned
-                ? "Ready · tuned to \(profile.sampleCount) past picks"
-                : "Ready · hand-tuned baseline"
+            statusMessage = "Ready · pick a look, or Batch apply it to a folder"
         } catch {
             statusMessage = "Couldn't read that photo — \(error.localizedDescription)"
         }
@@ -204,7 +199,9 @@ final class AppState: ObservableObject {
         deltaExposure = 0; deltaContrast = 0; deltaHighlights = 0
         deltaShadows = 0; deltaVibrance = 0; deltaSaturation = 0
         updateActiveRecipe()
-        recordCurrentPick()
+        // NOTE: selecting/browsing candidates does NOT record a pick — only a deliberate
+        // choice (export) does. Recording on every selection floods the store with fake
+        // preferences and corrupts the learned profile.
     }
 
     func updateSliderDeltas() { updateActiveRecipe() }
@@ -252,6 +249,7 @@ final class AppState: ObservableObject {
         do {
             try ImageWriter.write(Renderer.render(fullRes, with: recipe), to: exportURL)
             statusMessage = "Exported \(exportURL.lastPathComponent)"
+            recordCurrentPick()   // exporting a look IS the deliberate choice worth learning from
         } catch {
             statusMessage = "Export failed — \(error.localizedDescription)"
         }
@@ -500,8 +498,7 @@ struct ContentView: View {
     private var sidebar: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                sectionLabel("Candidates", trailing: appState.learnedProfile.sampleCount >= PreferenceLearner.minSamples
-                             ? "learned" : "baseline")
+                sectionLabel("Candidates", trailing: nil)
                 VStack(spacing: 8) {
                     ForEach(appState.candidates) { candidate in
                         CandidateRow(candidate: candidate,

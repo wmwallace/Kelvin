@@ -84,18 +84,24 @@ public enum RecipeEngine {
     /// EV = log2(target / current) is the physically correct way to say "make it this much
     /// brighter," and it self-limits: a frame already near target barely moves.
     static func exposure(_ p: Perception, _ s: ImageStatistics) -> Double {
-        var target = exposureTarget(p.scene)
+        let median = max(0.02, s.medianLuma)
+        let flagged = p.problems.contains(.underexposedSubject) || p.problems.contains(.overexposed)
 
-        // Judgments nudge the target; the measured median still decides the magnitude.
+        // Leave a reasonably-exposed frame ALONE. A finished photo is already where the
+        // photographer wants it; nudging its exposure toward a generic target only fights their
+        // intent. Only act when the model flags an exposure problem, or the frame is clearly
+        // dark/bright outside this comfortable band.
+        if !flagged && median >= 0.30 && median <= 0.60 { return 0 }
+
+        var target = exposureTarget(p.scene)
         if p.problems.contains(.underexposedSubject) { target += 0.05 }
         if p.problems.contains(.overexposed) { target -= 0.06 }
 
-        let median = max(0.02, s.medianLuma)
-        let ev = log2(target / median)
-
-        // Bounded: global exposure is a blunt instrument (the real subject fix is a mask in a
-        // later milestone), so never swing more than ~1.2 stops off one statistic.
-        return roundedClamp(ev, to: -1.2...1.2, step: 0.01)
+        // Gentle pull (0.6), and a deadband so tiny corrections don't happen. Global exposure is
+        // a blunt instrument (the real subject fix is a later mask), so cap the swing.
+        let ev = log2(target / median) * 0.6
+        if abs(ev) < 0.12 { return 0 }
+        return roundedClamp(ev, to: -1.0...1.0, step: 0.01)
     }
 
     static func exposureTarget(_ scene: Scene) -> Double {
@@ -167,9 +173,9 @@ public enum RecipeEngine {
 
     static func sceneContrastBias(_ scene: Scene) -> Double {
         switch scene {
-        case .portrait:  return -4   // protect skin from getting crunchy
-        case .landscape: return 8
-        case .street:    return 6
+        case .portrait:  return -2   // protect skin from getting crunchy
+        case .landscape: return 3
+        case .street:    return 2
         default:         return 0
         }
     }
@@ -210,11 +216,13 @@ public enum RecipeEngine {
 
         // Deadband: don't chase tiny casts. Keeps neutral input a no-op and avoids adding a
         // WB filter pass that would only introduce rounding error.
+        // Only correct a clear cast — a small measured tint is usually the photographer's
+        // choice (warm golden light, cool shade), not an error to neutralise.
         let castMagnitude = (s.chromaA * s.chromaA + s.chromaB * s.chromaB).squareRoot()
-        guard strength > 0, castMagnitude > 2.5 else { return (nil, 0) }
+        guard strength > 0, castMagnitude > 6.0 else { return (nil, 0) }
 
-        let kelvin = 6500.0 + s.chromaB * 90.0 * strength
-        let tint = s.chromaA * 2.2 * strength
+        let kelvin = 6500.0 + s.chromaB * 70.0 * strength
+        let tint = s.chromaA * 1.8 * strength
 
         return (
             roundedClamp(kelvin, to: Ranges.temperatureK, step: 10),
@@ -249,19 +257,21 @@ public enum RecipeEngine {
         default: break
         }
         var v = intentVibranceBase(p.intent)
-        if p.problems.contains(.flat) { v += 8 }
-        if p.scene == .landscape { v += 4 }
+        if p.problems.contains(.flat) { v += 5 }
+        if p.scene == .landscape { v += 2 }
         // Never over-saturate skin: a person in frame caps vibrance.
-        if p.subject.type == .person { v = min(v, 10) }
+        if p.subject.type == .person { v = min(v, 6) }
         return roundedClamp(v, to: -20...30, step: 1)
     }
 
+    /// Gentle baselines — a faithful "Natural" only adds a touch of life; the Vivid style is
+    /// where colour gets pushed. Over-vibrant defaults are what made finished photos look wrong.
     static func intentVibranceBase(_ intent: Intent) -> Double {
         switch intent {
-        case .dramatic:           return 14
-        case .natural:            return 8
-        case .portraitFlattering: return 6
-        case .documentary:        return 4
+        case .dramatic:           return 6
+        case .natural:            return 4
+        case .portraitFlattering: return 3
+        case .documentary:        return 2
         case .archival, .productAccurate: return 0
         }
     }
