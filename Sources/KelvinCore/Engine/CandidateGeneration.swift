@@ -24,13 +24,15 @@ public extension RecipeEngine {
         perception p: Perception,
         statistics s: ImageStatistics,
         subjectLuma: Double? = nil,
+        skyLuma: Double? = nil,
         engineVersion: String = version,
         perceptionHash: String? = nil,
         generatedAt: String? = nil
     ) -> [Recipe] {
         CandidateStyle.all.map { style in
             candidate(
-                perception: p, statistics: s, style: style, subjectLuma: subjectLuma,
+                perception: p, statistics: s, style: style,
+                subjectLuma: subjectLuma, skyLuma: skyLuma,
                 engineVersion: engineVersion, perceptionHash: perceptionHash,
                 generatedAt: generatedAt
             )
@@ -43,6 +45,7 @@ public extension RecipeEngine {
         statistics s: ImageStatistics,
         style: CandidateStyle,
         subjectLuma: Double? = nil,
+        skyLuma: Double? = nil,
         engineVersion: String = version,
         perceptionHash: String? = nil,
         generatedAt: String? = nil
@@ -79,8 +82,8 @@ public extension RecipeEngine {
             global: g,
             curve: nil,
             hsl: nil,
-            // The subject lift is corrective — shared across every style.
-            masks: subjectMask(p, s, subjectLuma: subjectLuma).map { [$0] },
+            // Subject lift + sky treatment are corrective — shared across every style.
+            masks: localMasks(p, s, subjectLuma: subjectLuma, skyLuma: skyLuma),
             detail: detail(p),
             geometry: nil
         )

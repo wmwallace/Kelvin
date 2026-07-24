@@ -66,7 +66,12 @@ public enum BatchApply {
         for url in inputs.sorted(by: { $0.path < $1.path }) {
             do {
                 let image = try ImageDecoder.decode(url: url)
-                let rendered = Renderer.render(image, with: recipe)
+                // Re-segment subject + sky per photo so the recipe's local masks land on *this*
+                // frame's subject and sky, not the reference frame's — the masks adapt even when
+                // the recipe parameters are propagated verbatim.
+                let bitmaps = recipe.masks?.isEmpty == false
+                    ? LocalMasks.measure(in: image).bitmaps : [:]
+                let rendered = Renderer.render(image, with: recipe, maskBitmaps: bitmaps)
                 let out = outputDir
                     .appendingPathComponent(url.deletingPathExtension().lastPathComponent)
                     .appendingPathExtension(ext)

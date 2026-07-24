@@ -104,7 +104,10 @@ case "render":
     do {
         let image = try ImageDecoder.decode(url: inURL)
         let recipe = try RecipeIO.load(from: recipeURL)   // clamps on decode
-        let rendered = Renderer.render(image, with: recipe)
+        // Supply subject/sky bitmaps so any local masks the recipe references are applied; the
+        // renderer ignores masks it has no bitmap for, so measuring unconditionally is safe.
+        let measured = LocalMasks.measure(in: image)
+        let rendered = Renderer.render(image, with: recipe, maskBitmaps: measured.bitmaps)
         try ImageWriter.write(rendered, to: outURL)
         print("Wrote \(outURL.path)")
     } catch {
@@ -122,9 +125,12 @@ case "engine":
         let image = try ImageDecoder.decode(url: URL(fileURLWithPath: inPath))
         let stats = try ImageStatistics.compute(image)
         let perception = try PerceptionIO.load(from: URL(fileURLWithPath: perceptionPath))
+        let measured = LocalMasks.measure(in: image)
         let recipe = RecipeEngine.recipe(
             perception: perception,
             statistics: stats,
+            subjectLuma: measured.subjectLuma,
+            skyLuma: measured.skyLuma,
             perceptionHash: PerceptionIO.hash(perception),
             generatedAt: ISO8601DateFormatter().string(from: Date())
         )
@@ -147,21 +153,31 @@ case "candidates":
         let image = try ImageDecoder.decode(url: URL(fileURLWithPath: inPath))
         let stats = try ImageStatistics.compute(image)
         let perception = try PerceptionIO.load(from: URL(fileURLWithPath: perceptionPath))
+        let measured = LocalMasks.measure(in: image)
         // One perception, one statistics pass → N recipes (parameter swaps, no re-perception).
         let recipes = RecipeEngine.candidates(
             perception: perception,
             statistics: stats,
+            subjectLuma: measured.subjectLuma,
+            skyLuma: measured.skyLuma,
             perceptionHash: PerceptionIO.hash(perception),
             generatedAt: ISO8601DateFormatter().string(from: Date())
         )
 
         try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        // Optional: --render also writes a preview PNG per candidate (masks applied).
+        let alsoRender = rest.contains("--render")
         for recipe in recipes {
-            let name = (recipe.id ?? recipe.label ?? "candidate") + ".json"
-            try RecipeIO.save(recipe, to: outDir.appendingPathComponent(name))
+            let base = recipe.id ?? recipe.label ?? "candidate"
+            try RecipeIO.save(recipe, to: outDir.appendingPathComponent(base + ".json"))
+            if alsoRender {
+                let rendered = Renderer.render(image, with: recipe, maskBitmaps: measured.bitmaps)
+                try ImageWriter.write(rendered, to: outDir.appendingPathComponent(base + ".png"), format: .png)
+            }
         }
         let labels = recipes.map { $0.label ?? "?" }.joined(separator: ", ")
-        print("Wrote \(recipes.count) candidates to \(outDir.path) [\(labels)]")
+        let sky = measured.skyLuma.map { String(format: "sky luma %.2f", $0) } ?? "no sky"
+        print("Wrote \(recipes.count) candidates to \(outDir.path) [\(labels)] (\(sky))")
     } catch {
         fail("\(error)")
     }
@@ -267,6 +283,32 @@ case "mask":
         let lifted = Renderer.render(image, with: recipe, maskBitmaps: ["subject": mask])
         try ImageWriter.write(lifted, to: outDir.appendingPathComponent("lifted.png"), format: .png)
         print("Wrote mask.png + lifted.png to \(outDir.path)")
+    } catch {
+        fail("\(error)")
+    }
+
+case "sky":
+    // Debug/inspection: segment the sky and preview a local defog/recover through the mask.
+    let rest = Array(arguments.dropFirst())
+    guard let inPath = value(for: "--in", in: rest) else { fail("sky requires --in") }
+    guard let outDirPath = value(for: "--out-dir", in: rest) else { fail("sky requires --out-dir") }
+    let outDir = URL(fileURLWithPath: outDirPath, isDirectory: true)
+    do {
+        let image = try ImageDecoder.decode(url: URL(fileURLWithPath: inPath))
+        guard let mask = SkyMask.detect(in: image) else { fail("no sky found in \(inPath)") }
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        try ImageWriter.write(mask, to: outDir.appendingPathComponent("sky-mask.png"), format: .png)
+        if let luma = SubjectMask.maskedMeanLuma(image: image, mask: mask) {
+            print(String(format: "sky mean luma: %.3f", luma))
+        }
+        let skyEdit = Mask(id: "sky", type: "sky", source: "segmentation", invert: false,
+                           feather: 45, opacity: 1.0,
+                           adjustments: ["highlights": -40, "contrast": 14, "saturation": 12])
+        var recipe = Recipe.neutral
+        recipe.masks = [skyEdit]
+        let edited = Renderer.render(image, with: recipe, maskBitmaps: ["sky": mask])
+        try ImageWriter.write(edited, to: outDir.appendingPathComponent("sky-edit.png"), format: .png)
+        print("Wrote sky-mask.png + sky-edit.png to \(outDir.path)")
     } catch {
         fail("\(error)")
     }

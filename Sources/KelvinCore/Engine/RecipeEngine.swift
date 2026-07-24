@@ -30,6 +30,7 @@ public enum RecipeEngine {
         perception p: Perception,
         statistics s: ImageStatistics,
         subjectLuma: Double? = nil,
+        skyLuma: Double? = nil,
         engineVersion: String = version,
         perceptionHash: String? = nil,
         generatedAt: String? = nil
@@ -74,7 +75,7 @@ public enum RecipeEngine {
             global: g,
             curve: nil,
             hsl: nil,
-            masks: subjectMask(p, s, subjectLuma: subjectLuma).map { [$0] },
+            masks: localMasks(p, s, subjectLuma: subjectLuma, skyLuma: skyLuma),
             detail: detail(p),
             geometry: nil
         )
@@ -116,6 +117,51 @@ public enum RecipeEngine {
             // Shadows (detail recovery) weighted over raw exposure — kinder to skin at any tone.
             adjustments: ["exposure_ev": roundedClamp(ev * 0.7, to: 0...0.6, step: 0.01),
                           "shadows": roundedClamp(ev * 45, to: 0...35, step: 1)]
+        )
+    }
+
+    /// The local masks the engine attaches to a recipe, in render order (subject, then sky). Only
+    /// masks with a real correction are emitted; a recipe with none serialises `masks: nil`.
+    static func localMasks(
+        _ p: Perception, _ s: ImageStatistics, subjectLuma: Double?, skyLuma: Double?
+    ) -> [Mask]? {
+        let ms = [subjectMask(p, s, subjectLuma: subjectLuma),
+                  skyMask(p, s, skyLuma: skyLuma)].compactMap { $0 }
+        return ms.isEmpty ? nil : ms
+    }
+
+    /// Local sky treatment for outdoor scenes: recover a blown or veiled sky and give it gentle
+    /// contrast + colour so the haze lifts and the blue returns — *without* touching the
+    /// foreground. This is where atmospheric defog actually belongs: a global black-point test
+    /// can't see "the sky is veiled" when the same frame holds genuine darks (trees, rock), which
+    /// is exactly why global dehaze missed the foggy-coast frame. `skyLuma` is the mean luminance
+    /// under the sky mask; nil (no sky found) means nothing to do.
+    static func skyMask(_ p: Perception, _ s: ImageStatistics, skyLuma: Double?) -> Mask? {
+        let outdoor = p.scene == .landscape || p.scene == .street || p.scene == .other
+        guard outdoor, let luma = skyLuma else { return nil }
+
+        // Blown: the sky is near-white or the frame is clipping highlights. Veiled: a bright-ish
+        // sky sitting over a lifted black point, or the model called haze — the fog signature.
+        let blown = p.problems.contains(.blownHighlights) || luma > 0.82 || s.highlightClip > 0.03
+        let veiled = p.problems.contains(.haze) || (luma > 0.55 && s.blackPoint > 0.12)
+        guard blown || veiled else { return nil }
+
+        var adj: [String: Double] = [:]
+        if blown {
+            // Pull the sky's highlights down to reveal cloud structure. Negative → CIHighlightShadow
+            // darkens highlights (see applyMaskedAdjustments).
+            adj["highlights"] = roundedClamp(-((luma - 0.70) * 200 + 20), to: -70...0, step: 1)
+        }
+        if veiled {
+            adj["contrast"] = 12          // restore the local contrast fog flattens
+            adj["saturation"] = 10        // bring back the blue/tone haze washes toward grey
+        }
+        guard !adj.isEmpty else { return nil }
+
+        // A generous feather keeps the horizon soft; slightly hold back when only defogging.
+        return Mask(
+            id: "sky", type: "sky", source: "segmentation", invert: false,
+            feather: 45, opacity: (veiled && !blown) ? 0.85 : 1.0, adjustments: adj
         )
     }
 

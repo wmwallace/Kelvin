@@ -87,8 +87,10 @@ final class AppState: ObservableObject {
     @Published var fullResCI: CIImage?
     @Published var proxyCI: CIImage?
     // Subject mask at proxy resolution (for live previews) and the measured subject brightness.
-    private var subjectMaskProxy: CIImage?
+    /// Proxy-resolution subject/sky bitmaps for live previews (keyed "subject"/"sky").
+    private var proxyMaskBitmaps: [String: CIImage] = [:]
     private var subjectLuma: Double?
+    private var skyLuma: Double?
     @Published var imageId: String = ""
     @Published var perception: Perception?
     @Published var candidates: [CandidateViewModel] = []
@@ -170,18 +172,19 @@ final class AppState: ObservableObject {
             let sampleBytes = try ImageMetrics.sample(proxy)
             let stats = ImageStatistics.compute(from: sampleBytes)
 
-            // Subject mask (for local edits). Generated on the proxy for fast previews; the
-            // measured subject brightness tells the engine whether to lift it.
-            let mask = SubjectMask.person(in: proxy)
-            self.subjectMaskProxy = mask
-            self.subjectLuma = mask.flatMap { SubjectMask.maskedMeanLuma(image: proxy, mask: $0) }
-            let proxyMasks = mask.map { ["subject": $0] } ?? [:]
+            // Subject + sky masks (for local edits). Generated on the proxy for fast previews; the
+            // measured region brightness tells the engine whether to lift the subject or defog the sky.
+            let measured = LocalMasks.measure(in: proxy)
+            self.proxyMaskBitmaps = measured.bitmaps
+            self.subjectLuma = measured.subjectLuma
+            self.skyLuma = measured.skyLuma
+            let proxyMasks = measured.bitmaps
 
             statusMessage = "Composing candidates…"
             // Clean candidates straight from the engine — no cross-image "profile". The way to
             // reuse an edit is to pick/tune one photo, then Batch apply that exact look.
             let recipes = RecipeEngine.candidates(perception: perceptionRead, statistics: stats,
-                                                  subjectLuma: self.subjectLuma)
+                                                  subjectLuma: self.subjectLuma, skyLuma: self.skyLuma)
 
             var models: [CandidateViewModel] = []
             for recipe in recipes {
@@ -231,8 +234,7 @@ final class AppState: ObservableObject {
         var finalRecipe = candidate.baseRecipe
         finalRecipe.global = g
         self.activeRecipe = finalRecipe
-        let masks = subjectMaskProxy.map { ["subject": $0] } ?? [:]
-        self.activePreviewImage = ciToNSImage(Renderer.render(proxy, with: finalRecipe, maskBitmaps: masks))
+        self.activePreviewImage = ciToNSImage(Renderer.render(proxy, with: finalRecipe, maskBitmaps: proxyMaskBitmaps))
     }
 
     func recordCurrentPick() {
@@ -259,9 +261,8 @@ final class AppState: ObservableObject {
         isProcessing = true
         statusMessage = "Rendering full resolution…"
         do {
-            // Regenerate the mask at full resolution so the local edit is crisp on export.
-            let masks = (recipe.masks?.isEmpty == false)
-                ? (SubjectMask.person(in: fullRes).map { ["subject": $0] } ?? [:]) : [:]
+            // Regenerate masks at full resolution so the local edits are crisp on export.
+            let masks = (recipe.masks?.isEmpty == false) ? LocalMasks.measure(in: fullRes).bitmaps : [:]
             try ImageWriter.write(Renderer.render(fullRes, with: recipe, maskBitmaps: masks), to: exportURL)
             statusMessage = "Exported \(exportURL.lastPathComponent)"
             recordCurrentPick()   // exporting a look IS the deliberate choice worth learning from
@@ -293,14 +294,13 @@ final class AppState: ObservableObject {
                     let proxy = PerceptionProxy.downsample(image)
                     let perception = try await perceptionProvider.perceive(proxy)
                     let stats = try ImageStatistics.compute(proxy)
-                    // Per-photo subject mask — each frame gets its own local subject decision.
-                    let proxyMask = SubjectMask.person(in: proxy)
-                    let luma = proxyMask.flatMap { SubjectMask.maskedMeanLuma(image: proxy, mask: $0) }
+                    // Per-photo subject + sky masks — each frame gets its own local decisions.
+                    let m = LocalMasks.measure(in: proxy)
                     var recipe = RecipeEngine.candidate(perception: perception, statistics: stats,
-                                                        style: style, subjectLuma: luma)
+                                                        style: style, subjectLuma: m.subjectLuma,
+                                                        skyLuma: m.skyLuma)
                     applyTweaks(tweaks, to: &recipe.global)
-                    let masks = (recipe.masks?.isEmpty == false)
-                        ? (SubjectMask.person(in: image).map { ["subject": $0] } ?? [:]) : [:]
+                    let masks = (recipe.masks?.isEmpty == false) ? LocalMasks.measure(in: image).bitmaps : [:]
                     let out = outputDir.appendingPathComponent(file.deletingPathExtension().lastPathComponent)
                         .appendingPathExtension("jpg")
                     try ImageWriter.write(Renderer.render(image, with: recipe, maskBitmaps: masks),
