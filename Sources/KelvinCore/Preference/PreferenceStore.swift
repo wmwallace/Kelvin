@@ -71,7 +71,7 @@ public actor PreferenceStore {
         }
 
         if let handle = try? FileHandle(forWritingTo: logFileURL) {
-            defer { try? handle.closeFile() }
+            defer { try? handle.close() }
             try handle.seekToEnd()
             if let lineData = line.data(using: .utf8) {
                 try handle.write(contentsOf: lineData)
