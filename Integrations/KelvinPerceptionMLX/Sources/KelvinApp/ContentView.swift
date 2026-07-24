@@ -548,6 +548,31 @@ final class AppState: ObservableObject {
     @Published var lastRenderedCI: CIImage?
     private var craftToken = 0
 
+    /// Baked brush strokes, keyed by mask id, with the stamp count they were baked at. Compositing
+    /// a long stroke costs O(stamps) *per render* (18 ms at 1200 stamps — worse than the whole rest
+    /// of the pipeline), so it's flattened to a concrete bitmap once and reused until it changes.
+    private var brushCache: [UUID: (count: Int, image: CIImage)] = [:]
+
+    /// Pre-baked preview bitmaps for the user's brush masks, to hand the renderer.
+    private func brushBitmaps(extent: CGRect) -> [String: CIImage] {
+        var out: [String: CIImage] = [:]
+        var live = Set<UUID>()
+        for m in userMasks where m.kind == .brush && !m.stamps.isEmpty {
+            live.insert(m.id)
+            if let hit = brushCache[m.id], hit.count == m.stamps.count {
+                out[m.id.uuidString] = hit.image
+                continue
+            }
+            guard let composited = Renderer.brushMask(m.stamps, extent: extent),
+                  let cg = context.createCGImage(composited, from: extent) else { continue }
+            let flat = CIImage(cgImage: cg)          // concrete — breaks the O(N) filter chain
+            brushCache[m.id] = (m.stamps.count, flat)
+            out[m.id.uuidString] = flat
+        }
+        brushCache = brushCache.filter { live.contains($0.key) }   // drop deleted/cleared masks
+        return out
+    }
+
     /// Moves the thread-safe-but-not-Sendable Core Image inputs across the concurrency boundary.
     /// CIContext/CIImage are documented thread-safe, so this is sound.
     private struct RenderInput: @unchecked Sendable {
@@ -575,7 +600,9 @@ final class AppState: ObservableObject {
 
         if renderInFlight { renderDirty = true; return }
         renderInFlight = true
-        let input = RenderInput(recipe: finalRecipe, proxy: proxy, bitmaps: proxyMaskBitmaps)
+        // Segmentation bitmaps + any pre-baked brush strokes (so a long stroke stays O(1)/frame).
+        let bitmaps = proxyMaskBitmaps.merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked }
+        let input = RenderInput(recipe: finalRecipe, proxy: proxy, bitmaps: bitmaps)
         let ctx = context
         Task.detached(priority: .userInitiated) {
             let rendered = Renderer.render(input.proxy, with: input.recipe, maskBitmaps: input.bitmaps)

@@ -115,6 +115,23 @@ final class RendererFieldsTests: XCTestCase {
         XCTAssertLessThan(painted, elsewhere - 8, "the brushed region should carry the darken")
     }
 
+    /// A caller may hand in a pre-baked stroke under the mask's id (the app caches one so a long
+    /// stroke doesn't recomposite every frame). It must render identically to compositing the stamps.
+    func testSuppliedBrushBitmapMatchesCompositedStamps() throws {
+        let source = TestSupport.makeSolidImage(r: 150, g: 150, b: 150, width: 96, height: 96)
+        let stamps = (0..<12).map { BrushStamp(x: 0.2 + Double($0) * 0.03, y: 0.5, radius: 0.1, hardness: 0.6) }
+        let mask = Mask(id: "stroke", type: "brush", source: "brush", invert: false, feather: 0,
+                        opacity: 1.0, adjustments: ["exposure_ev": -1.4], stamps: stamps)
+        var r = Recipe.neutral; r.masks = [mask]
+
+        let composited = Renderer.render(source, with: r, maskBitmaps: [:])
+        let baked = Renderer.brushMask(stamps, extent: source.extent)
+        XCTAssertNotNil(baked)
+        let supplied = Renderer.render(source, with: r, maskBitmaps: ["stroke": baked!])
+        XCTAssertEqual(try bytes(supplied), try bytes(composited),
+                       "a supplied bake must match compositing the stamps")
+    }
+
     func testShapeMaskNeedsNoSuppliedBitmap() throws {
         // The whole point: a parametric mask renders with an EMPTY maskBitmaps dict.
         let mask = Mask(id: "r", type: "r", source: "gradient", invert: false, feather: 0,

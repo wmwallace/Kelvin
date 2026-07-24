@@ -1,4 +1,5 @@
 import Foundation
+import CoreImage
 import KelvinCore
 
 // Headless entry point. This is a first-class target — it is how the eval harness will run
@@ -293,6 +294,72 @@ case "mask":
     } catch {
         fail("\(error)")
     }
+
+case "bench":
+    // Where does interactive render time actually go? Measures the proxy render + read-back for
+    // each stage, so optimisation targets are chosen from data rather than guesswork.
+    let rest = Array(arguments.dropFirst())
+    guard let inPath = value(for: "--in", in: rest) else { fail("bench requires --in") }
+    do {
+        let full = try ImageDecoder.decode(url: URL(fileURLWithPath: inPath))
+        let proxy = PerceptionProxy.downsample(full, maxEdge: 1200)
+        let ctx = CIContext(options: [.cacheIntermediates: true])
+        _ = ctx.createCGImage(proxy, from: proxy.extent)     // warm up
+
+        func bench(_ label: String, _ recipe: Recipe, _ n: Int = 11) {
+            var times: [Double] = []
+            for _ in 0..<n {
+                let start = Date()
+                let out = Renderer.render(proxy, with: recipe, maskBitmaps: [:])
+                _ = ctx.createCGImage(out, from: out.extent)
+                times.append(Date().timeIntervalSince(start) * 1000)
+            }
+            times.sort()
+            print(String(format: "  %-32@ median %6.1f ms", label as NSString, times[n / 2]))
+        }
+
+        var g = GlobalAdjustments.neutral
+        g.exposureEV = 0.3; g.contrast = 12; g.vibrance = 8; g.shadows = 15; g.highlights = -20
+        func recipe(_ mutate: (inout Recipe) -> Void = { _ in }) -> Recipe {
+            var r = Recipe(schemaVersion: 1, id: nil, label: nil, provenance: nil, global: g,
+                           curve: nil, hsl: nil, masks: nil, detail: nil, geometry: nil)
+            mutate(&r); return r
+        }
+        print("Interactive render benchmark — proxy \(Int(proxy.extent.width))×\(Int(proxy.extent.height))")
+        bench("globals only", recipe())
+        bench("+ HSL cube (colour mixer)", recipe { $0.hsl = ["blue": HSLAdjustment(h: 5, s: 20, l: -10)] })
+        bench("+ colour-selection mask", recipe {
+            $0.masks = [Mask(id: "c", type: "color", source: "selection", invert: false, feather: 0,
+                             opacity: 1, adjustments: ["exposure_ev": -1],
+                             selection: MaskSelection(kind: .color, center: 0.33, range: 0.1, softness: 0.08))]
+        })
+        bench("+ straighten 4°", recipe { $0.geometry = Geometry(rotateDeg: 4, crop: nil, lensCorrection: false) })
+        for count in [25, 250, 1200] {
+            let stamps = (0..<count).map { i in
+                BrushStamp(x: 0.2 + Double(i) * 0.002, y: 0.5, radius: 0.06, hardness: 0.6)
+            }
+            let brush = recipe {
+                $0.masks = [Mask(id: "b", type: "brush", source: "brush", invert: false, feather: 0,
+                                 opacity: 1, adjustments: ["exposure_ev": -0.8], stamps: stamps)]
+            }
+            bench("+ brush \(count) stamps (composited)", brush, 5)
+            // The app bakes the stroke once and reuses it; this is what a frame then costs.
+            if let composited = Renderer.brushMask(stamps, extent: proxy.extent),
+               let cg = ctx.createCGImage(composited, from: proxy.extent) {
+                let flat = CIImage(cgImage: cg)
+                var times: [Double] = []
+                for _ in 0..<5 {
+                    let start = Date()
+                    let out = Renderer.render(proxy, with: brush, maskBitmaps: ["b": flat])
+                    _ = ctx.createCGImage(out, from: out.extent)
+                    times.append(Date().timeIntervalSince(start) * 1000)
+                }
+                times.sort()
+                print(String(format: "  %-32@ median %6.1f ms",
+                             "+ brush \(count) stamps (baked)" as NSString, times[2]))
+            }
+        }
+    } catch { fail("\(error)") }
 
 case "horizon":
     // Debug: print the detected leveling angle.

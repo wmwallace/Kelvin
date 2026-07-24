@@ -179,7 +179,11 @@ public enum Renderer {
                     "inputColorSpace": ImageWriter.outputColorSpace
                 ])
             } else if let stamps = mask.stamps, !stamps.isEmpty {
-                bitmap = brushMask(stamps, extent: img.extent)
+                // Compositing every stamp costs O(stamps) per render — a long stroke measured
+                // 18 ms at 1200 stamps, on EVERY frame. So a caller may supply a pre-baked stroke
+                // under the mask's id (the app caches one, rebuilt only when the stroke changes);
+                // otherwise composite from the stamps, which stays correct for export and batch.
+                bitmap = maskBitmaps[mask.id] ?? brushMask(stamps, extent: img.extent)
             } else if let shape = mask.shape {
                 bitmap = gradientMask(shape, extent: img.extent)
             } else {
@@ -426,7 +430,7 @@ public enum Renderer {
 
     /// Composite brush stamps into a grayscale mask — the union of soft circles the user painted.
     /// Coordinates normalised, top-left origin (y flipped for Core Image).
-    static func brushMask(_ stamps: [BrushStamp], extent: CGRect) -> CIImage? {
+    public static func brushMask(_ stamps: [BrushStamp], extent: CGRect) -> CIImage? {
         guard !extent.isInfinite, extent.width > 0, extent.height > 0, !stamps.isEmpty else { return nil }
         let w = extent.width, h = extent.height, minEdge = min(w, h)
         let white = CIColor(red: 1, green: 1, blue: 1), black = CIColor(red: 0, green: 0, blue: 0)
