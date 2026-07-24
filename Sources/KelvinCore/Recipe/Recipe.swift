@@ -1,0 +1,306 @@
+import Foundation
+
+/// A parametric, non-destructive edit — the unit of work in the app (docs/DECISIONS.md D4).
+/// Serializes to a JSON sidecar. Matches docs/RECIPE-SCHEMA.md Stage 2.
+///
+/// Milestone 1 renders `global` only. `curve`, `hsl`, `masks`, `detail`, and `geometry`
+/// are modelled and round-trip through JSON from commit one (schema is versioned from the
+/// start), but the renderer does not yet apply them. See `Renderer`.
+public struct Recipe: Codable, Equatable, Sendable {
+    /// Versioned from commit one. Every serialized recipe carries this (CLAUDE.md).
+    public var schemaVersion: Int
+    public var id: String?
+    public var label: String?
+    public var provenance: Provenance?
+    public var global: GlobalAdjustments
+    public var curve: Curve?
+    public var hsl: [String: HSLAdjustment]?
+    public var masks: [Mask]?
+    public var detail: Detail?
+    public var geometry: Geometry?
+
+    public static let currentSchemaVersion = 1
+
+    /// The all-neutral recipe. Rendering it MUST be a byte-identical no-op — this is the
+    /// milestone-1 gating invariant (docs/RECIPE-SCHEMA.md invariant #1).
+    public static let neutral = Recipe(
+        schemaVersion: currentSchemaVersion,
+        id: nil,
+        label: nil,
+        provenance: nil,
+        global: .neutral,
+        curve: nil,
+        hsl: nil,
+        masks: nil,
+        detail: nil,
+        geometry: nil
+    )
+
+    public init(
+        schemaVersion: Int,
+        id: String?,
+        label: String?,
+        provenance: Provenance?,
+        global: GlobalAdjustments,
+        curve: Curve?,
+        hsl: [String: HSLAdjustment]?,
+        masks: [Mask]?,
+        detail: Detail?,
+        geometry: Geometry?
+    ) {
+        self.schemaVersion = schemaVersion
+        self.id = id
+        self.label = label
+        self.provenance = provenance
+        self.global = global
+        self.curve = curve
+        self.hsl = hsl
+        self.masks = masks
+        self.detail = detail
+        self.geometry = geometry
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case id, label, provenance, global, curve, hsl, masks, detail, geometry
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion)
+            ?? Recipe.currentSchemaVersion
+        id = try c.decodeIfPresent(String.self, forKey: .id)
+        label = try c.decodeIfPresent(String.self, forKey: .label)
+        provenance = try c.decodeIfPresent(Provenance.self, forKey: .provenance)
+        global = try c.decodeIfPresent(GlobalAdjustments.self, forKey: .global) ?? .neutral
+        curve = try c.decodeIfPresent(Curve.self, forKey: .curve)
+        hsl = try c.decodeIfPresent([String: HSLAdjustment].self, forKey: .hsl)
+        masks = try c.decodeIfPresent([Mask].self, forKey: .masks)
+        detail = try c.decodeIfPresent(Detail.self, forKey: .detail)
+        geometry = try c.decodeIfPresent(Geometry.self, forKey: .geometry)
+    }
+}
+
+public struct Provenance: Codable, Equatable, Sendable {
+    public var perceptionHash: String?
+    public var engineVersion: String?
+    public var profileId: String?
+    public var generatedAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case perceptionHash = "perception_hash"
+        case engineVersion = "engine_version"
+        case profileId = "profile_id"
+        case generatedAt = "generated_at"
+    }
+}
+
+/// Global tone and color. Every field clamps on decode. `temperatureK` is nullable because
+/// its neutral is the image's as-shot value, not a fixed number (invariant #2).
+public struct GlobalAdjustments: Codable, Equatable, Sendable {
+    public var exposureEV: Double
+    public var contrast: Double
+    public var highlights: Double
+    public var shadows: Double
+    public var whites: Double
+    public var blacks: Double
+    public var temperatureK: Double?
+    public var tint: Double
+    public var vibrance: Double
+    public var saturation: Double
+    public var clarity: Double
+    public var texture: Double
+    public var dehaze: Double
+
+    public static let neutral = GlobalAdjustments(
+        exposureEV: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0,
+        temperatureK: nil, tint: 0, vibrance: 0, saturation: 0, clarity: 0, texture: 0,
+        dehaze: 0
+    )
+
+    public init(
+        exposureEV: Double, contrast: Double, highlights: Double, shadows: Double,
+        whites: Double, blacks: Double, temperatureK: Double?, tint: Double,
+        vibrance: Double, saturation: Double, clarity: Double, texture: Double,
+        dehaze: Double
+    ) {
+        self.exposureEV = exposureEV
+        self.contrast = contrast
+        self.highlights = highlights
+        self.shadows = shadows
+        self.whites = whites
+        self.blacks = blacks
+        self.temperatureK = temperatureK
+        self.tint = tint
+        self.vibrance = vibrance
+        self.saturation = saturation
+        self.clarity = clarity
+        self.texture = texture
+        self.dehaze = dehaze
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case exposureEV = "exposure_ev"
+        case contrast, highlights, shadows, whites, blacks
+        case temperatureK = "temperature_k"
+        case tint, vibrance, saturation, clarity, texture, dehaze
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        exposureEV = try c.clampedDouble(.exposureEV, default: 0, in: Ranges.exposureEV)
+        contrast = try c.clampedDouble(.contrast, default: 0, in: Ranges.signed100)
+        highlights = try c.clampedDouble(.highlights, default: 0, in: Ranges.signed100)
+        shadows = try c.clampedDouble(.shadows, default: 0, in: Ranges.signed100)
+        whites = try c.clampedDouble(.whites, default: 0, in: Ranges.signed100)
+        blacks = try c.clampedDouble(.blacks, default: 0, in: Ranges.signed100)
+        temperatureK = try c.clampedOptionalDouble(.temperatureK, in: Ranges.temperatureK)
+        tint = try c.clampedDouble(.tint, default: 0, in: Ranges.tint)
+        vibrance = try c.clampedDouble(.vibrance, default: 0, in: Ranges.signed100)
+        saturation = try c.clampedDouble(.saturation, default: 0, in: Ranges.signed100)
+        clarity = try c.clampedDouble(.clarity, default: 0, in: Ranges.signed100)
+        texture = try c.clampedDouble(.texture, default: 0, in: Ranges.signed100)
+        dehaze = try c.clampedDouble(.dehaze, default: 0, in: Ranges.signed100)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(exposureEV, forKey: .exposureEV)
+        try c.encode(contrast, forKey: .contrast)
+        try c.encode(highlights, forKey: .highlights)
+        try c.encode(shadows, forKey: .shadows)
+        try c.encode(whites, forKey: .whites)
+        try c.encode(blacks, forKey: .blacks)
+        try c.encodeIfPresent(temperatureK, forKey: .temperatureK)
+        try c.encode(tint, forKey: .tint)
+        try c.encode(vibrance, forKey: .vibrance)
+        try c.encode(saturation, forKey: .saturation)
+        try c.encode(clarity, forKey: .clarity)
+        try c.encode(texture, forKey: .texture)
+        try c.encode(dehaze, forKey: .dehaze)
+    }
+
+    /// True when this recipe would leave the image untouched (used by the renderer to
+    /// guarantee a genuine no-op rather than an identity filter pass).
+    public var isNeutral: Bool { self == .neutral }
+}
+
+/// Tone curves as control-point lists in 0…255 space. Not applied by the M1 renderer.
+public struct Curve: Codable, Equatable, Sendable {
+    public var luma: [[Double]]?
+    public var red: [[Double]]?
+    public var green: [[Double]]?
+    public var blue: [[Double]]?
+}
+
+/// Per-color HSL adjustment. Each channel clamps to −100…100.
+public struct HSLAdjustment: Codable, Equatable, Sendable {
+    public var h: Double
+    public var s: Double
+    public var l: Double
+
+    public init(h: Double, s: Double, l: Double) {
+        self.h = h; self.s = s; self.l = l
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        h = try c.clampedDouble(.h, default: 0, in: Ranges.signed100)
+        s = try c.clampedDouble(.s, default: 0, in: Ranges.signed100)
+        l = try c.clampedDouble(.l, default: 0, in: Ranges.signed100)
+    }
+
+    enum CodingKeys: String, CodingKey { case h, s, l }
+}
+
+/// A masked local adjustment. Masks are references (type + params), never bitmaps
+/// (invariant #6). Adjustments are kept as a keyed map for M1 since the renderer does not
+/// yet apply masks; the typed local-adjustment struct lands with mask rendering.
+public struct Mask: Codable, Equatable, Sendable {
+    public var id: String
+    public var type: String
+    public var source: String?
+    public var invert: Bool
+    public var feather: Double
+    public var opacity: Double
+    public var adjustments: [String: Double]
+
+    public init(
+        id: String, type: String, source: String?, invert: Bool,
+        feather: Double, opacity: Double, adjustments: [String: Double]
+    ) {
+        self.id = id; self.type = type; self.source = source; self.invert = invert
+        self.feather = feather; self.opacity = opacity; self.adjustments = adjustments
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        type = try c.decode(String.self, forKey: .type)
+        source = try c.decodeIfPresent(String.self, forKey: .source)
+        invert = try c.decodeIfPresent(Bool.self, forKey: .invert) ?? false
+        feather = try c.clampedDouble(.feather, default: 0, in: Ranges.unsigned100)
+        opacity = try c.clampedDouble(.opacity, default: 1, in: Ranges.opacity)
+        adjustments = try c.decodeIfPresent([String: Double].self, forKey: .adjustments) ?? [:]
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, type, source, invert, feather, opacity, adjustments
+    }
+}
+
+/// Sharpen / noise reduction. 0…100 each. Not applied by the M1 renderer.
+public struct Detail: Codable, Equatable, Sendable {
+    public var sharpen: Double
+    public var nrLuma: Double
+    public var nrColor: Double
+
+    public init(sharpen: Double, nrLuma: Double, nrColor: Double) {
+        self.sharpen = sharpen; self.nrLuma = nrLuma; self.nrColor = nrColor
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sharpen = try c.clampedDouble(.sharpen, default: 0, in: Ranges.unsigned100)
+        nrLuma = try c.clampedDouble(.nrLuma, default: 0, in: Ranges.unsigned100)
+        nrColor = try c.clampedDouble(.nrColor, default: 0, in: Ranges.unsigned100)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case sharpen
+        case nrLuma = "nr_luma"
+        case nrColor = "nr_color"
+    }
+}
+
+/// Crop/rotate/lens-correction. Not applied by the M1 renderer.
+public struct Geometry: Codable, Equatable, Sendable {
+    public var rotateDeg: Double
+    public var crop: CropRect?
+    public var lensCorrection: Bool
+
+    public init(rotateDeg: Double, crop: CropRect?, lensCorrection: Bool) {
+        self.rotateDeg = rotateDeg; self.crop = crop; self.lensCorrection = lensCorrection
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case rotateDeg = "rotate_deg"
+        case crop
+        case lensCorrection = "lens_correction"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        rotateDeg = try c.decodeIfPresent(Double.self, forKey: .rotateDeg) ?? 0
+        crop = try c.decodeIfPresent(CropRect.self, forKey: .crop)
+        lensCorrection = try c.decodeIfPresent(Bool.self, forKey: .lensCorrection) ?? false
+    }
+}
+
+/// Normalized crop rectangle (0…1 of image dimensions).
+public struct CropRect: Codable, Equatable, Sendable {
+    public var x: Double
+    public var y: Double
+    public var width: Double
+    public var height: Double
+}

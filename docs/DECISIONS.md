@@ -37,9 +37,10 @@ categorical half the only thing that needs a model at all.
 
 This is the central architectural claim of the project. See `RECIPE-SCHEMA.md`.
 
-## D3 — Swift + Core Image + Metal + MLX · Proposed
+## D3 — Swift + Core Image + Metal + MLX · Decided
 
-**Needs owner confirmation before the first real commit.**
+**Confirmed by owner 2026-07-23** (was Proposed). Cross-platform Rust path explicitly
+declined in favour of native Mac polish. This unblocks milestone 1.
 
 Core Image's RAW support supplies Apple's decoder and per-camera color profiles at zero
 cost — the largest single saving available. MLX Swift keeps Python out of the bundle.
@@ -125,7 +126,7 @@ where the entire point is parametric, reversible, sidecar-stored adjustment.
 
 ## Open questions for the owner
 
-1. Confirm or reject D3 (Swift vs Rust). Blocks everything.
+1. ~~Confirm or reject D3 (Swift vs Rust). Blocks everything.~~ **Resolved 2026-07-23 — Swift.**
 2. Which reference corpus for D6? MIT-Adobe FiveK is the obvious candidate — thousands
    of RAW files each retouched by five different experts, which is structurally
    identical to the candidate-previews feature. Confirm licensing suits the intended use.
