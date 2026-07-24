@@ -194,7 +194,60 @@ public enum Renderer {
             if !extent.isInfinite { img = img.cropped(to: extent) }
         }
 
+        // Geometry: straighten (rotate) + crop. Applied last — a framing operation on the finished
+        // pixels. A zero rotation with no crop is a no-op.
+        if let geo = recipe.geometry, geo.rotateDeg != 0 || geo.crop != nil {
+            img = applyGeometry(img, geo)
+        }
+
         return img
+    }
+
+    /// Straighten (rotate about the centre) then crop. With a rotation and no explicit crop, the
+    /// frame is auto-cropped to the largest centred rectangle that contains no empty corners.
+    static func applyGeometry(_ image: CIImage, _ geo: Geometry) -> CIImage {
+        let extent = image.extent
+        guard !extent.isInfinite, extent.width > 0, extent.height > 0 else { return image }
+        var img = image
+
+        if geo.rotateDeg != 0 {
+            let rad = CGFloat(-geo.rotateDeg * .pi / 180)   // +deg levels a clockwise-tilted horizon
+            let c = CGPoint(x: extent.midX, y: extent.midY)
+            let t = CGAffineTransform(translationX: c.x, y: c.y)
+                .rotated(by: rad).translatedBy(x: -c.x, y: -c.y)
+            img = img.transformed(by: t)
+        }
+
+        let crop: CGRect
+        if let r = geo.crop {
+            // Normalised, top-left origin → Core Image bottom-left.
+            crop = CGRect(x: extent.origin.x + r.x * extent.width,
+                          y: extent.origin.y + (1 - r.y - r.height) * extent.height,
+                          width: r.width * extent.width, height: r.height * extent.height)
+        } else {
+            crop = largestInscribedRect(extent, angleDeg: geo.rotateDeg)
+        }
+        return img.cropped(to: crop.integral)
+    }
+
+    /// The largest axis-aligned rectangle (same aspect as `r`) that fits inside `r` after it is
+    /// rotated by `angleDeg`, centred — so straightening leaves no black wedges in the corners.
+    static func largestInscribedRect(_ r: CGRect, angleDeg: Double) -> CGRect {
+        let angle = abs(angleDeg) * .pi / 180
+        let w = r.width, h = r.height
+        guard angle > 1e-6 else { return r }
+        let sinA = abs(sin(angle)), cosA = abs(cos(angle))
+        let longer = max(w, h), shorter = min(w, h)
+        let wr: CGFloat, hr: CGFloat
+        if shorter <= 2 * sinA * cosA * longer || abs(sinA - cosA) < 1e-10 {
+            let x = 0.5 * shorter
+            if w >= h { wr = x / sinA; hr = x / cosA } else { wr = x / cosA; hr = x / sinA }
+        } else {
+            let cos2 = cosA * cosA - sinA * sinA
+            wr = (w * cosA - h * sinA) / cos2
+            hr = (h * cosA - w * sinA) / cos2
+        }
+        return CGRect(x: r.midX - wr / 2, y: r.midY - hr / 2, width: wr, height: hr)
     }
 
     /// Composite a locally-adjusted layer over `base` through a feathered mask.

@@ -109,6 +109,8 @@ final class AppState: ObservableObject {
     /// The candidate's values as generated — the baseline manual edits are measured against (for
     /// the "carry my tweaks to the batch" and preference logging), and what Reset returns to.
     private var editBaseline = GlobalAdjustments.neutral
+    /// Manual straighten angle (degrees); auto-crops the corners. Per-photo framing.
+    @Published var straighten = 0.0
     /// Manual mask control: which auto-masks are on, and each one's strength (0…100 → opacity).
     @Published var maskEnabled: [String: Bool] = [:]
     @Published var maskStrength: [String: Double] = [:]
@@ -241,6 +243,7 @@ final class AppState: ObservableObject {
         guard let candidate = candidates.first(where: { $0.id == id }) else { return }
         selectedCandidateId = id
         showingOriginal = false          // never leave the before/after compare stuck on
+        straighten = 0
         // Load the candidate's actual values into the editable set — the user edits from here.
         edit = candidate.baseRecipe.global
         editBaseline = candidate.baseRecipe.global
@@ -257,6 +260,7 @@ final class AppState: ObservableObject {
     /// Revert every manual edit back to the candidate as Kelvin generated it.
     func resetToCandidate() {
         edit = editBaseline
+        straighten = 0
         maskEnabled = Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, true) })
         maskStrength = Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, $0.opacity * 100) })
         updateActiveRecipe()
@@ -274,10 +278,12 @@ final class AppState: ObservableObject {
     private var commitToken = 0
 
     private func snapshot() -> EditSnapshot {
-        EditSnapshot(edit: edit, userMasks: userMasks, maskEnabled: maskEnabled, maskStrength: maskStrength)
+        EditSnapshot(edit: edit, userMasks: userMasks, maskEnabled: maskEnabled,
+                     maskStrength: maskStrength, straighten: straighten)
     }
     private func applySnapshot(_ s: EditSnapshot) {
-        edit = s.edit; userMasks = s.userMasks; maskEnabled = s.maskEnabled; maskStrength = s.maskStrength
+        edit = s.edit; userMasks = s.userMasks; maskEnabled = s.maskEnabled
+        maskStrength = s.maskStrength; straighten = s.straighten
         updateActiveRecipe()
     }
     /// Reset the history to the current state — call when a fresh candidate/photo becomes the base.
@@ -433,6 +439,8 @@ final class AppState: ObservableObject {
         finalRecipe.global = edit                       // absolute manual values
         finalRecipe.masks = activeMasks()
         finalRecipe.heal = removeDust && !healSpots.isEmpty ? healSpots : nil
+        finalRecipe.geometry = straighten != 0
+            ? Geometry(rotateDeg: straighten, crop: nil, lensCorrection: false) : nil
         self.activeRecipe = finalRecipe
         let rendered = Renderer.render(proxy, with: finalRecipe, maskBitmaps: proxyMaskBitmaps)
         self.lastRenderedCI = rendered
@@ -976,6 +984,11 @@ struct ContentView: View {
                     ToneSlider(label: "Saturation", value: $appState.edit.saturation, range: -100...100, step: 1, unit: "", onChange: ch)
                 }
 
+                sectionLabel("Geometry", trailing: nil)
+                VStack(spacing: 14) {
+                    ToneSlider(label: "Straighten", value: $appState.straighten, range: -15...15, step: 0.1, unit: "°", onChange: ch)
+                }
+
                 sectionLabel("Masks", trailing: nil)
                 VStack(spacing: 12) {
                     // Auto-detected masks (subject / sky): toggle + strength.
@@ -1247,6 +1260,7 @@ struct EditSnapshot: Equatable {
     var userMasks: [UserMaskVM]
     var maskEnabled: [String: Bool]
     var maskStrength: [String: Double]
+    var straighten: Double
 }
 
 struct UserMaskVM: Identifiable, Equatable {

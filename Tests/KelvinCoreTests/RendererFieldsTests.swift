@@ -126,6 +126,35 @@ final class RendererFieldsTests: XCTestCase {
                           "a gradient mask should render from its shape with no supplied bitmap")
     }
 
+    // MARK: - Geometry (straighten + crop)
+
+    func testStraightenAutoCropsCorners() throws {
+        let source = TestSupport.makeGradientImage(width: 100, height: 100)
+        var r = Recipe.neutral
+        r.geometry = Geometry(rotateDeg: 6, crop: nil, lensCorrection: false)
+        let out = Renderer.render(source, with: r)
+        XCTAssertLessThan(out.extent.width, 100, "straightening trims the empty corners")
+        XCTAssertGreaterThan(out.extent.width, 70, "a small angle only trims modestly")
+    }
+
+    func testExplicitCropSizesTheFrame() throws {
+        let source = TestSupport.makeGradientImage(width: 100, height: 100)
+        var r = Recipe.neutral
+        r.geometry = Geometry(rotateDeg: 0, crop: CropRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5),
+                              lensCorrection: false)
+        let out = Renderer.render(source, with: r)
+        XCTAssertEqual(out.extent.width, 50, accuracy: 1.5)
+        XCTAssertEqual(out.extent.height, 50, accuracy: 1.5)
+    }
+
+    func testNeutralGeometryIsNoOp() throws {
+        let source = TestSupport.makeGradientImage(width: 64, height: 64)
+        var r = Recipe.neutral
+        r.geometry = Geometry(rotateDeg: 0, crop: nil, lensCorrection: false)
+        XCTAssertEqual(try bytes(Renderer.render(source, with: r)), try bytes(source),
+                       "zero rotation + no crop must not touch the image")
+    }
+
     // MARK: - Whites / blacks
 
     func testWhitesChangeOutput() throws {
