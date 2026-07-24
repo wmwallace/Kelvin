@@ -97,9 +97,11 @@ if first == "label" {
         if let luma = measured.skyLuma { note(String(format: "sky present, mean luma %.3f", luma)) }
         let maskBitmaps = measured.bitmaps
 
+        let iso = ExifReader.iso(url: imageURL)
+        if let iso { note(String(format: "ISO %.0f → noise-reduction sized from sensor gain", iso)) }
         let candidates = RecipeEngine.candidates(
             perception: perception, statistics: stats,
-            subjectLuma: measured.subjectLuma, skyLuma: measured.skyLuma,
+            subjectLuma: measured.subjectLuma, skyLuma: measured.skyLuma, iso: iso,
             perceptionHash: PerceptionIO.hash(perception),
             generatedAt: ISO8601DateFormatter().string(from: Date())
         )

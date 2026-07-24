@@ -199,7 +199,8 @@ final class AppState: ObservableObject {
             // Clean candidates straight from the engine — no cross-image "profile". The way to
             // reuse an edit is to pick/tune one photo, then Batch apply that exact look.
             let recipes = RecipeEngine.candidates(perception: perceptionRead, statistics: stats,
-                                                  subjectLuma: self.subjectLuma, skyLuma: self.skyLuma)
+                                                  subjectLuma: self.subjectLuma, skyLuma: self.skyLuma,
+                                                  iso: ExifReader.iso(url: url))
 
             var models: [CandidateViewModel] = []
             for recipe in recipes {
@@ -314,7 +315,7 @@ final class AppState: ObservableObject {
                     let m = LocalMasks.measure(in: proxy)
                     var recipe = RecipeEngine.candidate(perception: perception, statistics: stats,
                                                         style: style, subjectLuma: m.subjectLuma,
-                                                        skyLuma: m.skyLuma)
+                                                        skyLuma: m.skyLuma, iso: ExifReader.iso(url: file))
                     applyTweaks(tweaks, to: &recipe.global)
                     // Sensor dust sits at the same normalised position on every frame of a shoot,
                     // so the spots found on the reference photo heal the whole batch.

@@ -239,4 +239,30 @@ final class RecipeEngineTests: XCTestCase {
         XCTAssertEqual(s.chromaA, 0, accuracy: 1.0)
         XCTAssertEqual(s.chromaB, 0, accuracy: 1.0)
     }
+
+    // MARK: - Detail: noise reduction sized from ISO
+
+    func testLowISONoNoiseReduction() {
+        // A clean, low-gain capture needs no NR (output sharpening may still apply).
+        let d = RecipeEngine.detail(perception(scene: .landscape), iso: 100)
+        XCTAssertEqual(d?.nrLuma ?? 0, 0, "ISO 100 is clean — no NR")
+    }
+
+    func testHighISODrivesFirmNoiseReduction() {
+        let d = RecipeEngine.detail(perception(scene: .portrait), iso: 6400)
+        XCTAssertGreaterThan(d?.nrLuma ?? 0, 30, "ISO 6400 needs firm NR")
+        XCTAssertEqual(d?.sharpen ?? 99, 0, "never sharpen a portrait, even at high ISO")
+    }
+
+    func testNoiseReductionScalesWithISO() {
+        let lo = RecipeEngine.detail(perception(scene: .landscape), iso: 1600)?.nrLuma ?? 0
+        let hi = RecipeEngine.detail(perception(scene: .landscape), iso: 3200)?.nrLuma ?? 0
+        XCTAssertGreaterThan(hi, lo, "more gain → more NR")
+    }
+
+    func testNoiseFlagStillFloorsNRWithoutISO() {
+        // No EXIF ISO available, but the model flagged noise → NR still applies.
+        let d = RecipeEngine.detail(perception(scene: .landscape, problems: [.noise]))
+        XCTAssertGreaterThanOrEqual(d?.nrLuma ?? 0, 30)
+    }
 }

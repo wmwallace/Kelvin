@@ -25,6 +25,7 @@ public extension RecipeEngine {
         statistics s: ImageStatistics,
         subjectLuma: Double? = nil,
         skyLuma: Double? = nil,
+        iso: Double? = nil,
         engineVersion: String = version,
         perceptionHash: String? = nil,
         generatedAt: String? = nil
@@ -32,7 +33,7 @@ public extension RecipeEngine {
         CandidateStyle.all.map { style in
             candidate(
                 perception: p, statistics: s, style: style,
-                subjectLuma: subjectLuma, skyLuma: skyLuma,
+                subjectLuma: subjectLuma, skyLuma: skyLuma, iso: iso,
                 engineVersion: engineVersion, perceptionHash: perceptionHash,
                 generatedAt: generatedAt
             )
@@ -46,6 +47,7 @@ public extension RecipeEngine {
         style: CandidateStyle,
         subjectLuma: Double? = nil,
         skyLuma: Double? = nil,
+        iso: Double? = nil,
         engineVersion: String = version,
         perceptionHash: String? = nil,
         generatedAt: String? = nil
@@ -84,7 +86,7 @@ public extension RecipeEngine {
             hsl: nil,
             // Subject lift + sky treatment are corrective — shared across every style.
             masks: localMasks(p, s, subjectLuma: subjectLuma, skyLuma: skyLuma),
-            detail: detail(p),
+            detail: detail(p, iso: iso),
             geometry: nil
         )
     }

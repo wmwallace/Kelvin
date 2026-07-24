@@ -31,6 +31,7 @@ public enum RecipeEngine {
         statistics s: ImageStatistics,
         subjectLuma: Double? = nil,
         skyLuma: Double? = nil,
+        iso: Double? = nil,
         engineVersion: String = version,
         perceptionHash: String? = nil,
         generatedAt: String? = nil
@@ -76,7 +77,7 @@ public enum RecipeEngine {
             curve: nil,
             hsl: nil,
             masks: localMasks(p, s, subjectLuma: subjectLuma, skyLuma: skyLuma),
-            detail: detail(p),
+            detail: detail(p, iso: iso),
             geometry: nil
         )
     }
@@ -402,10 +403,19 @@ public enum RecipeEngine {
     /// Output sharpening is scene-appropriate: detail scenes (landscape, macro) want a touch of
     /// crispness; a portrait wants **none** — crunchy skin is the tell of an amateur edit, and
     /// over-sharpening reads worse on some skin than others, so we simply don't do it to faces.
-    static func detail(_ p: Perception) -> Detail? {
+    static func detail(_ p: Perception, iso: Double? = nil) -> Detail? {
         let noisy = p.problems.contains(.noise)
-        let highISOProne = p.scene == .night || p.scene == .interior || p.lighting.condition == .nightAmbient
-        let nr: Double = noisy ? 30 : (highISOProne ? 15 : 0)
+        // Prefer the real sensor gain when we have it: clean below ~640, ramping to a firm (but not
+        // mushy) ceiling by ~6400. A model-flagged `noise` still guarantees a floor. Without ISO,
+        // fall back to the scene guess (night/indoor shots tend to be high-ISO).
+        let nr: Double
+        if let iso {
+            let isoNR = iso <= 640 ? 0 : min(40, (iso - 640) / 5760 * 40)
+            nr = max(isoNR, noisy ? 30 : 0)
+        } else {
+            let highISOProne = p.scene == .night || p.scene == .interior || p.lighting.condition == .nightAmbient
+            nr = noisy ? 30 : (highISOProne ? 15 : 0)
+        }
 
         let sharpen: Double
         switch p.scene {
@@ -416,8 +426,9 @@ public enum RecipeEngine {
         default:                  sharpen = 8
         }
 
-        guard nr > 0 || sharpen > 0 else { return nil }
-        return Detail(sharpen: sharpen, nrLuma: nr, nrColor: nr)
+        let nrAmount = roundedClamp(nr, to: 0...45, step: 1)
+        guard nrAmount > 0 || sharpen > 0 else { return nil }
+        return Detail(sharpen: sharpen, nrLuma: nrAmount, nrColor: nrAmount)
     }
 
     // MARK: - Helpers

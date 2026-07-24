@@ -131,6 +131,7 @@ case "engine":
             statistics: stats,
             subjectLuma: measured.subjectLuma,
             skyLuma: measured.skyLuma,
+            iso: ExifReader.iso(url: URL(fileURLWithPath: inPath)),
             perceptionHash: PerceptionIO.hash(perception),
             generatedAt: ISO8601DateFormatter().string(from: Date())
         )
@@ -160,6 +161,7 @@ case "candidates":
             statistics: stats,
             subjectLuma: measured.subjectLuma,
             skyLuma: measured.skyLuma,
+            iso: ExifReader.iso(url: URL(fileURLWithPath: inPath)),
             perceptionHash: PerceptionIO.hash(perception),
             generatedAt: ISO8601DateFormatter().string(from: Date())
         )
