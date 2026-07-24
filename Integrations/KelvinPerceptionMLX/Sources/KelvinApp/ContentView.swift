@@ -112,6 +112,8 @@ final class AppState: ObservableObject {
     private var editBaseline = GlobalAdjustments.neutral
     /// Manual straighten angle (degrees); auto-crops the corners. Per-photo framing.
     @Published var straighten = 0.0
+    /// The creative look layered on the chosen candidate, if any (see `LookPreset`).
+    @Published var activeLookId: String?
     /// Per-colour HSL (the colour mixer): band → {h,s,l}. Empty bands are dropped.
     @Published var hsl: [String: HSLAdjustment] = [:]
     @Published var hslBand = "red"
@@ -415,7 +417,7 @@ final class AppState: ObservableObject {
         guard let candidate = candidates.first(where: { $0.id == id }) else { return }
         selectedCandidateId = id
         showingOriginal = false          // never leave the before/after compare stuck on
-        straighten = 0; hsl = [:]
+        straighten = 0; hsl = [:]; activeLookId = nil
         // Load the candidate's actual values into the editable set — the user edits from here.
         edit = candidate.baseRecipe.global
         editBaseline = candidate.baseRecipe.global
@@ -434,6 +436,7 @@ final class AppState: ObservableObject {
         edit = editBaseline
         straighten = 0
         hsl = [:]
+        activeLookId = nil
         maskEnabled = Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, true) })
         maskStrength = Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, $0.opacity * 100) })
         updateActiveRecipe()
@@ -469,6 +472,27 @@ final class AppState: ObservableObject {
             edit.temperatureK = 5500; edit.tint = 0            // neutralise white balance
         }
         onEdit()
+    }
+
+    /// Apply a creative look on top of the current candidate — or clear it with nil. Looks are
+    /// deltas on the candidate's baseline, so switching between them never compounds: each one is
+    /// applied to the untouched baseline rather than to whatever the last look left behind.
+    func applyLook(_ id: String?) {
+        activeLookId = id
+        var g = editBaseline
+        if let id, let look = LookPreset.named(id) {
+            look.apply(to: &g)
+            hsl = look.hsl ?? [:]
+        } else {
+            hsl = [:]
+        }
+        edit = g
+        onEdit()
+    }
+
+    /// The black-and-white mix of the active look, folded into the rendered recipe.
+    private var activeLookMono: BlackAndWhiteMix? {
+        activeLookId.flatMap { LookPreset.named($0) }?.mono
     }
 
     /// Level the horizon automatically (Vision). No-op if no clear horizon is found.
@@ -741,6 +765,7 @@ final class AppState: ObservableObject {
         finalRecipe.geometry = straighten != 0
             ? Geometry(rotateDeg: straighten, crop: nil, lensCorrection: false) : nil
         finalRecipe.hsl = hsl.isEmpty ? candidate.baseRecipe.hsl : hsl
+        finalRecipe.blackAndWhite = activeLookMono
         self.activeRecipe = finalRecipe
 
         if renderInFlight { renderDirty = true; return }
@@ -1314,6 +1339,22 @@ struct ContentView: View {
         }
     }
 
+    private func lookChip(_ look: LookPreset) -> some View {
+        let on = appState.activeLookId == look.id
+        return Button(action: { appState.applyLook(on ? nil : look.id) }) {
+            Text(look.name)
+                .font(Theme.ui(11, on ? .semibold : .regular))
+                .foregroundColor(on ? Theme.base : Theme.ink)
+                .padding(.horizontal, 11).padding(.vertical, 6)
+                .background(
+                    Capsule().fill(on ? Theme.glow : Theme.surface2)
+                        .overlay(Capsule().stroke(on ? Color.clear : Theme.hairline, lineWidth: 1))
+                )
+        }
+        .buttonStyle(.plain)
+        .help(look.blurb)
+    }
+
     private func editToolLabel(_ text: String, enabled: Bool) -> some View {
         Text(text)
             .font(Theme.ui(11, .semibold))
@@ -1363,6 +1404,27 @@ struct ContentView: View {
                 }
 
                 let ch = appState.onEdit   // re-render on any slider change
+
+                sectionLabel("Looks", trailing: appState.activeLookId == nil ? nil : "On")
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(LookPreset.Group.allCases, id: \.self) { group in
+                        let looks = LookPreset.library.filter { $0.group == group }
+                        if !looks.isEmpty {
+                            Text(group.rawValue.uppercased())
+                                .font(Theme.mono(9)).tracking(1.4).foregroundColor(Theme.inkFaint)
+                            FlowRow(looks.map(\.id)) { id in
+                                if let look = LookPreset.named(id) {
+                                    lookChip(look)
+                                }
+                            }
+                        }
+                    }
+                    if appState.activeLookId != nil {
+                        Button(action: { appState.applyLook(nil) }) {
+                            Text("Clear look").font(Theme.ui(10, .semibold)).foregroundColor(Theme.inkDim)
+                        }.buttonStyle(.plain)
+                    }
+                }
 
                 sectionLabel("White balance", trailing: nil)
                 VStack(spacing: 14) {

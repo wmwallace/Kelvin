@@ -127,3 +127,26 @@ struct FilmstripView: View {
         .help(url.lastPathComponent)
     }
 }
+
+/// Chips that wrap onto as many lines as they need — SwiftUI has no built-in flow layout on the
+/// deployment target, and a horizontal ScrollView would hide half the looks behind a scroll.
+struct FlowRow<Content: View>: View {
+    let ids: [String]
+    let content: (String) -> Content
+    private let perRow = 3
+
+    init(_ ids: [String], @ViewBuilder content: @escaping (String) -> Content) {
+        self.ids = ids; self.content = content
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(stride(from: 0, to: ids.count, by: perRow)), id: \.self) { start in
+                HStack(spacing: 6) {
+                    ForEach(ids[start..<min(start + perRow, ids.count)], id: \.self) { content($0) }
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+    }
+}
