@@ -12,7 +12,11 @@ public protocol PerceptionProvider {
     /// Read a photo and return structured, categorical judgments — never numbers.
     /// Implementations should analyse a downsampled proxy, not full resolution (see
     /// `PerceptionProxy`): the model's job needs scene/subject/lighting, not pixels.
-    func perceive(_ image: CIImage) throws -> Perception
+    ///
+    /// `async` because the real backend is a VLM whose load and generation are asynchronous;
+    /// a synchronous seam would force every conformer to block. Value-based conformers (the
+    /// stub, a file loader) simply ignore the suspension point.
+    func perceive(_ image: CIImage) async throws -> Perception
 }
 
 /// A fixed perception, independent of the image. Used to drive the pipeline end-to-end in
@@ -20,7 +24,7 @@ public protocol PerceptionProvider {
 public struct StaticPerceptionProvider: PerceptionProvider {
     public let perception: Perception
     public init(_ perception: Perception) { self.perception = perception }
-    public func perceive(_ image: CIImage) throws -> Perception { perception }
+    public func perceive(_ image: CIImage) async throws -> Perception { perception }
 }
 
 /// Downsampling for the perception model. The VLM sees a small proxy, never the RAW

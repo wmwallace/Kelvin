@@ -125,7 +125,7 @@ final class PerceptionSeamTests: XCTestCase {
 
     // MARK: - Provider drives the pipeline end to end (no model)
 
-    func testStaticProviderFeedsEngine() throws {
+    func testStaticProviderFeedsEngine() async throws {
         let percept = Perception(
             scene: .landscape,
             subject: .absent,
@@ -135,7 +135,7 @@ final class PerceptionSeamTests: XCTestCase {
         let provider: PerceptionProvider = StaticPerceptionProvider(percept)
 
         let image = TestSupport.makeGradientImage(width: 64, height: 64)
-        let read = try provider.perceive(PerceptionProxy.downsample(image))
+        let read = try await provider.perceive(PerceptionProxy.downsample(image))
         let stats = try ImageStatistics.compute(image)
         let recipe = RecipeEngine.recipe(perception: read, statistics: stats)
 
