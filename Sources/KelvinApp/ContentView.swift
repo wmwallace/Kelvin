@@ -7,7 +7,7 @@ import KelvinCore
 struct CandidateViewModel: Identifiable {
     let id: String
     let label: String
-    let recipe: Recipe
+    let baseRecipe: Recipe
     let previewImage: NSImage
 }
 
@@ -20,9 +20,23 @@ final class AppState: ObservableObject {
     @Published var perception: Perception?
     @Published var candidates: [CandidateViewModel] = []
     @Published var selectedCandidateId: String?
+    @Published var activeRecipe: Recipe?
     @Published var activePreviewImage: NSImage?
+
+    // Interactive slider deltas over selected candidate
+    @Published var deltaExposure: Double = 0.0
+    @Published var deltaContrast: Double = 0.0
+    @Published var deltaHighlights: Double = 0.0
+    @Published var deltaShadows: Double = 0.0
+    @Published var deltaVibrance: Double = 0.0
+    @Published var deltaSaturation: Double = 0.0
+
+    // Batch Apply & Processing State
     @Published var isProcessing: Bool = false
     @Published var statusMessage: String = "Drop a photo (RAW, JPEG, PNG) to begin."
+    @Published var learnedProfile: PreferenceProfile = .empty
+    @Published var batchOutcome: BatchApply.Outcome?
+    @Published var showBatchSheet: Bool = false
 
     private let store: PreferenceStore
     private let context = CIContext()
@@ -40,11 +54,16 @@ final class AppState: ObservableObject {
         imageURL = url
 
         do {
+            // Task 1: Load picks & compute learned profile (cold-start safe)
+            let picks = (try? await store.loadAll()) ?? []
+            let profile = PreferenceLearner.learn(from: picks)
+            self.learnedProfile = profile
+
             // 1. Decode full-resolution CIImage
             let fullRes = try ImageDecoder.decode(url: url)
             self.fullResCI = fullRes
 
-            // 2. Compute SHA256 of source file data
+            // 2. Compute SHA256 of source file bytes
             let fileData = try Data(contentsOf: url)
             let hash = SHA256.hash(data: fileData)
             self.imageId = "sha256:" + hash.compactMap { String(format: "%02x", $0) }.joined()
@@ -54,7 +73,7 @@ final class AppState: ObservableObject {
             let proxy = PerceptionProxy.downsample(fullRes)
             self.proxyCI = proxy
 
-            // 4. Perception read (StaticPerceptionProvider stub for M7 shell)
+            // 4. Perception read (StaticPerceptionProvider default for shell)
             statusMessage = "Analyzing scene..."
             let defaultPerception = Perception(
                 scene: .landscape,
@@ -69,13 +88,13 @@ final class AppState: ObservableObject {
             self.perception = perceptionRead
 
             // 5. Measured statistics from proxy
-            statusMessage = "Measuring histogram & color statistics..."
+            statusMessage = "Measuring statistics..."
             let sampleBytes = try ImageMetrics.sample(proxy)
             let stats = ImageStatistics.compute(from: sampleBytes)
 
-            // 6. Generate 4 candidate recipes (natural, vivid, soft, dramatic)
-            statusMessage = "Generating candidate recipes..."
-            let recipes = RecipeEngine.candidates(perception: perceptionRead, statistics: stats)
+            // 6. Generate candidates through the learning loop
+            statusMessage = "Generating candidates with preference profile..."
+            let recipes = RecipeEngine.candidates(perception: perceptionRead, statistics: stats, profile: profile)
 
             // 7. Render candidate previews on proxy
             var models: [CandidateViewModel] = []
@@ -86,7 +105,7 @@ final class AppState: ObservableObject {
                     models.append(CandidateViewModel(
                         id: recipe.id ?? UUID().uuidString,
                         label: label,
-                        recipe: recipe,
+                        baseRecipe: recipe,
                         previewImage: nsImage
                     ))
                 }
@@ -97,7 +116,10 @@ final class AppState: ObservableObject {
                 selectCandidate(id: first.id)
             }
 
-            statusMessage = "\(Branding.displayName) ready — 4 candidates generated."
+            let profileInfo = profile.sampleCount >= PreferenceLearner.minSamples
+                ? " (learned from \(profile.sampleCount) picks)"
+                : " (hand-tuned baseline)"
+            statusMessage = "\(Branding.displayName) ready — 4 candidates generated\(profileInfo)."
         } catch {
             statusMessage = "Error loading image: \(error.localizedDescription)"
         }
@@ -106,18 +128,69 @@ final class AppState: ObservableObject {
     }
 
     func selectCandidate(id: String) {
-        guard let candidate = candidates.first(where: { $0.id == id }) else { return }
+        guard candidates.contains(where: { $0.id == id }) else { return }
         selectedCandidateId = id
-        activePreviewImage = candidate.previewImage
+        
+        // Reset manual slider deltas on new candidate selection
+        deltaExposure = 0.0
+        deltaContrast = 0.0
+        deltaHighlights = 0.0
+        deltaShadows = 0.0
+        deltaVibrance = 0.0
+        deltaSaturation = 0.0
 
-        // Task 4: Wire pick -> store (RECIPE-SCHEMA.md Stage 3)
+        updateActiveRecipe()
+        recordCurrentPick()
+    }
+
+    func updateSliderDeltas() {
+        updateActiveRecipe()
+    }
+
+    private func updateActiveRecipe() {
+        guard let selectedId = selectedCandidateId,
+              let candidate = candidates.first(where: { $0.id == selectedId }),
+              let proxy = proxyCI else { return }
+
+        var g = candidate.baseRecipe.global
+        g.exposureEV = roundedClamp(g.exposureEV + deltaExposure, to: -5.0...5.0, step: 0.05)
+        g.contrast = roundedClamp(g.contrast + deltaContrast, to: -100...100, step: 1)
+        g.highlights = roundedClamp(g.highlights + deltaHighlights, to: -100...100, step: 1)
+        g.shadows = roundedClamp(g.shadows + deltaShadows, to: -100...100, step: 1)
+        g.vibrance = roundedClamp(g.vibrance + deltaVibrance, to: -100...100, step: 1)
+        g.saturation = roundedClamp(g.saturation + deltaSaturation, to: -100...100, step: 1)
+
+        var finalRecipe = candidate.baseRecipe
+        finalRecipe.global = g
+        self.activeRecipe = finalRecipe
+
+        // Instant proxy preview render (<50ms target)
+        let renderedCI = Renderer.render(proxy, with: finalRecipe)
+        self.activePreviewImage = ciToNSImage(renderedCI)
+    }
+
+    // Task 2: Record pick with subsequent_manual_edits
+    func recordCurrentPick() {
+        guard let selectedId = selectedCandidateId,
+              let candidate = candidates.first(where: { $0.id == selectedId }) else { return }
+
+        var manualEdits: [String: Double] = [:]
+        if abs(deltaExposure) > 0.01 { manualEdits["exposure_ev"] = (deltaExposure * 100).rounded() / 100 }
+        if abs(deltaContrast) > 0.1 { manualEdits["contrast"] = deltaContrast.rounded() }
+        if abs(deltaHighlights) > 0.1 { manualEdits["highlights"] = deltaHighlights.rounded() }
+        if abs(deltaShadows) > 0.1 { manualEdits["shadows"] = deltaShadows.rounded() }
+        if abs(deltaVibrance) > 0.1 { manualEdits["vibrance"] = deltaVibrance.rounded() }
+        if abs(deltaSaturation) > 0.1 { manualEdits["saturation"] = deltaSaturation.rounded() }
+
         let shownIds = candidates.map { $0.id }
-        let perceptionHash = candidate.recipe.provenance?.perceptionHash
+        let perceptionHash = candidate.baseRecipe.provenance?.perceptionHash
+
         let pick = PreferencePick(
             imageId: imageId,
             perceptionHash: perceptionHash,
             shown: shownIds,
-            chosen: id
+            chosen: selectedId,
+            subsequentManualEdits: manualEdits.isEmpty ? nil : manualEdits
         )
 
         Task {
@@ -125,30 +198,48 @@ final class AppState: ObservableObject {
         }
     }
 
+    // Task 4: Full-resolution export using ImageWriter
     func exportFullResolution(to exportURL: URL) async {
         guard let fullRes = fullResCI,
-              let selectedId = selectedCandidateId,
-              let candidate = candidates.first(where: { $0.id == selectedId }) else { return }
+              let recipe = activeRecipe else { return }
 
         isProcessing = true
         statusMessage = "Rendering full-resolution export..."
 
         do {
-            let renderedFullCI = Renderer.render(fullRes, with: candidate.recipe)
-            if let cgImage = context.createCGImage(renderedFullCI, from: renderedFullCI.extent) {
-                let nsImage = NSImage(cgImage: cgImage, size: NSZeroSize)
-                if let tiffData = nsImage.tiffRepresentation,
-                   let bitmapRep = NSBitmapImageRep(data: tiffData),
-                   let jpegData = bitmapRep.representation(using: .jpeg, properties: [:]) {
-                    try jpegData.write(to: exportURL)
-                    statusMessage = "Exported successfully to \(exportURL.lastPathComponent)"
-                }
-            }
+            let renderedFullCI = Renderer.render(fullRes, with: recipe)
+            try ImageWriter.write(renderedFullCI, to: exportURL)
+            statusMessage = "Exported successfully to \(exportURL.lastPathComponent)"
         } catch {
             statusMessage = "Export error: \(error.localizedDescription)"
         }
 
         isProcessing = false
+    }
+
+    // Task 5: Batch-apply UI using BatchApply.run
+    func runBatchApply(inputDir: URL, outputDir: URL) async {
+        guard let recipe = activeRecipe else { return }
+
+        isProcessing = true
+        statusMessage = "Running batch apply across folder..."
+
+        do {
+            let inputFiles = try BatchApply.imageFiles(in: inputDir)
+            let outcome = try BatchApply.run(inputs: inputFiles, recipe: recipe, outputDir: outputDir)
+            self.batchOutcome = outcome
+            self.showBatchSheet = true
+            statusMessage = "Batch apply complete: \(outcome.succeeded) succeeded, \(outcome.failed) failed."
+        } catch {
+            statusMessage = "Batch apply error: \(error.localizedDescription)"
+        }
+
+        isProcessing = false
+    }
+
+    private func roundedClamp(_ val: Double, to range: ClosedRange<Double>, step: Double) -> Double {
+        let clamped = min(range.upperBound, max(range.lowerBound, val))
+        return (clamped / step).rounded() * step
     }
 
     private func ciToNSImage(_ ciImage: CIImage) -> NSImage? {
@@ -184,19 +275,25 @@ struct ContentView: View {
 
             if let selectedId = appState.selectedCandidateId,
                let activeImage = appState.activePreviewImage {
-                // Main Workspace
+                // Main Interactive Workspace
                 HSplitView {
-                    // Left: Selected Active Preview
-                    VStack {
+                    // Left Column: Active Preview + Export / Batch Toolbar
+                    VStack(spacing: 12) {
                         Image(nsImage: activeImage)
                             .resizable()
                             .scaledToFit()
                             .padding()
+
                         HStack {
-                            Text("Active Preview (\(selectedId.capitalized))")
+                            Text("Active Look: \(selectedId.capitalized)")
                                 .font(.headline)
                             Spacer()
-                            Button("Export Full Resolution...") {
+                            Button("Batch Apply Shoot...") {
+                                openBatchPanel()
+                            }
+                            .buttonStyle(.bordered)
+
+                            Button("Export Full-Res...") {
                                 openExportPanel()
                             }
                             .buttonStyle(.borderedProminent)
@@ -205,42 +302,82 @@ struct ContentView: View {
                     }
                     .frame(minWidth: 450)
 
-                    // Right: Candidate Picker Grid
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Candidate Edits")
-                            .font(.headline)
-                            .padding(.horizontal)
+                    // Right Column: Candidate Picker + Manual Edit Adjustments
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            Text("1. Pick Candidate")
+                                .font(.headline)
+                                .padding(.horizontal)
 
-                        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-                            ForEach(appState.candidates) { candidate in
-                                CandidateCard(
-                                    candidate: candidate,
-                                    isSelected: candidate.id == appState.selectedCandidateId
-                                ) {
-                                    appState.selectCandidate(id: candidate.id)
+                            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                                ForEach(appState.candidates) { candidate in
+                                    CandidateCard(
+                                        candidate: candidate,
+                                        isSelected: candidate.id == appState.selectedCandidateId
+                                    ) {
+                                        appState.selectCandidate(id: candidate.id)
+                                    }
                                 }
                             }
-                        }
-                        .padding(.horizontal)
+                            .padding(.horizontal)
 
-                        Spacer()
+                            Divider()
+                                .padding(.vertical, 4)
+
+                            // Task 2: Fine-tuning sliders to capture subsequent_manual_edits
+                            Text("2. Fine-Tune Adjustments")
+                                .font(.headline)
+                                .padding(.horizontal)
+
+                            VStack(spacing: 10) {
+                                SliderRow(label: "Exposure", value: $appState.deltaExposure, range: -2.0...2.0, step: 0.05, unit: "EV") {
+                                    appState.updateSliderDeltas()
+                                }
+                                SliderRow(label: "Contrast", value: $appState.deltaContrast, range: -30...30, step: 1, unit: "") {
+                                    appState.updateSliderDeltas()
+                                }
+                                SliderRow(label: "Highlights", value: $appState.deltaHighlights, range: -50...50, step: 1, unit: "") {
+                                    appState.updateSliderDeltas()
+                                }
+                                SliderRow(label: "Shadows", value: $appState.deltaShadows, range: -50...50, step: 1, unit: "") {
+                                    appState.updateSliderDeltas()
+                                }
+                                SliderRow(label: "Vibrance", value: $appState.deltaVibrance, range: -30...30, step: 1, unit: "") {
+                                    appState.updateSliderDeltas()
+                                }
+                                SliderRow(label: "Saturation", value: $appState.deltaSaturation, range: -30...30, step: 1, unit: "") {
+                                    appState.updateSliderDeltas()
+                                }
+                            }
+                            .padding(.horizontal)
+
+                            HStack {
+                                Spacer()
+                                Button("Save Tweak as Pick") {
+                                    appState.recordCurrentPick()
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                            .padding(.horizontal)
+                        }
+                        .padding(.vertical)
                     }
                     .frame(width: 380)
-                    .padding(.vertical)
                     .background(Color(NSColor.controlBackgroundColor))
                 }
             } else {
-                // Empty Drop Target State
+                // Empty Drop State
                 VStack(spacing: 20) {
                     Image(systemName: "photo.on.rectangle.angled")
                         .font(.system(size: 64))
                         .foregroundColor(isTargetedForDrop ? .accentColor : .secondary)
 
-                    Text("Drop Photo Here")
+                    Text("Drop Photo into \(Branding.displayName)")
                         .font(.title)
                         .bold()
 
-                    Text("Supports RAW, JPEG, and PNG. Perception and candidate previews will generate automatically.")
+                    Text("Supports RAW, JPEG, and PNG. Candidate generation and preference learning run automatically.")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
 
@@ -266,6 +403,39 @@ struct ContentView: View {
             }
         }
         .navigationTitle(Branding.displayName)
+        .sheet(isPresented: $appState.showBatchSheet) {
+            if let outcome = appState.batchOutcome {
+                VStack(spacing: 16) {
+                    Text("Batch Apply Complete")
+                        .font(.title2)
+                        .bold()
+
+                    HStack(spacing: 24) {
+                        VStack {
+                            Text("\(outcome.succeeded)")
+                                .font(.title)
+                                .foregroundColor(.green)
+                            Text("Succeeded")
+                                .font(.caption)
+                        }
+                        VStack {
+                            Text("\(outcome.failed)")
+                                .font(.title)
+                                .foregroundColor(outcome.failed > 0 ? .red : .secondary)
+                            Text("Failed")
+                                .font(.caption)
+                        }
+                    }
+
+                    Button("Done") {
+                        appState.showBatchSheet = false
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding(32)
+                .frame(width: 360)
+            }
+        }
     }
 
     private func openFileImporter() {
@@ -282,12 +452,72 @@ struct ContentView: View {
 
     private func openExportPanel() {
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.jpeg]
+        panel.allowedContentTypes = [.jpeg, .png]
         panel.nameFieldStringValue = "edited_photo.jpg"
         if panel.runModal() == .OK, let url = panel.url {
             Task {
                 await appState.exportFullResolution(to: url)
             }
+        }
+    }
+
+    private func openBatchPanel() {
+        let inputPanel = NSOpenPanel()
+        inputPanel.title = "Select Input Shoot Folder"
+        inputPanel.canChooseDirectories = true
+        inputPanel.canChooseFiles = false
+        inputPanel.allowsMultipleSelection = false
+
+        guard inputPanel.runModal() == .OK, let inputDir = inputPanel.url else { return }
+
+        let outputPanel = NSOpenPanel()
+        outputPanel.title = "Select Output Folder"
+        outputPanel.canChooseDirectories = true
+        outputPanel.canChooseFiles = false
+        outputPanel.canCreateDirectories = true
+        outputPanel.allowsMultipleSelection = false
+
+        guard outputPanel.runModal() == .OK, let outputDir = outputPanel.url else { return }
+
+        Task {
+            await appState.runBatchApply(inputDir: inputDir, outputDir: outputDir)
+        }
+    }
+}
+
+struct SliderRow: View {
+    let label: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let step: Double
+    let unit: String
+    let onChange: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(label)
+                    .font(.caption)
+                Spacer()
+                Text(formatValue(value))
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundColor(.secondary)
+            }
+            Slider(value: $value, in: range, step: step) {
+                Text(label)
+            } onEditingChanged: { editing in
+                if !editing { onChange() }
+            }
+        }
+    }
+
+    private func formatValue(_ val: Double) -> String {
+        let sign = val > 0 ? "+" : ""
+        if step < 1.0 {
+            return String(format: "%@%.2f%@", sign, val, unit)
+        } else {
+            return String(format: "%@%.0f%@", sign, val, unit)
         }
     }
 }
