@@ -111,6 +111,22 @@ final class AppState: ObservableObject {
     private var editBaseline = GlobalAdjustments.neutral
     /// Manual straighten angle (degrees); auto-crops the corners. Per-photo framing.
     @Published var straighten = 0.0
+    /// Per-colour HSL (the colour mixer): band → {h,s,l}. Empty bands are dropped.
+    @Published var hsl: [String: HSLAdjustment] = [:]
+    @Published var hslBand = "red"
+    let hslBands = ["red", "orange", "yellow", "green", "aqua", "blue", "purple", "magenta"]
+
+    /// A binding to one HSL component of the currently-selected colour band.
+    func hslBinding(_ kp: WritableKeyPath<HSLAdjustment, Double>) -> Binding<Double> {
+        Binding(
+            get: { self.hsl[self.hslBand]?[keyPath: kp] ?? 0 },
+            set: { newValue in
+                var a = self.hsl[self.hslBand] ?? HSLAdjustment(h: 0, s: 0, l: 0)
+                a[keyPath: kp] = newValue
+                if a.h == 0 && a.s == 0 && a.l == 0 { self.hsl[self.hslBand] = nil }
+                else { self.hsl[self.hslBand] = a }
+            })
+    }
     /// Manual mask control: which auto-masks are on, and each one's strength (0…100 → opacity).
     @Published var maskEnabled: [String: Bool] = [:]
     @Published var maskStrength: [String: Double] = [:]
@@ -243,7 +259,7 @@ final class AppState: ObservableObject {
         guard let candidate = candidates.first(where: { $0.id == id }) else { return }
         selectedCandidateId = id
         showingOriginal = false          // never leave the before/after compare stuck on
-        straighten = 0
+        straighten = 0; hsl = [:]
         // Load the candidate's actual values into the editable set — the user edits from here.
         edit = candidate.baseRecipe.global
         editBaseline = candidate.baseRecipe.global
@@ -261,6 +277,7 @@ final class AppState: ObservableObject {
     func resetToCandidate() {
         edit = editBaseline
         straighten = 0
+        hsl = [:]
         maskEnabled = Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, true) })
         maskStrength = Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, $0.opacity * 100) })
         updateActiveRecipe()
@@ -286,11 +303,11 @@ final class AppState: ObservableObject {
 
     private func snapshot() -> EditSnapshot {
         EditSnapshot(edit: edit, userMasks: userMasks, maskEnabled: maskEnabled,
-                     maskStrength: maskStrength, straighten: straighten)
+                     maskStrength: maskStrength, straighten: straighten, hsl: hsl)
     }
     private func applySnapshot(_ s: EditSnapshot) {
         edit = s.edit; userMasks = s.userMasks; maskEnabled = s.maskEnabled
-        maskStrength = s.maskStrength; straighten = s.straighten
+        maskStrength = s.maskStrength; straighten = s.straighten; hsl = s.hsl
         updateActiveRecipe()
     }
     /// Reset the history to the current state — call when a fresh candidate/photo becomes the base.
@@ -448,6 +465,7 @@ final class AppState: ObservableObject {
         finalRecipe.heal = removeDust && !healSpots.isEmpty ? healSpots : nil
         finalRecipe.geometry = straighten != 0
             ? Geometry(rotateDeg: straighten, crop: nil, lensCorrection: false) : nil
+        finalRecipe.hsl = hsl.isEmpty ? candidate.baseRecipe.hsl : hsl
         self.activeRecipe = finalRecipe
         let rendered = Renderer.render(proxy, with: finalRecipe, maskBitmaps: proxyMaskBitmaps)
         self.lastRenderedCI = rendered
@@ -912,6 +930,19 @@ struct ContentView: View {
             )
     }
 
+    static func bandColor(_ band: String) -> Color {
+        switch band {
+        case "red": return .red
+        case "orange": return .orange
+        case "yellow": return .yellow
+        case "green": return .green
+        case "aqua": return .cyan
+        case "blue": return .blue
+        case "purple": return .purple
+        default: return Color(red: 1, green: 0.2, blue: 0.85)   // magenta
+        }
+    }
+
     private func editToolLabel(_ text: String, enabled: Bool) -> some View {
         Text(text)
             .font(Theme.ui(11, .semibold))
@@ -989,6 +1020,23 @@ struct ContentView: View {
                 VStack(spacing: 14) {
                     ToneSlider(label: "Vibrance", value: $appState.edit.vibrance, range: -100...100, step: 1, unit: "", onChange: ch)
                     ToneSlider(label: "Saturation", value: $appState.edit.saturation, range: -100...100, step: 1, unit: "", onChange: ch)
+                }
+
+                sectionLabel("Color mixer", trailing: nil)
+                VStack(spacing: 12) {
+                    HStack(spacing: 6) {
+                        ForEach(appState.hslBands, id: \.self) { band in
+                            Circle().fill(Self.bandColor(band))
+                                .frame(width: 22, height: 22)
+                                .overlay(Circle().stroke(appState.hslBand == band ? Theme.ink : Theme.hairline,
+                                                         lineWidth: appState.hslBand == band ? 2.5 : 1))
+                                .overlay(Circle().stroke(.white.opacity(appState.hsl[band] != nil ? 0.9 : 0), lineWidth: 1).padding(3))
+                                .onTapGesture { appState.hslBand = band }
+                        }
+                    }
+                    ToneSlider(label: "Hue", value: appState.hslBinding(\.h), range: -100...100, step: 1, unit: "", onChange: ch)
+                    ToneSlider(label: "Saturation", value: appState.hslBinding(\.s), range: -100...100, step: 1, unit: "", onChange: ch)
+                    ToneSlider(label: "Luminance", value: appState.hslBinding(\.l), range: -100...100, step: 1, unit: "", onChange: ch)
                 }
 
                 sectionLabel("Geometry", trailing: nil)
@@ -1270,6 +1318,7 @@ struct EditSnapshot: Equatable {
     var maskEnabled: [String: Bool]
     var maskStrength: [String: Double]
     var straighten: Double
+    var hsl: [String: HSLAdjustment]
 }
 
 struct UserMaskVM: Identifiable, Equatable {
