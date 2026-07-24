@@ -97,6 +97,11 @@ final class AppState: ObservableObject {
     @Published var selectedCandidateId: String?
     @Published var activeRecipe: Recipe?
     @Published var activePreviewImage: NSImage?
+    /// The untouched original (proxy), for the press-and-hold before/after compare.
+    @Published var originalPreviewImage: NSImage?
+    @Published var showingOriginal = false
+    /// Objective craft flags on the current edit (clipping, skin, cast) — empty when clean.
+    @Published var activeCraftNotes: [String] = []
 
     @Published var deltaExposure = 0.0
     @Published var deltaContrast = 0.0
@@ -163,6 +168,8 @@ final class AppState: ObservableObject {
             statusMessage = "Building proxy…"
             let proxy = PerceptionProxy.downsample(fullRes)
             self.proxyCI = proxy
+            // The untouched original, for the before/after compare.
+            self.originalPreviewImage = ciToNSImage(proxy)
 
             statusMessage = "Reading the scene…"
             // Real perception: Qwen2.5-VL reads the proxy. First call loads the model (a few
@@ -251,7 +258,11 @@ final class AppState: ObservableObject {
         finalRecipe.global = g
         finalRecipe.heal = removeDust && !healSpots.isEmpty ? healSpots : nil
         self.activeRecipe = finalRecipe
-        self.activePreviewImage = ciToNSImage(Renderer.render(proxy, with: finalRecipe, maskBitmaps: proxyMaskBitmaps))
+        let rendered = Renderer.render(proxy, with: finalRecipe, maskBitmaps: proxyMaskBitmaps)
+        self.activePreviewImage = ciToNSImage(rendered)
+        // Objective craft self-check on the edit the user is looking at — surfaces clipping,
+        // skin, or cast problems. Not a taste verdict; just "did this edit break something".
+        self.activeCraftNotes = AestheticEvaluator.score(rendered: rendered)?.notes ?? []
     }
 
     func recordCurrentPick() {
@@ -524,11 +535,21 @@ struct ContentView: View {
         HSplitView {
             // Preview + the active look's white balance on the rail
             VStack(spacing: 0) {
-                if let img = appState.activePreviewImage {
+                if let img = (appState.showingOriginal ? appState.originalPreviewImage : appState.activePreviewImage) ?? appState.activePreviewImage {
                     Image(nsImage: img)
                         .resizable().scaledToFit()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .padding(24)
+                        .overlay(alignment: .topLeading) {
+                            if appState.showingOriginal {
+                                Text("BEFORE")
+                                    .font(Theme.mono(11, .semibold)).tracking(2)
+                                    .foregroundColor(Theme.base)
+                                    .padding(.horizontal, 10).padding(.vertical, 5)
+                                    .background(Capsule().fill(Theme.ink.opacity(0.75)))
+                                    .padding(30)
+                            }
+                        }
                 }
                 previewFooter
             }
@@ -553,9 +574,25 @@ struct ContentView: View {
                     .foregroundColor(temp.map(KelvinScale.color) ?? Theme.inkDim)
             }
             TemperatureRail(marks: temp.map { [($0, true)] } ?? [])
+            // Craft self-check: flag any objective problems (clipping, skin, cast) in this edit.
+            if !appState.activeCraftNotes.isEmpty {
+                HStack(alignment: .top, spacing: 6) {
+                    Text("⚠").font(Theme.ui(11))
+                    Text(appState.activeCraftNotes.joined(separator: " · "))
+                        .font(Theme.mono(10)).foregroundColor(Theme.inkDim)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+            }
             HStack(spacing: 10) {
                 Button(action: openBatchPanel) { toolbarLabel("Batch apply", filled: false) }
                     .buttonStyle(.plain)
+                // Press and hold to see the untouched original.
+                toolbarLabel("Hold to compare", filled: false)
+                    .opacity(appState.showingOriginal ? 0.55 : 1)
+                    .onLongPressGesture(minimumDuration: 0.01, maximumDistance: 40, pressing: { pressing in
+                        appState.showingOriginal = pressing
+                    }, perform: {})
                 Spacer()
                 Button(action: openExportPanel) { toolbarLabel("Export full-res", filled: true) }
                     .buttonStyle(.plain)
