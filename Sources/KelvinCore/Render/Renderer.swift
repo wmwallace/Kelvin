@@ -157,7 +157,21 @@ public enum Renderer {
             // Parametric masks (colour/luma selection, brush stamps, gradients) generate their own
             // bitmap here; segmentation masks (subject/sky) use the bitmap the caller supplied.
             let bitmap: CIImage?
-            if let sel = mask.selection, let cube = SelectionMask.makeData(sel) {
+            if mask.type == "skin" {
+                // Skin = skin-coloured pixels intersected with the person segmentation, so it lands
+                // on faces/hands and not on skin-toned wood or walls. Fair across complexions: it
+                // keys on hue, never brightness.
+                let sel = mask.selection ?? MaskSelection(kind: .color, center: 0.06, range: 0.06, softness: 0.05)
+                if let cube = SelectionMask.makeData(sel) {
+                    var m = img.applyingFilter("CIColorCubeWithColorSpace", parameters: [
+                        "inputCubeDimension": SelectionMask.dimension,
+                        "inputCubeData": cube, "inputColorSpace": ImageWriter.outputColorSpace])
+                    if let subject = maskBitmaps[mask.id] ?? maskBitmaps["subject"] {
+                        m = m.applyingFilter("CIMultiplyCompositing", parameters: [kCIInputBackgroundImageKey: subject])
+                    }
+                    bitmap = m
+                } else { bitmap = nil }
+            } else if let sel = mask.selection, let cube = SelectionMask.makeData(sel) {
                 // The cube turns the current image into a white-where-selected mask.
                 bitmap = img.applyingFilter("CIColorCubeWithColorSpace", parameters: [
                     "inputCubeDimension": SelectionMask.dimension,

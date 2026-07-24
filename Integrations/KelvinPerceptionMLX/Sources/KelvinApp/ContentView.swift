@@ -396,6 +396,7 @@ final class AppState: ObservableObject {
         m.exposure = -0.6
         if kind == .colorRange { m.selCenter = 0.0; m.selRange = 0.1 }    // reds by default
         if kind == .luminance { m.selCenter = 0.78; m.selRange = 0.2 }    // highlights by default
+        if kind == .skin { m.selCenter = 0.06; m.selRange = 0.06; m.selSoftness = 0.05; m.exposure = 0.3 }
         userMasks.append(m)
         selectedUserMaskId = m.id                      // show its canvas handles
         if kind == .brush { paintingMaskId = m.id }    // brush: start painting right away
@@ -864,7 +865,7 @@ struct ContentView: View {
                 handle(at: CGPoint(x: center.x + dir.x * 54, y: center.y + dir.y * 54), small: true) {
                     appState.rotateLinear(mid, handleAt: $0, in: rect)
                 }
-            case .brush, .colorRange, .luminance:
+            case .brush, .colorRange, .luminance, .skin:
                 EmptyView()
             }
         }
@@ -1082,7 +1083,7 @@ struct ContentView: View {
                         HStack(spacing: 6) {
                             Button(action: { appState.addUserMask(.colorRange) }) { addMaskLabel("+ Colour") }.buttonStyle(.plain)
                             Button(action: { appState.addUserMask(.luminance) }) { addMaskLabel("+ Luma") }.buttonStyle(.plain)
-                            Color.clear.frame(maxWidth: .infinity)
+                            Button(action: { appState.addUserMask(.skin) }) { addMaskLabel("+ Skin") }.buttonStyle(.plain)
                         }
                     }
                 }
@@ -1328,18 +1329,18 @@ struct EditSnapshot: Equatable {
 }
 
 struct UserMaskVM: Identifiable, Equatable {
-    enum Kind { case radial, linear, brush, colorRange, luminance }
+    enum Kind { case radial, linear, brush, colorRange, luminance, skin }
     let id = UUID()
     var kind: Kind
     var cx = 0.5, cy = 0.5, radius = 0.35, angle = 0.0, softness = 0.35
     var stamps: [BrushStamp] = []                       // brush only
-    var selCenter = 0.0, selRange = 0.1, selSoftness = 0.1   // colour / luminance selection
+    var selCenter = 0.0, selRange = 0.1, selSoftness = 0.1   // colour / luminance / skin selection
     var exposure = 0.0, contrast = 0.0, saturation = 0.0
 
     var label: String {
         switch kind {
         case .radial: return "Radial"; case .linear: return "Graduated"; case .brush: return "Brush"
-        case .colorRange: return "Colour range"; case .luminance: return "Luminance"
+        case .colorRange: return "Colour range"; case .luminance: return "Luminance"; case .skin: return "Skin"
         }
     }
     var hasCanvasHandles: Bool { kind == .radial || kind == .linear }
@@ -1363,6 +1364,10 @@ struct UserMaskVM: Identifiable, Equatable {
             return Mask(id: id.uuidString, type: k.rawValue, source: "selection", invert: false,
                         feather: 0, opacity: 1, adjustments: adj,
                         selection: MaskSelection(kind: k, center: selCenter, range: selRange, softness: selSoftness))
+        case .skin:
+            return Mask(id: id.uuidString, type: "skin", source: "skin", invert: false,
+                        feather: 0, opacity: 1, adjustments: adj,
+                        selection: MaskSelection(kind: .color, center: selCenter, range: selRange, softness: selSoftness))
         }
     }
 }
@@ -1429,6 +1434,10 @@ struct UserMaskEditor: View {
                 ToneSlider(label: "Brightness", value: $mask.selCenter, range: 0...1, step: 0.01, unit: "", onChange: onChange)
                 ToneSlider(label: "Range", value: $mask.selRange, range: 0.01...0.5, step: 0.005, unit: "", onChange: onChange)
                 ToneSlider(label: "Softness", value: $mask.selSoftness, range: 0...0.3, step: 0.005, unit: "", onChange: onChange)
+            case .skin:
+                Text("Skin tones within the detected person, fair across complexions.")
+                    .font(Theme.mono(9)).foregroundColor(Theme.inkDim).fixedSize(horizontal: false, vertical: true)
+                ToneSlider(label: "Tolerance", value: $mask.selRange, range: 0.02...0.18, step: 0.005, unit: "", onChange: onChange)
             }
 
             Rectangle().fill(Theme.hairline).frame(height: 1)
