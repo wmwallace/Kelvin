@@ -163,7 +163,7 @@ final class AppState: ObservableObject {
         isProcessing = true
         statusMessage = "Decoding…"
         imageURL = url
-        userMasks = []; paintingMaskId = nil     // hand-drawn masks are per-photo
+        userMasks = []; paintingMaskId = nil; selectedUserMaskId = nil   // hand-drawn masks are per-photo
         do {
             let fullRes = try ImageDecoder.decode(url: url)
             self.fullResCI = fullRes
@@ -240,6 +240,7 @@ final class AppState: ObservableObject {
     func selectCandidate(id: String) {
         guard let candidate = candidates.first(where: { $0.id == id }) else { return }
         selectedCandidateId = id
+        showingOriginal = false          // never leave the before/after compare stuck on
         // Load the candidate's actual values into the editable set — the user edits from here.
         edit = candidate.baseRecipe.global
         editBaseline = candidate.baseRecipe.global
@@ -266,13 +267,57 @@ final class AppState: ObservableObject {
     /// brush size (fraction of the smaller edge).
     @Published var paintingMaskId: UUID?
     @Published var brushRadius = 0.09
+    /// The user mask being edited ON THE CANVAS (drag its handles to move/size it).
+    @Published var selectedUserMaskId: UUID?
+
+    // MARK: Canvas coordinate mapping (view ⇄ normalised image space)
+
+    /// The rectangle the image actually occupies inside the padded preview area (aspect-fit).
+    func imageRect(in container: CGSize, pad: CGFloat = 24) -> CGRect {
+        let availW = container.width - 2 * pad, availH = container.height - 2 * pad
+        guard let proxy = proxyCI, availW > 0, availH > 0 else { return .zero }
+        let aspect = proxy.extent.width / proxy.extent.height
+        var w = availW, h = availH
+        if aspect > availW / availH { h = availW / aspect } else { w = availH * aspect }
+        return CGRect(x: pad + (availW - w) / 2, y: pad + (availH - h) / 2, width: w, height: h)
+    }
+    func normToView(_ nx: Double, _ ny: Double, in rect: CGRect) -> CGPoint {
+        CGPoint(x: rect.minX + nx * rect.width, y: rect.minY + ny * rect.height)
+    }
+    func viewToNorm(_ p: CGPoint, in rect: CGRect) -> (Double, Double) {
+        (Double((p.x - rect.minX) / rect.width), Double((p.y - rect.minY) / rect.height))
+    }
+
+    private func withMask(_ id: UUID, _ body: (inout UserMaskVM) -> Void) {
+        guard let i = userMasks.firstIndex(where: { $0.id == id }) else { return }
+        body(&userMasks[i]); onEdit()
+    }
+    func moveMask(_ id: UUID, to nx: Double, _ ny: Double) {
+        withMask(id) { $0.cx = min(1, max(0, nx)); $0.cy = min(1, max(0, ny)) }
+    }
+    /// Resize a radial mask so its edge passes through the dragged point.
+    func resizeRadial(_ id: UUID, edgeAt p: CGPoint, in rect: CGRect) {
+        guard let m = userMasks.first(where: { $0.id == id }) else { return }
+        let c = normToView(m.cx, m.cy, in: rect)
+        let distPx = ((p.x - c.x) * (p.x - c.x) + (p.y - c.y) * (p.y - c.y)).squareRoot()
+        let minEdge = min(rect.width, rect.height)
+        withMask(id) { $0.radius = min(1.2, max(0.05, Double(distPx / minEdge))) }
+    }
+    /// Rotate a linear mask so its gradient direction points at the dragged handle.
+    func rotateLinear(_ id: UUID, handleAt p: CGPoint, in rect: CGRect) {
+        guard let m = userMasks.first(where: { $0.id == id }) else { return }
+        let c = normToView(m.cx, m.cy, in: rect)
+        let ang = atan2(p.x - c.x, -(p.y - c.y)) * 180 / .pi   // 0° = up
+        withMask(id) { $0.angle = (ang < 0 ? ang + 360 : ang) }
+    }
 
     /// Add a hand-drawn gradient mask, centred, with a gentle starting darken so the user sees it.
     func addUserMask(_ kind: UserMaskVM.Kind) {
         var m = UserMaskVM(kind: kind)
         m.exposure = -0.6
         userMasks.append(m)
-        if kind == .brush { paintingMaskId = m.id }   // brush: start painting right away
+        selectedUserMaskId = m.id                      // show its canvas handles
+        if kind == .brush { paintingMaskId = m.id }    // brush: start painting right away
         onEdit()
     }
 
@@ -325,6 +370,12 @@ final class AppState: ObservableObject {
         return ms.isEmpty ? nil : ms
     }
 
+    /// The last rendered proxy (for the histogram + the debounced craft check).
+    @Published var lastRenderedCI: CIImage?
+    private var craftToken = 0
+
+    /// Fast path — render the proxy and update the preview. Called live on every slider tick, so it
+    /// does NOT run the expensive craft check (Vision face detection); that's debounced separately.
     private func updateActiveRecipe() {
         guard let selectedId = selectedCandidateId,
               let candidate = candidates.first(where: { $0.id == selectedId }),
@@ -335,10 +386,20 @@ final class AppState: ObservableObject {
         finalRecipe.heal = removeDust && !healSpots.isEmpty ? healSpots : nil
         self.activeRecipe = finalRecipe
         let rendered = Renderer.render(proxy, with: finalRecipe, maskBitmaps: proxyMaskBitmaps)
+        self.lastRenderedCI = rendered
         self.activePreviewImage = ciToNSImage(rendered)
-        // Objective craft self-check on the edit the user is looking at — surfaces clipping,
-        // skin, or cast problems. Not a taste verdict; just "did this edit break something".
-        self.activeCraftNotes = AestheticEvaluator.score(rendered: rendered)?.notes ?? []
+        scheduleCraftCheck()
+    }
+
+    /// The objective craft self-check (clipping / skin / cast) runs ~200 ms after the last edit, so
+    /// dragging a slider stays smooth and the flags settle once you stop.
+    private func scheduleCraftCheck() {
+        craftToken += 1
+        let token = craftToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self, self.craftToken == token, let r = self.lastRenderedCI else { return }
+            self.activeCraftNotes = AestheticEvaluator.score(rendered: r)?.notes ?? []
+        }
     }
 
     func recordCurrentPick() {
@@ -658,6 +719,8 @@ struct ContentView: View {
                     // Drag paints into the active brush mask (no-op unless one is armed).
                     .gesture(DragGesture(minimumDistance: 0)
                         .onChanged { appState.paintAt($0.location, container: geo.size) })
+                    // Draggable handles for the selected radial / graduated mask.
+                    .overlay { maskCanvasOverlay(in: geo.size) }
                 }
                 previewFooter
             }
@@ -682,6 +745,53 @@ struct ContentView: View {
             .font(Theme.mono(11, .semibold)).tracking(1).foregroundColor(Theme.base)
             .padding(.horizontal, 10).padding(.vertical, 5)
             .background(Capsule().fill(Theme.glow.opacity(0.9))).padding(30)
+    }
+
+    /// On-canvas handles for the selected radial / graduated mask — drag directly on the image to
+    /// place, size, and rotate the mask instead of nudging sliders.
+    @ViewBuilder
+    private func maskCanvasOverlay(in container: CGSize) -> some View {
+        if !appState.showingOriginal, let mid = appState.selectedUserMaskId,
+           let m = appState.userMasks.first(where: { $0.id == mid }) {
+            let rect = appState.imageRect(in: container)
+            let center = appState.normToView(m.cx, m.cy, in: rect)
+            switch m.kind {
+            case .radial:
+                let rPx = m.radius * min(rect.width, rect.height)
+                Circle().stroke(Theme.glow.opacity(0.9), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+                    .frame(width: rPx * 2, height: rPx * 2).position(center).allowsHitTesting(false)
+                handle(at: center) { appState.moveMask(mid, to: appState.viewToNorm($0, in: rect).0,
+                                                        appState.viewToNorm($0, in: rect).1) }
+                handle(at: CGPoint(x: center.x + rPx, y: center.y), small: true) {
+                    appState.resizeRadial(mid, edgeAt: $0, in: rect)
+                }
+            case .linear:
+                let rad = m.angle * .pi / 180
+                let dir = CGPoint(x: sin(rad), y: -cos(rad))            // gradient direction (0° = up)
+                let perp = CGPoint(x: dir.y, y: -dir.x)
+                let len = max(rect.width, rect.height)
+                Path { p in
+                    p.move(to: CGPoint(x: center.x - perp.x * len, y: center.y - perp.y * len))
+                    p.addLine(to: CGPoint(x: center.x + perp.x * len, y: center.y + perp.y * len))
+                }.stroke(Theme.glow.opacity(0.9), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+                    .allowsHitTesting(false)
+                handle(at: center) { appState.moveMask(mid, to: appState.viewToNorm($0, in: rect).0,
+                                                        appState.viewToNorm($0, in: rect).1) }
+                handle(at: CGPoint(x: center.x + dir.x * 54, y: center.y + dir.y * 54), small: true) {
+                    appState.rotateLinear(mid, handleAt: $0, in: rect)
+                }
+            case .brush:
+                EmptyView()
+            }
+        }
+    }
+
+    private func handle(at p: CGPoint, small: Bool = false, onDrag: @escaping (CGPoint) -> Void) -> some View {
+        let d: CGFloat = small ? 13 : 17
+        return Circle().fill(Theme.glow)
+            .overlay(Circle().stroke(.white, lineWidth: 1.5))
+            .frame(width: d, height: d).position(p)
+            .highPriorityGesture(DragGesture(minimumDistance: 0).onChanged { onDrag($0.location) })
     }
 
     private var previewFooter: some View {
@@ -709,12 +819,14 @@ struct ContentView: View {
             HStack(spacing: 10) {
                 Button(action: openBatchPanel) { toolbarLabel("Batch apply", filled: false) }
                     .buttonStyle(.plain)
-                // Press and hold to see the untouched original.
-                toolbarLabel("Hold to compare", filled: false)
-                    .opacity(appState.showingOriginal ? 0.55 : 1)
-                    .onLongPressGesture(minimumDuration: 0.01, maximumDistance: 40, pressing: { pressing in
-                        appState.showingOriginal = pressing
-                    }, perform: {})
+                // Press and hold to see the untouched original. DragGesture(minimumDistance:0) is
+                // a reliable press-and-hold (onLongPressGesture's `pressing` state is flaky).
+                toolbarLabel(appState.showingOriginal ? "Original" : "Hold to compare",
+                             filled: appState.showingOriginal)
+                    .contentShape(Rectangle())
+                    .gesture(DragGesture(minimumDistance: 0)
+                        .onChanged { _ in if !appState.showingOriginal { appState.showingOriginal = true } }
+                        .onEnded { _ in appState.showingOriginal = false })
                 Spacer()
                 Button(action: openExportPanel) { toolbarLabel("Export full-res", filled: true) }
                     .buttonStyle(.plain)
@@ -749,6 +861,8 @@ struct ContentView: View {
     private var sidebar: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
+                HistogramView(image: appState.lastRenderedCI)
+
                 sectionLabel("Candidates", trailing: nil)
                 VStack(spacing: 8) {
                     ForEach(appState.candidates) { candidate in
@@ -808,6 +922,8 @@ struct ContentView: View {
                         UserMaskEditor(
                             mask: $m, onChange: appState.onEdit,
                             onDelete: { appState.removeUserMask(m.id) },
+                            isSelected: appState.selectedUserMaskId == m.id,
+                            onSelect: { appState.selectedUserMaskId = m.id },
                             isPainting: appState.paintingMaskId == m.id,
                             togglePaint: { appState.paintingMaskId = (appState.paintingMaskId == m.id) ? nil : m.id },
                             clearStrokes: { appState.clearStrokes(m.id) },
@@ -960,6 +1076,56 @@ struct CandidateRow: View {
     }
 }
 
+// MARK: - Histogram (live tonal distribution + clipping)
+
+struct HistogramView: View {
+    let image: CIImage?
+
+    var body: some View {
+        Canvas { ctx, size in
+            guard let bins = Self.luma(image), let peak = bins.max(), peak > 0 else { return }
+            let n = bins.count
+            var path = Path()
+            path.move(to: CGPoint(x: 0, y: size.height))
+            for (i, v) in bins.enumerated() {
+                let x = size.width * CGFloat(i) / CGFloat(n - 1)
+                let y = size.height * (1 - CGFloat(min(1, v / peak * 1.05)))
+                path.addLine(to: CGPoint(x: x, y: y))
+            }
+            path.addLine(to: CGPoint(x: size.width, y: size.height))
+            path.closeSubpath()
+            ctx.fill(path, with: .linearGradient(
+                Gradient(colors: [.white.opacity(0.55), .white.opacity(0.12)]),
+                startPoint: .zero, endPoint: CGPoint(x: 0, y: size.height)))
+            // Clipping flags: a dab at each end when pixels pile at pure black / white.
+            if (bins.first ?? 0) / peak > 0.5 {
+                ctx.fill(Path(CGRect(x: 0, y: 0, width: 4, height: size.height)), with: .color(.blue.opacity(0.6)))
+            }
+            if (bins.last ?? 0) / peak > 0.5 {
+                ctx.fill(Path(CGRect(x: size.width - 4, y: 0, width: 4, height: size.height)), with: .color(.red.opacity(0.6)))
+            }
+        }
+        .frame(height: 54)
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 7).fill(Color.black.opacity(0.35))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.hairline, lineWidth: 1)))
+    }
+
+    /// 64-bin luma histogram sampled from the rendered proxy. Cheap (100×100 sample).
+    static func luma(_ image: CIImage?) -> [Double]? {
+        guard let image, let data = try? ImageWriter.rgba8Sampled(image, width: 100, height: 100) else { return nil }
+        var bins = [Double](repeating: 0, count: 64)
+        data.withUnsafeBytes { rp in
+            let px = rp.bindMemory(to: UInt8.self)
+            for i in stride(from: 0, to: data.count, by: 4) {
+                let l = 0.299 * Double(px[i]) + 0.587 * Double(px[i + 1]) + 0.114 * Double(px[i + 2])
+                bins[min(63, Int(l / 256 * 64))] += 1
+            }
+        }
+        return bins
+    }
+}
+
 // MARK: - Tone slider (instrument readout)
 
 struct ToneSlider: View {
@@ -979,11 +1145,16 @@ struct ToneSlider: View {
                     .font(Theme.mono(11, value == 0 ? .regular : .semibold))
                     .foregroundColor(value == 0 ? Theme.inkFaint : Theme.glow)
             }
-            Slider(value: $value, in: range, step: step) { editing in
-                if !editing { onChange() }
-            }
-            .tint(Theme.glow)
-            .controlSize(.small)
+            Slider(value: $value, in: range, step: step)
+                .tint(Theme.glow)
+                .controlSize(.small)
+                // Live: re-render on every value change during the drag, not just on release.
+                .onChange(of: value) { _ in onChange() }
+        }
+        // Double-click the row to reset this control to its neutral value.
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            if range.contains(0) { value = 0; onChange() }
         }
     }
 
@@ -1031,6 +1202,8 @@ struct UserMaskEditor: View {
     @Binding var mask: UserMaskVM
     let onChange: () -> Void
     let onDelete: () -> Void
+    var isSelected = false
+    var onSelect: () -> Void = {}
     var isPainting = false
     var togglePaint: () -> Void = {}
     var clearStrokes: () -> Void = {}
@@ -1040,6 +1213,9 @@ struct UserMaskEditor: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text(mask.label).font(Theme.ui(12, .semibold)).foregroundColor(Theme.ink)
+                if isSelected && mask.kind != .brush {
+                    Text("editing on canvas").font(Theme.mono(9)).foregroundColor(Theme.glow)
+                }
                 Spacer()
                 Button(action: onDelete) {
                     Image(systemName: "trash").font(.system(size: 11)).foregroundColor(Theme.inkDim)
@@ -1086,8 +1262,11 @@ struct UserMaskEditor: View {
         .background(
             RoundedRectangle(cornerRadius: 8).fill(Theme.surface.opacity(0.6))
                 .overlay(RoundedRectangle(cornerRadius: 8)
-                    .stroke(isPainting ? Theme.glow : Theme.glow.opacity(0.4), lineWidth: isPainting ? 1.5 : 1))
+                    .stroke((isPainting || isSelected) ? Theme.glow : Theme.glow.opacity(0.4),
+                            lineWidth: (isPainting || isSelected) ? 1.5 : 1))
         )
+        .contentShape(Rectangle())
+        .onTapGesture { onSelect() }
     }
 }
 
