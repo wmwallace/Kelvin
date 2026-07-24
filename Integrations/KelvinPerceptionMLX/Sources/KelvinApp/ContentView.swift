@@ -101,7 +101,7 @@ final class AppState: ObservableObject {
     @Published var originalPreviewImage: NSImage?
     @Published var showingOriginal = false
     /// Objective craft flags on the current edit (clipping, skin, cast) — empty when clean.
-    @Published var activeCraftNotes: [String] = []
+    @Published var activeCraftIssues: [AestheticEvaluator.Issue] = []
 
     /// The full editable global adjustment set (absolute values, Lightroom-style). Sliders bind
     /// straight to its fields; it starts from the chosen candidate and the user takes it from there.
@@ -285,6 +285,36 @@ final class AppState: ObservableObject {
 
     func onEdit() { updateActiveRecipe(); scheduleCommit() }
 
+    /// Apply a targeted correction for a flagged craft issue — the "Fix" the warning offers. Nudges
+    /// the manual controls; the debounced craft check then re-evaluates and clears the flag if solved.
+    func applyFix(_ issue: AestheticEvaluator.Issue) {
+        func c(_ v: Double, _ r: ClosedRange<Double>) -> Double { min(r.upperBound, max(r.lowerBound, v)) }
+        switch issue {
+        case .skinOverSaturated:
+            edit.saturation = c(edit.saturation - 16, -100...100)
+            edit.vibrance = c(edit.vibrance - 12, -100...100)
+        case .skinAshy:
+            edit.vibrance = c(edit.vibrance + 12, -100...100)
+        case .skinHue:
+            edit.saturation = c(edit.saturation - 10, -100...100)  // ease the push that skewed the hue
+            edit.tint = c(edit.tint - 4, -100...100)
+        case .crushedShadows:
+            edit.shadows = c(edit.shadows + 22, -100...100)
+            edit.blacks = c(edit.blacks + 10, -100...100)
+            edit.contrast = c(edit.contrast - 8, -100...100)
+        case .blownHighlights:
+            edit.highlights = c(edit.highlights - 26, -100...100)
+            edit.whites = c(edit.whites - 8, -100...100)
+        case .flat:
+            edit.contrast = c(edit.contrast + 16, -100...100)
+            edit.whites = c(edit.whites + 6, -100...100)
+            edit.blacks = c(edit.blacks - 6, -100...100)
+        case .colorCast:
+            edit.temperatureK = 5500; edit.tint = 0            // neutralise white balance
+        }
+        onEdit()
+    }
+
     /// Level the horizon automatically (Vision). No-op if no clear horizon is found.
     func autoStraighten() {
         guard let proxy = proxyCI, let deg = HorizonDetector.levelingAngle(in: proxy) else { return }
@@ -397,6 +427,7 @@ final class AppState: ObservableObject {
         if kind == .colorRange { m.selCenter = 0.0; m.selRange = 0.1 }    // reds by default
         if kind == .luminance { m.selCenter = 0.78; m.selRange = 0.2 }    // highlights by default
         if kind == .skin { m.selCenter = 0.06; m.selRange = 0.06; m.selSoftness = 0.05; m.exposure = 0.3 }
+        if kind == .background { m.exposure = -0.5 }   // darken the background by default
         userMasks.append(m)
         selectedUserMaskId = m.id                      // show its canvas handles
         if kind == .brush { paintingMaskId = m.id }    // brush: start painting right away
@@ -483,7 +514,7 @@ final class AppState: ObservableObject {
         let token = craftToken
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
             guard let self, self.craftToken == token, let r = self.lastRenderedCI else { return }
-            self.activeCraftNotes = AestheticEvaluator.score(rendered: r)?.notes ?? []
+            self.activeCraftIssues = AestheticEvaluator.score(rendered: r)?.issues ?? []
         }
     }
 
@@ -865,7 +896,7 @@ struct ContentView: View {
                 handle(at: CGPoint(x: center.x + dir.x * 54, y: center.y + dir.y * 54), small: true) {
                     appState.rotateLinear(mid, handleAt: $0, in: rect)
                 }
-            case .brush, .colorRange, .luminance, .skin:
+            case .brush, .colorRange, .luminance, .skin, .background:
                 EmptyView()
             }
         }
@@ -891,14 +922,21 @@ struct ContentView: View {
                     .foregroundColor(temp.map(KelvinScale.color) ?? Theme.inkDim)
             }
             TemperatureRail(marks: temp.map { [($0, true)] } ?? [])
-            // Craft self-check: flag any objective problems (clipping, skin, cast) in this edit.
-            if !appState.activeCraftNotes.isEmpty {
-                HStack(alignment: .top, spacing: 6) {
-                    Text("⚠").font(Theme.ui(11))
-                    Text(appState.activeCraftNotes.joined(separator: " · "))
-                        .font(Theme.mono(10)).foregroundColor(Theme.inkDim)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 0)
+            // Craft self-check: each flagged problem gets a one-click Fix.
+            if !appState.activeCraftIssues.isEmpty {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(appState.activeCraftIssues, id: \.self) { issue in
+                        HStack(spacing: 8) {
+                            Text("⚠").font(Theme.ui(10))
+                            Text(issue.message).font(Theme.mono(10)).foregroundColor(Theme.inkDim)
+                            Spacer(minLength: 4)
+                            Button(action: { appState.applyFix(issue) }) {
+                                Text("Fix").font(Theme.ui(10, .semibold)).foregroundColor(Theme.base)
+                                    .padding(.horizontal, 10).padding(.vertical, 3)
+                                    .background(Capsule().fill(Theme.glow))
+                            }.buttonStyle(.plain)
+                        }
+                    }
                 }
             }
             HStack(spacing: 10) {
@@ -1084,6 +1122,11 @@ struct ContentView: View {
                             Button(action: { appState.addUserMask(.colorRange) }) { addMaskLabel("+ Colour") }.buttonStyle(.plain)
                             Button(action: { appState.addUserMask(.luminance) }) { addMaskLabel("+ Luma") }.buttonStyle(.plain)
                             Button(action: { appState.addUserMask(.skin) }) { addMaskLabel("+ Skin") }.buttonStyle(.plain)
+                        }
+                        HStack(spacing: 6) {
+                            Button(action: { appState.addUserMask(.background) }) { addMaskLabel("+ Background") }.buttonStyle(.plain)
+                            Color.clear.frame(maxWidth: .infinity)
+                            Color.clear.frame(maxWidth: .infinity)
                         }
                     }
                 }
@@ -1329,7 +1372,7 @@ struct EditSnapshot: Equatable {
 }
 
 struct UserMaskVM: Identifiable, Equatable {
-    enum Kind { case radial, linear, brush, colorRange, luminance, skin }
+    enum Kind { case radial, linear, brush, colorRange, luminance, skin, background }
     let id = UUID()
     var kind: Kind
     var cx = 0.5, cy = 0.5, radius = 0.35, angle = 0.0, softness = 0.35
@@ -1341,6 +1384,7 @@ struct UserMaskVM: Identifiable, Equatable {
         switch kind {
         case .radial: return "Radial"; case .linear: return "Graduated"; case .brush: return "Brush"
         case .colorRange: return "Colour range"; case .luminance: return "Luminance"; case .skin: return "Skin"
+        case .background: return "Background"
         }
     }
     var hasCanvasHandles: Bool { kind == .radial || kind == .linear }
@@ -1368,6 +1412,10 @@ struct UserMaskVM: Identifiable, Equatable {
             return Mask(id: id.uuidString, type: "skin", source: "skin", invert: false,
                         feather: 0, opacity: 1, adjustments: adj,
                         selection: MaskSelection(kind: .color, center: selCenter, range: selRange, softness: selSoftness))
+        case .background:
+            // type "subject" so the renderer finds the person bitmap; invert → everything else.
+            return Mask(id: id.uuidString, type: "subject", source: "segmentation", invert: true,
+                        feather: 20, opacity: 1, adjustments: adj)
         }
     }
 }
@@ -1438,6 +1486,9 @@ struct UserMaskEditor: View {
                 Text("Skin tones within the detected person, fair across complexions.")
                     .font(Theme.mono(9)).foregroundColor(Theme.inkDim).fixedSize(horizontal: false, vertical: true)
                 ToneSlider(label: "Tolerance", value: $mask.selRange, range: 0.02...0.18, step: 0.005, unit: "", onChange: onChange)
+            case .background:
+                Text("Everything except the detected subject — darken or blur it to make the subject pop.")
+                    .font(Theme.mono(9)).foregroundColor(Theme.inkDim).fixedSize(horizontal: false, vertical: true)
             }
 
             Rectangle().fill(Theme.hairline).frame(height: 1)

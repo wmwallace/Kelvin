@@ -19,6 +19,25 @@ import CoreImage
 ///     tint is a white-balance error.
 public enum AestheticEvaluator {
 
+    /// A specific, fixable defect — so the UI can offer a one-click correction, not just a warning.
+    public enum Issue: String, Sendable, Equatable {
+        case blownHighlights, crushedShadows, flat, colorCast
+        case skinOverSaturated, skinAshy, skinHue
+
+        /// The user-facing message.
+        public var message: String {
+            switch self {
+            case .blownHighlights:   return "blown highlights — lost detail"
+            case .crushedShadows:    return "crushed shadows — lost detail"
+            case .flat:              return "looks flat (narrow tonal range)"
+            case .colorCast:         return "strong colour cast"
+            case .skinOverSaturated: return "skin over-saturated"
+            case .skinAshy:          return "skin looks ashy/desaturated"
+            case .skinHue:           return "skin hue pushed off-natural"
+            }
+        }
+    }
+
     public struct Score: Sendable, Equatable {
         /// 0…1, higher is a more competently-finished edit.
         public let overall: Double
@@ -26,14 +45,16 @@ public enum AestheticEvaluator {
         public let clipping: Double
         public let skin: Double
         public let colorCast: Double
-        /// Human-readable flags for anything a colourist would call out. Empty = clean.
-        public let notes: [String]
+        /// Specific fixable defects a colourist would call out. Empty = clean.
+        public let issues: [Issue]
+        /// Human-readable flags (issue messages) — kept for compatibility/display.
+        public var notes: [String] { issues.map(\.message) }
     }
 
     /// Score a rendered edit from its measured statistics and (if a face is present) skin reading.
     /// `face` may be nil for scenes with no person — skin then simply doesn't factor in.
     public static func score(stats s: ImageStatistics, face: FaceSkin.Reading? = nil) -> Score {
-        var notes: [String] = []
+        var issues: [Issue] = []
 
         // --- Tonal range: reward reaching a true black + clean white; flat range reads dull.
         // Deliberate matte (lifted black) is style, so keep this gentle and floor it well above 0.
@@ -41,15 +62,15 @@ public enum AestheticEvaluator {
         let tonalRange: Double
         if dr >= 0.6 { tonalRange = 1.0 }
         else if dr >= 0.45 { tonalRange = 0.7 + (dr - 0.45) / 0.15 * 0.3 }
-        else { tonalRange = max(0.4, 0.7 - (0.45 - dr) * 1.2); notes.append("looks flat (narrow tonal range)") }
+        else { tonalRange = max(0.4, 0.7 - (0.45 - dr) * 1.2); issues.append(.flat) }
 
         // --- Clipping: some is fine; a lot is destroyed detail. Shadows weighted a touch heavier
         // because crushed shadows kill facial detail on darker skin.
         let hi = penalty(s.highlightClip, free: 0.02, bad: 0.10)
         let lo = penalty(s.shadowClip, free: 0.02, bad: 0.08)
         let clipping = min(hi, lo)
-        if s.highlightClip > 0.06 { notes.append("blown highlights (\(pct(s.highlightClip)))") }
-        if s.shadowClip > 0.05 { notes.append("crushed shadows (\(pct(s.shadowClip))) — lost detail") }
+        if s.highlightClip > 0.06 { issues.append(.blownHighlights) }
+        if s.shadowClip > 0.05 { issues.append(.crushedShadows) }
 
         // --- Skin plausibility (hue + saturation, never brightness). Only when a face is present.
         var skin = 1.0
@@ -63,19 +84,16 @@ public enum AestheticEvaluator {
             // Saturation: too low reads ashy/grey, too high reads sunburnt/plastic.
             let satScore = plateau(sat, lo: 0.12, hiPlateau: 0.65, softLo: 0.05, softHi: 0.88)
             skin = min(hueScore, satScore)
-            if hueScore < 0.6 {
-                notes.append((magenta || hue < 6) ? "skin hue pushed red/magenta"
-                                                  : "skin hue pushed yellow/orange")
-            }
-            if sat < 0.10 { notes.append("skin looks ashy/desaturated") }
-            else if sat > 0.75 { notes.append("skin over-saturated") }
+            if hueScore < 0.6 { issues.append(.skinHue) }
+            if sat < 0.10 { issues.append(.skinAshy) }
+            else if sat > 0.75 { issues.append(.skinOverSaturated) }
         }
 
         // --- Colour cast: a gentle warmth is flattering; a strong global tint is a WB error.
         // chromaA/chromaB are Lab-ish; magnitude ~>18 is a visible cast.
         let castMag = (s.chromaA * s.chromaA + s.chromaB * s.chromaB).squareRoot()
         let colorCast = penalty(castMag, free: 10, bad: 32)
-        if castMag > 22 { notes.append("strong colour cast") }
+        if castMag > 22 { issues.append(.colorCast) }
 
         // Objective floors (clipping, skin) dominate; tonal punch is lighter because matte is a
         // valid style. A face present pulls skin's weight up — it's the thing most worth getting right.
@@ -86,7 +104,7 @@ public enum AestheticEvaluator {
         let overall = w.reduce(0.0) { $0 + $1.0 * $1.1 } / w.reduce(0.0) { $0 + $1.1 }
 
         return Score(overall: overall, tonalRange: tonalRange, clipping: clipping,
-                     skin: skin, colorCast: colorCast, notes: notes)
+                     skin: skin, colorCast: colorCast, issues: issues)
     }
 
     /// Convenience: measure a rendered image (statistics + skin) and score it. Use this to rank
