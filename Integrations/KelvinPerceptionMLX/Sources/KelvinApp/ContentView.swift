@@ -1134,7 +1134,10 @@ struct ContentView: View {
         VStack(spacing: 0) {
             header
             Divider().overlay(Theme.hairline)
-            if appState.selectedCandidateId != nil, appState.activePreviewImage != nil {
+            // As soon as the photo is decoded. Waiting for perception before showing ANYTHING
+            // meant dropping a file and watching an empty drop zone for the length of a model
+            // run — the photo is right there, so show it and let the looks arrive around it.
+            if appState.proxyCI != nil {
                 workspace
             } else {
                 emptyState
@@ -1254,7 +1257,10 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 GeometryReader { geo in
                     ZStack {
-                        if let img = (appState.showingOriginal ? appState.originalPreviewImage : appState.activePreviewImage) ?? appState.activePreviewImage {
+                        let shown = appState.showingOriginal
+                            ? appState.originalPreviewImage
+                            : (appState.activePreviewImage ?? appState.originalPreviewImage)
+                        if let img = shown {
                             Image(nsImage: img)
                                 .resizable().scaledToFit()
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1570,6 +1576,16 @@ struct ContentView: View {
                 }
 
                 sectionLabel("Candidates", trailing: nil)
+                if appState.candidates.isEmpty {
+                    // Say what's happening instead of leaving a hole. The photo is already on
+                    // screen, so this is the only part still pending.
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Reading the scene…")
+                            .font(Theme.mono(10)).foregroundColor(Theme.inkDim)
+                    }
+                    .padding(.vertical, 6)
+                }
                 VStack(spacing: 8) {
                     ForEach(appState.candidates) { candidate in
                         CandidateRow(candidate: candidate,
@@ -1580,11 +1596,6 @@ struct ContentView: View {
                 }
 
                 let ch = appState.onEdit   // re-render on any slider change
-
-                if appState.capture.camera != nil || appState.capture.summaryText != nil {
-                    sectionLabel("Capture", trailing: nil)
-                    capturePanel
-                }
 
                 sectionLabel("Looks", trailing: appState.activeLookId == nil ? nil : "On")
                 VStack(alignment: .leading, spacing: 10) {
@@ -1718,6 +1729,14 @@ struct ContentView: View {
                 }
                 .toggleStyle(.switch).tint(Theme.glow)
                 .disabled(appState.detectedSpotCount == 0)
+
+                // Last: a record of the photograph, not a control reached for mid-edit. Keeping
+                // it above Tone and Colour pushed the controls actually used on every photo
+                // further down the scroll.
+                if appState.capture.camera != nil || appState.capture.summaryText != nil {
+                    sectionLabel("Capture", trailing: nil)
+                    capturePanel
+                }
             }
             .padding(20)
         }
