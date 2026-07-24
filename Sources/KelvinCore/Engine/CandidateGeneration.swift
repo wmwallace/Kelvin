@@ -79,7 +79,7 @@ public extension RecipeEngine {
             curve: nil,
             hsl: nil,
             // The subject lift is corrective — shared across every style.
-            masks: subjectMask(p, subjectLuma: subjectLuma).map { [$0] },
+            masks: subjectMask(p, s, subjectLuma: subjectLuma).map { [$0] },
             detail: detail(p),
             geometry: nil
         )

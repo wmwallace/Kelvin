@@ -73,32 +73,48 @@ public enum RecipeEngine {
             global: g,
             curve: nil,
             hsl: nil,
-            masks: subjectMask(p, subjectLuma: subjectLuma).map { [$0] },
+            masks: subjectMask(p, s, subjectLuma: subjectLuma).map { [$0] },
             detail: detail(p),
             geometry: nil
         )
     }
 
-    /// A local subject lift — the classic professional move: brighten a backlit or underexposed
-    /// person without touching the background. Emitted (as a shared, corrective mask) when the
-    /// measured subject is darker than a flattering target, or perception flagged the subject as
-    /// underexposed. The actual mask bitmap is generated at render time (`SubjectMask`).
-    static func subjectMask(_ p: Perception, subjectLuma: Double?) -> Mask? {
+    /// A local subject lift — brighten a backlit or underexposed person without touching the
+    /// background. Emitted as a shared, corrective mask; the bitmap is generated at render time.
+    ///
+    /// SKIN-TONE FAIRNESS: this must NOT normalise skin to a universal brightness. Darker skin is
+    /// legitimately darker in luma; forcing it toward a fixed light target washes it out and loses
+    /// the tone — the exact bias that plagues auto-editors. So we lift ONLY when the subject is
+    /// genuinely underexposed (much darker than the scene → backlit, or crushed), recover a
+    /// fraction of the deficit *relative to the scene* (correct for any complexion), and lean on
+    /// shadow recovery — which reveals detail — more than raw brightening.
+    static func subjectMask(_ p: Perception, _ s: ImageStatistics, subjectLuma: Double?) -> Mask? {
         guard let luma = subjectLuma, p.subject.present,
               p.subject.type == .person || p.subject.type == .animal else { return nil }
 
-        let target = 0.55   // a flattering brightness for a face/subject
-        let needsLift = luma < target - 0.04 || p.problems.contains(.underexposedSubject)
-        guard needsLift else { return nil }
+        let deficit = s.medianLuma - luma      // > 0 means the subject is darker than the scene
+        let backlit = deficit > 0.12
+        let crushed = luma < 0.20              // genuinely underexposed regardless of scene
+        let flagged = p.problems.contains(.underexposedSubject)
+        guard backlit || crushed || flagged else { return nil }
 
-        // Gentle local lift in stops, from how far the subject sits below target.
-        let ev = roundedClamp(log2(target / max(0.06, luma)) * 0.7, to: 0...1.1, step: 0.01)
-        guard ev > 0.06 else { return nil }
+        // Recover ~half the backlight gap (scene-relative → tone-preserving), or a small absolute
+        // lift for a crushed subject. Never pulls skin toward a universal target brightness.
+        let lift: Double
+        if backlit {
+            lift = log2((luma + deficit * 0.55) / max(0.06, luma)) * 0.7
+        } else {
+            lift = log2(max(luma + 0.08, 0.24) / max(0.06, luma)) * 0.6
+        }
+        let ev = roundedClamp(lift, to: 0...0.85, step: 0.01)
+        guard ev > 0.05 else { return nil }
 
         return Mask(
             id: "subject", type: "subject", source: "segmentation", invert: false,
             feather: 35, opacity: 1.0,
-            adjustments: ["exposure_ev": ev, "shadows": roundedClamp(ev * 30, to: 0...25, step: 1)]
+            // Shadows (detail recovery) weighted over raw exposure — kinder to skin at any tone.
+            adjustments: ["exposure_ev": roundedClamp(ev * 0.7, to: 0...0.6, step: 0.01),
+                          "shadows": roundedClamp(ev * 45, to: 0...35, step: 1)]
         )
     }
 

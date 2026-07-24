@@ -28,6 +28,12 @@ public enum Renderer {
         let g = recipe.global
         var img = image
 
+        // Non-destructive healing first — repair dust/spots on the source pixels so the downstream
+        // tone/colour pipeline treats the healed areas like everything else. Empty = no-op.
+        for spot in recipe.heal ?? [] where spot.radius > 0 {
+            img = applyHeal(img, spot: spot)
+        }
+
         // White balance. temperature_k neutral is "as-shot" (nil) → skip entirely when nil.
         if let temperatureK = g.temperatureK {
             img = img.applyingFilter("CITemperatureAndTint", parameters: [
@@ -168,6 +174,37 @@ public enum Renderer {
         return layer.applyingFilter("CIBlendWithMask", parameters: [
             "inputBackgroundImage": base,
             "inputMaskImage": m
+        ])
+    }
+
+    /// Cover one spot with a clean patch sampled from `(dx,dy)` away, blended through a feathered
+    /// circle. Coordinates in `HealSpot` are normalised, top-left origin; Core Image is
+    /// bottom-left, so y is flipped here.
+    static func applyHeal(_ image: CIImage, spot: HealSpot) -> CIImage {
+        let extent = image.extent
+        guard !extent.isInfinite, extent.width > 0, extent.height > 0 else { return image }
+        let w = extent.width, h = extent.height
+        let cx = extent.origin.x + spot.x * w
+        let cy = extent.origin.y + (1 - spot.y) * h
+        let r = max(1.0, spot.radius * min(w, h))
+
+        // Shift the image so the source patch (spot + offset) lands on the spot. dy is +down
+        // (top-origin) while CI y is up, hence +dy in CI.
+        let source = image
+            .transformed(by: CGAffineTransform(translationX: -spot.dx * w, y: spot.dy * h))
+            .cropped(to: extent)
+
+        guard let mask = CIFilter(name: "CIRadialGradient", parameters: [
+            "inputCenter": CIVector(x: cx, y: cy),
+            "inputRadius0": r,
+            "inputRadius1": r * (1 + max(0.05, spot.feather)),
+            "inputColor0": CIColor(red: 1, green: 1, blue: 1, alpha: 1),
+            "inputColor1": CIColor(red: 0, green: 0, blue: 0, alpha: 1)
+        ])?.outputImage?.cropped(to: extent) else { return image }
+
+        return source.applyingFilter("CIBlendWithMask", parameters: [
+            "inputBackgroundImage": image,
+            "inputMaskImage": mask
         ])
     }
 

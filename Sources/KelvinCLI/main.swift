@@ -271,6 +271,23 @@ case "mask":
         fail("\(error)")
     }
 
+case "heal":
+    // Auto-detect dust/spots and render the healed result (non-generative, non-destructive).
+    let rest = Array(arguments.dropFirst())
+    guard let inPath = value(for: "--in", in: rest) else { fail("heal requires --in") }
+    guard let outPath = value(for: "--out", in: rest) else { fail("heal requires --out") }
+    do {
+        let image = try ImageDecoder.decode(url: URL(fileURLWithPath: inPath))
+        let spots = DustDetector.detect(in: image)
+        print("Detected \(spots.count) spot(s)")
+        var recipe = Recipe.neutral
+        recipe.heal = spots
+        try ImageWriter.write(Renderer.render(image, with: recipe), to: URL(fileURLWithPath: outPath))
+        print("Wrote healed image to \(outPath)")
+    } catch {
+        fail("\(error)")
+    }
+
 case "eval":
     let rest = Array(arguments.dropFirst())
 

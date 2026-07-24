@@ -18,6 +18,10 @@ public struct Recipe: Codable, Equatable, Sendable {
     public var masks: [Mask]?
     public var detail: Detail?
     public var geometry: Geometry?
+    /// Non-destructive spot healing (dust, sensor spots, small blemishes). Stored as references
+    /// — positions + a source offset — not baked pixels, so it's replayable and batch-portable.
+    /// Defaulted so existing constructors are unaffected; the base edit path never sets it.
+    public var heal: [HealSpot]? = nil
 
     public static let currentSchemaVersion = 1
 
@@ -62,7 +66,7 @@ public struct Recipe: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
-        case id, label, provenance, global, curve, hsl, masks, detail, geometry
+        case id, label, provenance, global, curve, hsl, masks, detail, geometry, heal
     }
 
     public init(from decoder: Decoder) throws {
@@ -78,7 +82,37 @@ public struct Recipe: Codable, Equatable, Sendable {
         masks = try c.decodeIfPresent([Mask].self, forKey: .masks)
         detail = try c.decodeIfPresent(Detail.self, forKey: .detail)
         geometry = try c.decodeIfPresent(Geometry.self, forKey: .geometry)
+        heal = try c.decodeIfPresent([HealSpot].self, forKey: .heal)
     }
+}
+
+/// A single non-destructive heal: cover the spot at (`x`,`y`) by sampling a clean patch offset by
+/// (`dx`,`dy`). All values are normalised — `x`/`y`/`dx`/`dy` as fractions of width/height (top-left
+/// origin, y down), `radius`/`feather` as fractions of the shorter edge — so one heal list applies
+/// across any resolution and across a whole shoot (sensor dust sits at a fixed position).
+public struct HealSpot: Codable, Equatable, Sendable {
+    public var x: Double
+    public var y: Double
+    public var radius: Double
+    public var dx: Double
+    public var dy: Double
+    public var feather: Double
+
+    public init(x: Double, y: Double, radius: Double, dx: Double, dy: Double, feather: Double = 0.5) {
+        self.x = x; self.y = y; self.radius = radius; self.dx = dx; self.dy = dy; self.feather = feather
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        x = clamp(try c.decodeIfPresent(Double.self, forKey: .x) ?? 0, to: 0...1)
+        y = clamp(try c.decodeIfPresent(Double.self, forKey: .y) ?? 0, to: 0...1)
+        radius = clamp(try c.decodeIfPresent(Double.self, forKey: .radius) ?? 0, to: 0...0.5)
+        dx = clamp(try c.decodeIfPresent(Double.self, forKey: .dx) ?? 0, to: -1...1)
+        dy = clamp(try c.decodeIfPresent(Double.self, forKey: .dy) ?? 0, to: -1...1)
+        feather = clamp(try c.decodeIfPresent(Double.self, forKey: .feather) ?? 0.5, to: 0...1)
+    }
+
+    enum CodingKeys: String, CodingKey { case x, y, radius, dx, dy, feather }
 }
 
 public struct Provenance: Codable, Equatable, Sendable {
