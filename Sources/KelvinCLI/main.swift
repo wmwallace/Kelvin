@@ -334,6 +334,7 @@ case "bench":
                              selection: MaskSelection(kind: .color, center: 0.33, range: 0.1, softness: 0.08))]
         })
         bench("+ straighten 4°", recipe { $0.geometry = Geometry(rotateDeg: 4, crop: nil, lensCorrection: false) })
+        bench("+ clarity (halo-suppressed)", recipe { $0.global.clarity = 40 })
         for count in [25, 250, 1200] {
             let stamps = (0..<count).map { i in
                 BrushStamp(x: 0.2 + Double(i) * 0.002, y: 0.5, radius: 0.06, hardness: 0.6)

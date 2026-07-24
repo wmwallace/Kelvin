@@ -115,10 +115,7 @@ public enum Renderer {
         // Clarity: mid-radius local contrast, approximated with an unsharp mask whose radius
         // scales with the image so a proxy and full-res behave comparably. Neutral (0) skips.
         if g.clarity != 0 {
-            img = img.applyingFilter("CIUnsharpMask", parameters: [
-                "inputRadius": clarityRadius(for: img),
-                "inputIntensity": g.clarity / 100.0
-            ])
+            img = Clarity.apply(img, amount: g.clarity, radius: clarityRadius(for: img))
         }
 
         // Vibrance (CIVibrance, neutral 0.0).
@@ -509,7 +506,7 @@ public enum Renderer {
 
     /// Unsharp radius scaled to the shorter image edge (finite extents only; a sensible
     /// constant otherwise), so "clarity" reads as local contrast rather than edge sharpening.
-    private static func clarityRadius(for image: CIImage) -> Double {
+    static func clarityRadius(for image: CIImage) -> Double {
         let extent = image.extent
         guard !extent.isInfinite, extent.width > 0, extent.height > 0 else { return 3.0 }
         return max(1.0, Double(min(extent.width, extent.height)) * 0.01)
