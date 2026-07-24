@@ -94,7 +94,8 @@ Fully numeric. Renderer-agnostic. Serializes to the sidecar.
     "saturation": 0,
     "clarity": 6,
     "texture": 0,
-    "dehaze": 0
+    "dehaze": 0,
+    "fusion": 55
   },
   "curve": {
     "luma": [[0, 0], [64, 58], [192, 200], [255, 255]],
@@ -106,7 +107,7 @@ Fully numeric. Renderer-agnostic. Serializes to the sidecar.
     "orange": { "h": -2, "s": 6, "l": 4 }
   },
   "heal": [
-    { "x": 0.42, "y": 0.13, "radius": 0.004, "dx": 0.02, "dy": 0.0, "feather": 50 }
+    { "x": 0.42, "y": 0.13, "radius": 0.004, "dx": 0.02, "dy": 0.0, "feather": 0.5 }
   ],
   "masks": [
     {
@@ -183,6 +184,10 @@ caller supplies for that `id`/`type`).
 `heal` sits outside `masks`: a list of `{x, y, radius, dx, dy, feather}` spots, each patched
 from `(dx, dy)` away. Non-generative and applied first, so downstream tone treats the
 repaired area like any other pixels.
+
+**Watch the units — they differ by field.** `Mask.feather` is **0…100**, while `HealSpot.feather`
+is **0…1** (a fraction, like its `radius`). Both clamp on decode, so getting it wrong fails
+silently: a heal spot written with `feather: 50` clamps to `1.0` and comes back maximally soft.
 
 ### Ranges
 

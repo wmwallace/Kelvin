@@ -43,6 +43,7 @@ public enum RecipeEngine {
         g.highlights = highlightRecovery(p, s)
         g.shadows = shadowLift(p, s)
         g.dehaze = dehazeAmount(p, s, skyLuma: skyLuma)
+        g.fusion = fusionAmount(p, s, subjectLuma: subjectLuma)
 
         let wb = whiteBalance(p, s)
         g.temperatureK = wb.temperatureK
@@ -209,6 +210,29 @@ public enum RecipeEngine {
         // Foliage/grass: a touch more saturated, nudged toward yellow — the remembered green.
         // Negative `h` walks the green band (120°) toward yellow (60°); ±100 spans ±30°.
         return ["green": HSLAdjustment(h: -8, s: 10, l: 0)]
+    }
+
+    /// How much single-image exposure fusion the frame wants (0…100).
+    ///
+    /// Only for scenes a *global* tone mapping genuinely can't serve: a backlit subject sitting far
+    /// darker than the scene behind them, a range the model calls extreme, or a frame clipping at
+    /// both ends at once. Those are precisely the cases where one curve has to choose between the
+    /// sky and the face. An ordinary well-lit frame gets nothing — fusion there would flatten it for
+    /// no gain, which is exactly the failure mode the first tuning pass had.
+    static func fusionAmount(_ p: Perception, _ s: ImageStatistics, subjectLuma: Double?) -> Double {
+        guard p.intent != .archival, p.intent != .productAccurate else { return 0 }
+
+        let backlitSubject = subjectLuma.map { s.medianLuma - $0 > 0.14 } ?? false
+        let backlitScene = p.lighting.condition == .backlit
+        let extremeRange = p.lighting.contrastRange == .extreme
+        let clippingBothEnds = s.highlightClip > 0.02 && s.shadowClip > 0.02
+        guard backlitSubject || backlitScene || extremeRange || clippingBothEnds else { return 0 }
+
+        var amount = 35.0
+        if backlitSubject || backlitScene { amount += 20 }
+        if extremeRange { amount += 15 }
+        if clippingBothEnds { amount += 10 }
+        return roundedClamp(amount, to: 0...80, step: 1)
     }
 
     // MARK: - Exposure

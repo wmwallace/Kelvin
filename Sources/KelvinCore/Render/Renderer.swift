@@ -42,6 +42,13 @@ public enum Renderer {
             ])
         }
 
+        // Exposure fusion. Local tone mapping applied BEFORE the global tone controls, so the
+        // curve and the highlight/shadow sliders start from a frame whose range already fits —
+        // rather than asking one global mapping to serve a sky and a backlit face at once.
+        if g.fusion > 0 {
+            img = ExposureFusion.fuse(img, strength: g.fusion / 100.0)
+        }
+
         // Exposure (EV).
         if g.exposureEV != 0 {
             img = img.applyingFilter("CIExposureAdjust", parameters: [

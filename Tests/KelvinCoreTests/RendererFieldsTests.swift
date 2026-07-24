@@ -183,6 +183,27 @@ final class RendererFieldsTests: XCTestCase {
                        "absent black_and_white must keep the photo in colour (no-op)")
     }
 
+    // MARK: - Exposure fusion (local tone mapping)
+
+    /// The property that makes fusion worth having over a global curve: it opens the shadows and
+    /// holds the highlights *without* dragging the midtones with them.
+    func testFusionOpensShadowsWithoutShiftingMidtones() throws {
+        let source = TestSupport.makeGradientImage(width: 128, height: 128)
+        let before = try ImageStatistics.compute(source)
+        let out = Renderer.render(source, with: recipe { $0.fusion = 100 })
+        let after = try ImageStatistics.compute(out)
+        XCTAssertGreaterThan(after.shadowLevel, before.shadowLevel + 0.01, "shadows should open")
+        XCTAssertLessThan(abs(after.medianLuma - before.medianLuma), 0.06,
+                          "midtones should stay put — otherwise it's just a brightness lift")
+        XCTAssertLessThan(after.highlightLevel, before.highlightLevel + 0.03, "highlights held")
+    }
+
+    func testFusionZeroIsNoOp() throws {
+        let source = TestSupport.makeGradientImage()
+        XCTAssertEqual(try bytes(Renderer.render(source, with: recipe { $0.fusion = 0 })),
+                       try bytes(source), "fusion 0 must be a byte-identical no-op")
+    }
+
     func testShapeMaskNeedsNoSuppliedBitmap() throws {
         // The whole point: a parametric mask renders with an EMPTY maskBitmaps dict.
         let mask = Mask(id: "r", type: "r", source: "gradient", invert: false, feather: 0,

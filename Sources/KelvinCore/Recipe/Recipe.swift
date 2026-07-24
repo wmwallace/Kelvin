@@ -149,18 +149,21 @@ public struct GlobalAdjustments: Codable, Equatable, Sendable {
     public var clarity: Double
     public var texture: Double
     public var dehaze: Double
+    /// Single-image exposure fusion, 0…100. Local tone mapping: opens shadows and holds
+    /// highlights without touching midtones — see `ExposureFusion`. Neutral 0.
+    public var fusion: Double
 
     public static let neutral = GlobalAdjustments(
         exposureEV: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0,
         temperatureK: nil, tint: 0, vibrance: 0, saturation: 0, clarity: 0, texture: 0,
-        dehaze: 0
+        dehaze: 0, fusion: 0
     )
 
     public init(
         exposureEV: Double, contrast: Double, highlights: Double, shadows: Double,
         whites: Double, blacks: Double, temperatureK: Double?, tint: Double,
         vibrance: Double, saturation: Double, clarity: Double, texture: Double,
-        dehaze: Double
+        dehaze: Double, fusion: Double = 0
     ) {
         self.exposureEV = exposureEV
         self.contrast = contrast
@@ -175,13 +178,14 @@ public struct GlobalAdjustments: Codable, Equatable, Sendable {
         self.clarity = clarity
         self.texture = texture
         self.dehaze = dehaze
+        self.fusion = fusion
     }
 
     enum CodingKeys: String, CodingKey {
         case exposureEV = "exposure_ev"
         case contrast, highlights, shadows, whites, blacks
         case temperatureK = "temperature_k"
-        case tint, vibrance, saturation, clarity, texture, dehaze
+        case tint, vibrance, saturation, clarity, texture, dehaze, fusion
     }
 
     public init(from decoder: Decoder) throws {
@@ -199,6 +203,7 @@ public struct GlobalAdjustments: Codable, Equatable, Sendable {
         clarity = try c.clampedDouble(.clarity, default: 0, in: Ranges.signed100)
         texture = try c.clampedDouble(.texture, default: 0, in: Ranges.signed100)
         dehaze = try c.clampedDouble(.dehaze, default: 0, in: Ranges.signed100)
+        fusion = try c.clampedDouble(.fusion, default: 0, in: Ranges.unsigned100)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -216,6 +221,7 @@ public struct GlobalAdjustments: Codable, Equatable, Sendable {
         try c.encode(clarity, forKey: .clarity)
         try c.encode(texture, forKey: .texture)
         try c.encode(dehaze, forKey: .dehaze)
+        try c.encode(fusion, forKey: .fusion)
     }
 
     /// True when this recipe would leave the image untouched (used by the renderer to

@@ -361,6 +361,26 @@ case "bench":
         }
     } catch { fail("\(error)") }
 
+case "fuse":
+    // Experimental: single-image exposure fusion (Mertens). Compare against the untouched frame.
+    let rest = Array(arguments.dropFirst())
+    guard let inPath = value(for: "--in", in: rest) else { fail("fuse requires --in") }
+    guard let outPath = value(for: "--out", in: rest) else { fail("fuse requires --out") }
+    let strength = Double(value(for: "--strength", in: rest) ?? "1.0") ?? 1.0
+    do {
+        let image = try ImageDecoder.decode(url: URL(fileURLWithPath: inPath))
+        let fused = ExposureFusion.fuse(image, strength: strength)
+        try ImageWriter.write(fused, to: URL(fileURLWithPath: outPath))
+        if let before = try? ImageStatistics.compute(image),
+           let after = try? ImageStatistics.compute(fused) {
+            print(String(format: "shadows %.3f→%.3f  highlights %.3f→%.3f  median %.3f→%.3f",
+                         before.shadowLevel, after.shadowLevel,
+                         before.highlightLevel, after.highlightLevel,
+                         before.medianLuma, after.medianLuma))
+        }
+        print("Wrote \(outPath)")
+    } catch { fail("\(error)") }
+
 case "horizon":
     // Debug: print the detected leveling angle.
     let rest = Array(arguments.dropFirst())

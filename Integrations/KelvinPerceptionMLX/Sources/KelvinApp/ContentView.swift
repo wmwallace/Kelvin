@@ -840,6 +840,7 @@ final class AppState: ObservableObject {
         d("clarity", edit.clarity, editBaseline.clarity, 0.5)
         d("texture", edit.texture, editBaseline.texture, 0.5)
         d("dehaze", edit.dehaze, editBaseline.dehaze, 0.5)
+        d("fusion", edit.fusion, editBaseline.fusion, 0.5)
         d("tint", edit.tint, editBaseline.tint, 0.5)
         if let et = edit.temperatureK, let bt = editBaseline.temperatureK, abs(et - bt) > 5 {
             t["temperatureK"] = et - bt
@@ -859,6 +860,7 @@ final class AppState: ObservableObject {
         g.clarity = clampStep(g.clarity + (t["clarity"] ?? 0), -100...100, 1)
         g.texture = clampStep(g.texture + (t["texture"] ?? 0), -100...100, 1)
         g.dehaze = clampStep(g.dehaze + (t["dehaze"] ?? 0), 0...100, 1)
+        g.fusion = clampStep(g.fusion + (t["fusion"] ?? 0), 0...100, 1)
         g.tint = clampStep(g.tint + (t["tint"] ?? 0), -100...100, 1)
         if let dt = t["temperatureK"] { g.temperatureK = (g.temperatureK ?? 5500) + dt }
     }
@@ -1325,6 +1327,7 @@ struct ContentView: View {
                     ToneSlider(label: "Texture", value: $appState.edit.texture, range: -100...100, step: 1, unit: "", onChange: ch)
                     ToneSlider(label: "Clarity", value: $appState.edit.clarity, range: -100...100, step: 1, unit: "", onChange: ch)
                     ToneSlider(label: "Dehaze", value: $appState.edit.dehaze, range: 0...100, step: 1, unit: "", onChange: ch)
+                    ToneSlider(label: "Fusion", value: $appState.edit.fusion, range: 0...100, step: 1, unit: "", onChange: ch)
                 }
 
                 sectionLabel("Color", trailing: nil)
