@@ -26,6 +26,9 @@ enum Theme {
     static let neutral  = Color(hex: 0xF1EADC)   // ~5500K
     static let cool     = Color(hex: 0x6FACFF)   // ~9000K
     static let glow     = Color(hex: 0xFF9A55)   // primary accent
+    /// "Look at this" — deliberately NOT the accent colour, and not red. A soft-focus flag is a
+    /// question for the photographer, not an error and not a recommendation.
+    static let warn     = Color(hex: 0xE8C468)
 
     static func mono(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
         .system(size: size, weight: weight, design: .monospaced)
@@ -217,7 +220,7 @@ final class AppState: ObservableObject {
 
     /// Which frames the strip is showing.
     enum StripFilter: String, CaseIterable {
-        case all = "All", keepers = "Keepers", undecided = "Undecided"
+        case all = "All", keepers = "Keepers", undecided = "Undecided", soft = "Soft"
     }
     @Published var stripFilter: StripFilter = .all
 
@@ -230,7 +233,56 @@ final class AppState: ObservableObject {
             case .all:       return flags[url] != .reject
             case .keepers:   return flags[url] == .keep
             case .undecided: return flags[url] == nil
+            // Review, not a verdict: this is the list to LOOK at, so the false positives are
+            // the point of it rather than something hidden by it.
+            case .soft:      return focus[url]?.isSoft == true
             }
+        }
+    }
+
+    // MARK: Focus review
+    //
+    // Soft frames are SURFACED, never acted on. The measurement is good but not infallible, and an
+    // automatic reject would quietly bin a frame you would have kept while hiding the evidence
+    // that it got it wrong. Flagging for review keeps a false positive visible and one keystroke
+    // from being corrected — which is also the only way the thresholds ever get better.
+
+    /// Acuity per photo, filled in by the scan. Absent = not yet measured, which is distinct from
+    /// measured-and-fine and is why this is not a Set.
+    @Published var focus: [URL: FocusMeasure.Reading] = [:]
+    @Published var focusScanProgress: Double?      // nil = not scanning
+
+    var softCount: Int { folderPhotos.filter { focus[$0]?.isSoft == true }.count }
+
+    /// Measure every frame in the folder, newest results published as they arrive so the strip
+    /// fills in progressively rather than freezing until the end.
+    func scanFocus() {
+        guard focusScanProgress == nil else { return }      // already running
+        let photos = folderPhotos
+        guard !photos.isEmpty else { return }
+        focusScanProgress = 0
+
+        Task { [weak self] in
+            var done = 0
+            for url in photos {
+                guard let self else { return }
+                if self.focus[url] == nil {
+                    // Measured on the same 1200px proxy the thresholds were calibrated against —
+                    // a different scale would silently invalidate them.
+                    let reading = await Task.detached(priority: .utility) { () -> FocusMeasure.Reading? in
+                        guard let full = try? ImageDecoder.decode(url: url) else { return nil }
+                        let proxy = AppState.materialiseShared(
+                            PerceptionProxy.downsample(full, maxEdge: 1200))
+                        return FocusMeasure.read(proxy)
+                    }.value
+                    if let reading { self.focus[url] = reading }
+                }
+                done += 1
+                self.focusScanProgress = Double(done) / Double(photos.count)
+                // Yield so the UI keeps drawing and the scan can be interrupted by simply working.
+                await Task.yield()
+            }
+            self?.focusScanProgress = nil
         }
     }
 
@@ -582,7 +634,9 @@ final class AppState: ObservableObject {
                 let measured = LocalMasks.measure(in: proxy)
                 // Scan for sensor dust once (normalised coords reused everywhere). Conservative —
                 // a clean frame yields none. Off until the user opts in.
-                return MeasuredPhoto(stats: stats, masks: measured, dust: DustDetector.detect(in: proxy))
+                return MeasuredPhoto(stats: stats, masks: measured,
+                                     dust: DustDetector.detect(in: proxy),
+                                     focus: FocusMeasure.read(proxy))
             }.value
             guard imageURL == url else { return }
 
@@ -592,6 +646,7 @@ final class AppState: ObservableObject {
             self.skyLuma = measurement.masks.skyLuma
             let proxyMasks = measurement.masks.bitmaps
 
+            self.focus[url] = measurement.focus
             self.healSpots = measurement.dust
             self.detectedSpotCount = self.healSpots.count
             self.removeDust = false
@@ -1307,6 +1362,7 @@ final class AppState: ObservableObject {
         let stats: ImageStatistics
         let masks: LocalMasks.Measured
         let dust: [HealSpot]
+        let focus: FocusMeasure.Reading
     }
 
     /// Shared with the background candidate build — a CIContext is thread-safe and expensive to
@@ -1590,7 +1646,11 @@ struct ContentView: View {
                                   keeperCount: appState.keeperCount,
                                   rejectCount: appState.rejectCount,
                                   onFlag: { url, flag in appState.setFlag(flag, for: url) },
-                                  filter: $appState.stripFilter)
+                                  filter: $appState.stripFilter,
+                                  softURLs: Set(appState.focus.filter { $0.value.isSoft }.keys),
+                                  softCount: appState.softCount,
+                                  scanProgress: appState.focusScanProgress,
+                                  onScanFocus: appState.scanFocus)
                 }
             }
             .frame(minWidth: 460)

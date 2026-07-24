@@ -83,6 +83,10 @@ struct FilmstripView: View {
     var rejectCount: Int = 0
     var onFlag: (URL, PhotoFlag) -> Void = { _, _ in }
     @Binding var filter: AppState.StripFilter
+    var softURLs: Set<URL> = []
+    var softCount: Int = 0
+    var scanProgress: Double? = nil
+    var onScanFocus: () -> Void = {}
     @State private var hovered: URL?
     /// Collapsed by default is wrong — you would not know the strip exists — but it must be
     /// possible to get the shoot off the screen entirely when working one photo.
@@ -127,6 +131,29 @@ struct FilmstripView: View {
                     }
                 }
                 .labelStyle(.titleAndIcon)
+            }
+
+            // Focus review. A count, never an action — the frames are surfaced for a look,
+            // and nothing is flagged or discarded on the strength of the measurement.
+            if let progress = scanProgress {
+                HStack(spacing: 6) {
+                    ProgressView(value: progress).controlSize(.small).frame(width: 54)
+                    Text("\(Int(progress * 100))%")
+                        .font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
+                }
+            } else if softCount > 0 {
+                Button { filter = .soft } label: {
+                    Label("\(softCount) soft", systemImage: "eye.trianglebadge.exclamationmark")
+                        .font(Theme.mono(9)).foregroundColor(Theme.warn)
+                }
+                .buttonStyle(.plain)
+                .help("Review the frames that measured soft — check them, they are not always right")
+            } else {
+                Button(action: onScanFocus) {
+                    Text("Check focus").font(Theme.mono(9)).foregroundColor(Theme.inkDim)
+                }
+                .buttonStyle(.plain)
+                .help("Measure every frame and flag the soft ones for review")
             }
 
             Spacer()
@@ -190,6 +217,18 @@ struct FilmstripView: View {
                         .stroke(isCurrent ? Theme.glow : Theme.hairline,
                                 lineWidth: isCurrent ? 2 : 1)
                 )
+                .overlay(alignment: .bottomTrailing) {
+                    // Soft is a QUESTION, not a decision — a marker you look at, in a different
+                    // colour and corner from the keep/reject flags so the two are never confused.
+                    if softURLs.contains(url) {
+                        Image(systemName: "eye.trianglebadge.exclamationmark")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundColor(Theme.warn)
+                            .padding(3)
+                            .background(Circle().fill(Theme.base.opacity(0.85)))
+                            .padding(3)
+                    }
+                }
                 .overlay(alignment: .bottomLeading) {
                     if let flag = flags[url] {
                         Image(systemName: flag == .keep ? "flag.fill" : "xmark")
