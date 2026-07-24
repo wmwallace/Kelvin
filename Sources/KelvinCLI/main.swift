@@ -21,12 +21,18 @@ func printUsage() {
 
     Usage:
       \(tool) render --in <image> --recipe <recipe.json> --out <output>
+      \(tool) engine --in <image> --perception <perception.json> --out <recipe.json>
       \(tool) eval --corpus <dir> [--out <report.json>] [--engine-version <v>]
 
     render options:
       --in       Path to the source image (RAW, JPEG, or PNG). Required.
       --recipe   Path to a recipe JSON sidecar. Required.
       --out      Output path. Extension picks the format (.png or .jpg). Required.
+
+    engine options:
+      --in          Path to the source image (RAW, JPEG, or PNG). Required.
+      --perception  Path to a hand-labelled perception JSON (Stage 1). Required.
+      --out         Where to write the generated recipe JSON. Required.
 
     eval options:
       --corpus          Directory containing a manifest.json. Required.
@@ -74,6 +80,29 @@ case "render":
         let rendered = Renderer.render(image, with: recipe)
         try ImageWriter.write(rendered, to: outURL)
         print("Wrote \(outURL.path)")
+    } catch {
+        fail("\(error)")
+    }
+
+case "engine":
+    let rest = Array(arguments.dropFirst())
+
+    guard let inPath = value(for: "--in", in: rest) else { fail("engine requires --in") }
+    guard let perceptionPath = value(for: "--perception", in: rest) else { fail("engine requires --perception") }
+    guard let outPath = value(for: "--out", in: rest) else { fail("engine requires --out") }
+
+    do {
+        let image = try ImageDecoder.decode(url: URL(fileURLWithPath: inPath))
+        let stats = try ImageStatistics.compute(image)
+        let perception = try PerceptionIO.load(from: URL(fileURLWithPath: perceptionPath))
+        let recipe = RecipeEngine.recipe(
+            perception: perception,
+            statistics: stats,
+            perceptionHash: PerceptionIO.hash(perception),
+            generatedAt: ISO8601DateFormatter().string(from: Date())
+        )
+        try RecipeIO.save(recipe, to: URL(fileURLWithPath: outPath))
+        print("Wrote \(outPath) [\(recipe.label ?? "recipe")]")
     } catch {
         fail("\(error)")
     }

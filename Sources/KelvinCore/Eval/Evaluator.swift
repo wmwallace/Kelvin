@@ -5,6 +5,10 @@ import CoreImage
 /// Deterministic and headless (software rendering) so it can run on every commit.
 public enum Evaluator {
 
+    /// Method name for the recipe engine in reports. Not a baseline — it is the candidate the
+    /// baselines exist to be beaten by (docs/EVALUATION.md).
+    public static let engineMethodName = "engine"
+
     public static func run(corpus: Corpus, engineVersion: String) throws -> EvalReport {
         let start = Date()
 
@@ -47,6 +51,16 @@ public enum Evaluator {
             let neutralImage = Baselines.neutral(source)
             try score(Baselines.Kind.neutral.rawValue, neutralImage)
             try score(Baselines.Kind.naiveAuto.rawValue, try Baselines.naiveAuto(source))
+
+            // The engine — the thing under test — is scored only when the entry carries a
+            // hand-labelled perception JSON. Statistics are measured from the source, so the
+            // engine sees exactly what it will see in production: judgments + a histogram.
+            if let perceptionURL = corpus.perceptionURL(for: entry) {
+                let perception = try PerceptionIO.load(from: perceptionURL)
+                let stats = try ImageStatistics.compute(source)
+                let recipe = RecipeEngine.recipe(perception: perception, statistics: stats)
+                try score(Evaluator.engineMethodName, Renderer.render(source, with: recipe))
+            }
 
             // No-op fidelity is a full-resolution byte comparison, not a sampled one.
             noOpTotal += 1

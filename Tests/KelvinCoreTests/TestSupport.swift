@@ -29,4 +29,22 @@ enum TestSupport {
         )!
         return CIImage(cgImage: ctx.makeImage()!)
     }
+
+    /// A deterministic solid-colour image. Used to build a known colour cast whose removal
+    /// can be measured after rendering.
+    static func makeSolidImage(r: UInt8, g: UInt8, b: UInt8,
+                               width: Int = 64, height: Int = 64) -> CIImage {
+        let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+        let bytesPerRow = width * 4
+        var bytes = [UInt8](repeating: 0, count: bytesPerRow * height)
+        for i in stride(from: 0, to: bytes.count, by: 4) {
+            bytes[i + 0] = r; bytes[i + 1] = g; bytes[i + 2] = b; bytes[i + 3] = 255
+        }
+        let ctx = CGContext(
+            data: &bytes, width: width, height: height, bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow, space: cs,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )!
+        return CIImage(cgImage: ctx.makeImage()!)
+    }
 }

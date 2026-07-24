@@ -21,18 +21,27 @@ public struct CorpusManifest: Codable, Equatable, Sendable {
         /// Expert reference edits of the same photo. Scoring reports the *minimum* ΔE
         /// across these — matching any one expert is success, not the centroid.
         public var references: [String]
+        /// Hand-labelled perception JSON for this image (docs/RECIPE-SCHEMA.md Stage 1).
+        /// Optional: when present, the evaluator runs the recipe engine and scores it as the
+        /// `engine` method. Absent until the perception layer (build step 4) can generate it,
+        /// so older corpora with only baselines keep working unchanged.
+        public var perception: String?
 
-        public init(id: String, source: String, cameraJpeg: String?, references: [String]) {
+        public init(
+            id: String, source: String, cameraJpeg: String?,
+            references: [String], perception: String? = nil
+        ) {
             self.id = id
             self.source = source
             self.cameraJpeg = cameraJpeg
             self.references = references
+            self.perception = perception
         }
 
         enum CodingKeys: String, CodingKey {
             case id, source
             case cameraJpeg = "camera_jpeg"
-            case references
+            case references, perception
         }
     }
 
@@ -81,5 +90,9 @@ public struct Corpus {
 
     public func referenceURLs(for entry: CorpusManifest.Entry) -> [URL] {
         entry.references.map { root.appendingPathComponent($0) }
+    }
+
+    public func perceptionURL(for entry: CorpusManifest.Entry) -> URL? {
+        entry.perception.map { root.appendingPathComponent($0) }
     }
 }

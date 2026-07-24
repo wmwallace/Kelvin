@@ -83,6 +83,75 @@ final class EvalHarnessTests: XCTestCase {
         XCTAssertTrue(report.renderTable().contains("no-op fidelity"))
     }
 
+    /// When an entry carries a perception JSON, the harness runs the engine and scores it as
+    /// the `engine` method alongside the baselines.
+    func testEngineMethodScoredWhenPerceptionPresent() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent("kelvin-eval-eng-\(UUID().uuidString)")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        // A dim source so the engine has something real to correct.
+        let source = TestSupport.makeSolidImage(r: 70, g: 68, b: 60, width: 48, height: 48)
+        try ImageWriter.write(source, to: root.appendingPathComponent("src.png"), format: .png)
+
+        // A realistic "expert" correction of a dim, flat frame: lift exposure, add moderate
+        // contrast and a little colour — the shape of edit the engine aims for. (A pure
+        // exposure bump would be an unfair target, penalising any fuller edit.)
+        var expert = GlobalAdjustments.neutral
+        expert.exposureEV = 0.85
+        expert.contrast = 22
+        expert.vibrance = 12
+        let ref = Renderer.render(source, with: Recipe(
+            schemaVersion: 1, id: nil, label: nil, provenance: nil,
+            global: expert, curve: nil, hsl: nil, masks: nil, detail: nil, geometry: nil))
+        try ImageWriter.write(ref, to: root.appendingPathComponent("refA.png"), format: .png)
+
+        let perception = """
+        {
+          "schema_version": 1,
+          "scene": "landscape",
+          "subject": { "present": false, "type": "none", "count": "none", "placement": "center" },
+          "lighting": { "condition": "overcast", "direction": "diffuse", "contrast_range": "low" },
+          "problems": ["underexposed-subject", "flat"],
+          "intent": "natural",
+          "confidence": 0.9
+        }
+        """
+        try Data(perception.utf8).write(to: root.appendingPathComponent("p.json"))
+
+        let manifest = """
+        {
+          "schema_version": 1,
+          "entries": [
+            {
+              "id": "img01",
+              "source": "src.png",
+              "references": ["refA.png"],
+              "perception": "p.json"
+            }
+          ]
+        }
+        """
+        try Data(manifest.utf8).write(to: root.appendingPathComponent("manifest.json"))
+
+        let report = try Evaluator.run(corpus: try Corpus.load(root: root), engineVersion: "test")
+
+        let engine = report.methods.first { $0.method == Evaluator.engineMethodName }
+        XCTAssertNotNil(engine, "engine method should be present when perception is supplied")
+        XCTAssertEqual(engine?.scoredImages, 1)
+        XCTAssertNotNil(engine?.meanMinDeltaE)
+
+        // The engine lifted a dim frame toward a brighter expert, so it should land closer to
+        // that expert than the untouched neutral baseline does.
+        let neutral = report.methods.first { $0.method == "neutral" }
+        XCTAssertNotNil(neutral?.meanMinDeltaE)
+        XCTAssertLessThan(engine!.meanMinDeltaE!, neutral!.meanMinDeltaE!,
+                          "engine should beat the do-nothing baseline on this constructed case")
+        XCTAssertTrue(report.noOpFidelityOK)
+    }
+
     func testMissingManifestThrows() {
         let empty = FileManager.default.temporaryDirectory
             .appendingPathComponent("kelvin-nope-\(UUID().uuidString)")
