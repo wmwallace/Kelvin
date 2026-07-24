@@ -132,6 +132,18 @@ final class RendererFieldsTests: XCTestCase {
                        "a supplied bake must match compositing the stamps")
     }
 
+    /// A "skin" mask without a person segmentation must do NOTHING, rather than degrading into a
+    /// plain hue selection that would edit skin-toned sand, timber, or walls.
+    func testSkinMaskWithoutPersonIsANoOp() throws {
+        // A skin-hued frame with no person supplied — exactly the false-positive case.
+        let source = TestSupport.makeSolidImage(r: 205, g: 155, b: 120, width: 64, height: 64)
+        let mask = Mask(id: "skin", type: "skin", source: "skin", invert: false, feather: 0,
+                        opacity: 1.0, adjustments: ["exposure_ev": 0.8])
+        var r = Recipe.neutral; r.masks = [mask]
+        XCTAssertEqual(try bytes(Renderer.render(source, with: r, maskBitmaps: [:])), try bytes(source),
+                       "no person → the skin mask must not touch the image")
+    }
+
     func testShapeMaskNeedsNoSuppliedBitmap() throws {
         // The whole point: a parametric mask renders with an EMPTY maskBitmaps dict.
         let mask = Mask(id: "r", type: "r", source: "gradient", invert: false, feather: 0,

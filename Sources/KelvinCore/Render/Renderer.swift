@@ -3,10 +3,10 @@ import CoreImage
 
 /// Render: buffer + recipe → buffer. Pure. No I/O, no UI, no model (ARCHITECTURE.md).
 ///
-/// Applies global tone and colour: white balance, exposure, highlight/shadow recovery,
-/// whites/blacks, contrast, saturation, clarity, vibrance, and a luma tone curve. Masks,
-/// per-colour HSL, per-channel RGB curves, detail, and geometry round-trip through the schema
-/// but are not yet applied (tracked as follow-ups).
+/// Applies, in this order: heal → white balance → exposure → highlight/shadow → whites/blacks →
+/// contrast/saturation → dehaze → clarity → vibrance → luma curve → per-channel RGB curves
+/// (colour grade) → per-colour HSL → masked local adjustments → detail (NR + sharpen) →
+/// geometry (straighten + crop). Every schema field is now rendered.
 ///
 /// Load-bearing property: a field at its neutral value contributes NO filter to the chain, so
 /// a fully-neutral recipe returns the input image unchanged — "neutral is a byte-identical
@@ -161,15 +161,20 @@ public enum Renderer {
                 // Skin = skin-coloured pixels intersected with the person segmentation, so it lands
                 // on faces/hands and not on skin-toned wood or walls. Fair across complexions: it
                 // keys on hue, never brightness.
+                //
+                // The person segmentation is REQUIRED. Without it this would silently degrade into
+                // a plain hue selection and grab skin-toned sand, timber, or walls — a "skin" mask
+                // quietly editing the scenery is worse than one that does nothing, so it skips and
+                // the UI says why.
                 let sel = mask.selection ?? MaskSelection(kind: .color, center: 0.06, range: 0.06, softness: 0.05)
-                if let cube = SelectionMask.makeData(sel) {
-                    var m = img.applyingFilter("CIColorCubeWithColorSpace", parameters: [
-                        "inputCubeDimension": SelectionMask.dimension,
-                        "inputCubeData": cube, "inputColorSpace": ImageWriter.outputColorSpace])
-                    if let subject = maskBitmaps[mask.id] ?? maskBitmaps["subject"] {
-                        m = m.applyingFilter("CIMultiplyCompositing", parameters: [kCIInputBackgroundImageKey: subject])
-                    }
-                    bitmap = m
+                if let subject = maskBitmaps[mask.id] ?? maskBitmaps["subject"],
+                   let cube = SelectionMask.makeData(sel) {
+                    bitmap = img
+                        .applyingFilter("CIColorCubeWithColorSpace", parameters: [
+                            "inputCubeDimension": SelectionMask.dimension,
+                            "inputCubeData": cube, "inputColorSpace": ImageWriter.outputColorSpace])
+                        .applyingFilter("CIMultiplyCompositing", parameters: [
+                            kCIInputBackgroundImageKey: subject])
                 } else { bitmap = nil }
             } else if let sel = mask.selection, let cube = SelectionMask.makeData(sel) {
                 // The cube turns the current image into a white-where-selected mask.

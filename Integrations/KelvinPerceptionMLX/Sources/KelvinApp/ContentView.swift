@@ -779,6 +779,10 @@ final class AppState: ObservableObject {
     /// The ids of the auto-masks on the current candidate (e.g. "subject", "sky"), for the UI.
     var baseMaskIds: [String] { baseMasks.map { $0.id } }
 
+    /// Whether a person was segmented in this photo. Skin and Background masks are built from that
+    /// segmentation, so without it they can't do anything — the UI says so rather than going quiet.
+    var hasPerson: Bool { proxyMaskBitmaps["subject"] != nil }
+
     /// A binding for the white-balance slider (absolute Kelvin; nil → as-shot shown as 5500).
     var temperatureBinding: Binding<Double> {
         Binding(get: { self.edit.temperatureK ?? 5500 },
@@ -1282,7 +1286,8 @@ struct ContentView: View {
                             togglePaint: { appState.paintingMaskId = (appState.paintingMaskId == m.id) ? nil : m.id },
                             clearStrokes: { appState.clearStrokes(m.id) },
                             brushRadius: Binding(get: { appState.brushRadius },
-                                                 set: { appState.brushRadius = $0 }))
+                                                 set: { appState.brushRadius = $0 }),
+                            hasPerson: appState.hasPerson)
                     }
                     VStack(spacing: 6) {
                         HStack(spacing: 6) {
@@ -1602,6 +1607,13 @@ struct UserMaskEditor: View {
     var togglePaint: () -> Void = {}
     var clearStrokes: () -> Void = {}
     var brushRadius: Binding<Double> = .constant(0.09)
+    var hasPerson = true
+
+    /// Skin and Background are built from the person segmentation — flag it when there isn't one,
+    /// so the mask isn't just quietly inert.
+    private var needsPersonButHasNone: Bool {
+        (mask.kind == .skin || mask.kind == .background) && !hasPerson
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1614,6 +1626,12 @@ struct UserMaskEditor: View {
                 Button(action: onDelete) {
                     Image(systemName: "trash").font(.system(size: 11)).foregroundColor(Theme.inkDim)
                 }.buttonStyle(.plain)
+            }
+
+            if needsPersonButHasNone {
+                Text("⚠ No person detected in this photo — this mask has nothing to act on.")
+                    .font(Theme.mono(9)).foregroundColor(Theme.inkDim)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             switch mask.kind {
