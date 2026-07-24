@@ -149,6 +149,14 @@ final class EvalHarnessTests: XCTestCase {
         XCTAssertNotNil(neutral?.meanMinDeltaE)
         XCTAssertLessThan(engine!.meanMinDeltaE!, neutral!.meanMinDeltaE!,
                           "engine should beat the do-nothing baseline on this constructed case")
+
+        // Best-of-candidates is scored too, and by construction picks the closest candidate to
+        // an expert, so it is never worse than doing nothing.
+        let best = report.methods.first { $0.method == Evaluator.engineBestMethodName }
+        XCTAssertNotNil(best, "engine-best should be present when perception is supplied")
+        XCTAssertNotNil(best?.meanMinDeltaE)
+        XCTAssertLessThanOrEqual(best!.meanMinDeltaE!, neutral!.meanMinDeltaE!)
+
         XCTAssertTrue(report.noOpFidelityOK)
     }
 

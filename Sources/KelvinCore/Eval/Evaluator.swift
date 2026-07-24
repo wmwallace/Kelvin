@@ -9,6 +9,11 @@ public enum Evaluator {
     /// baselines exist to be beaten by (docs/EVALUATION.md).
     public static let engineMethodName = "engine"
 
+    /// The best of the generated candidate set (min ΔE to any expert). This is the product's
+    /// real question: not "is our single guess good," but "did the four-way picker contain a
+    /// good option?" — the same min-across-experts logic applied across candidates.
+    public static let engineBestMethodName = "engine-best"
+
     public static func run(corpus: Corpus, engineVersion: String) throws -> EvalReport {
         let start = Date()
 
@@ -58,8 +63,26 @@ public enum Evaluator {
             if let perceptionURL = corpus.perceptionURL(for: entry) {
                 let perception = try PerceptionIO.load(from: perceptionURL)
                 let stats = try ImageStatistics.compute(source)
+
+                // Primary single recipe — the "commit to one" path.
                 let recipe = RecipeEngine.recipe(perception: perception, statistics: stats)
                 try score(Evaluator.engineMethodName, Renderer.render(source, with: recipe))
+
+                // Best of the candidate set. With references, pick the candidate closest to any
+                // expert; without, fall back to the first (Natural) — there is no basis to choose.
+                let rendered = RecipeEngine.candidates(perception: perception, statistics: stats)
+                    .map { Renderer.render(source, with: $0) }
+                var best = rendered[0]
+                if hasRefs {
+                    var bestDE = Double.greatestFiniteMagnitude
+                    for image in rendered {
+                        let s = try ImageMetrics.sample(image)
+                        let de = refSamples.map { ImageMetrics.meanDeltaE2000(s, $0) }.min()
+                            ?? .greatestFiniteMagnitude
+                        if de < bestDE { bestDE = de; best = image }
+                    }
+                }
+                try score(Evaluator.engineBestMethodName, best)
             }
 
             // No-op fidelity is a full-resolution byte comparison, not a sampled one.
