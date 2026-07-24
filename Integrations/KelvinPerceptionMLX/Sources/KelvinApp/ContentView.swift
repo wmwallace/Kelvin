@@ -268,6 +268,13 @@ final class AppState: ObservableObject {
 
     func onEdit() { updateActiveRecipe(); scheduleCommit() }
 
+    /// Level the horizon automatically (Vision). No-op if no clear horizon is found.
+    func autoStraighten() {
+        guard let proxy = proxyCI, let deg = HorizonDetector.levelingAngle(in: proxy) else { return }
+        straighten = min(15, max(-15, deg))
+        onEdit()
+    }
+
     // MARK: Undo / redo (coalesced edit history)
 
     @Published var canUndo = false
@@ -985,8 +992,10 @@ struct ContentView: View {
                 }
 
                 sectionLabel("Geometry", trailing: nil)
-                VStack(spacing: 14) {
+                VStack(spacing: 12) {
                     ToneSlider(label: "Straighten", value: $appState.straighten, range: -15...15, step: 0.1, unit: "°", onChange: ch)
+                    Button(action: appState.autoStraighten) { addMaskLabel("Auto-level horizon") }
+                        .buttonStyle(.plain)
                 }
 
                 sectionLabel("Masks", trailing: nil)

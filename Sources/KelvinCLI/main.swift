@@ -294,6 +294,17 @@ case "mask":
         fail("\(error)")
     }
 
+case "horizon":
+    // Debug: print the detected leveling angle.
+    let rest = Array(arguments.dropFirst())
+    guard let inPath = value(for: "--in", in: rest) else { fail("horizon requires --in") }
+    do {
+        let image = try ImageDecoder.decode(url: URL(fileURLWithPath: inPath))
+        if let deg = HorizonDetector.levelingAngle(in: image) {
+            print(String(format: "horizon leveling angle: %+.2f°", deg))
+        } else { print("no horizon detected") }
+    } catch { fail("\(error)") }
+
 case "sky":
     // Debug/inspection: segment the sky and preview a local defog/recover through the mask.
     let rest = Array(arguments.dropFirst())
