@@ -24,6 +24,11 @@ public enum LocalMasks {
         if let subject = SubjectMask.person(in: image) {
             bitmaps["subject"] = subject
             subjectLuma = SubjectMask.maskedMeanLuma(image: image, mask: subject)
+            // Prefer metered skin brightness when a face is present: it's what the subject-lift
+            // decision actually cares about, and metering (not classifying) skin keeps the
+            // recovery tone-fair. The whole-person mask still carries the lift.
+            let face = FaceSkin.read(in: image)
+            if let skin = face.skinLuma { subjectLuma = skin }
         }
         if let sky = SkyMask.detect(in: image) {
             bitmaps["sky"] = sky

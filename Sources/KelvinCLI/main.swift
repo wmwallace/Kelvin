@@ -275,6 +275,9 @@ case "mask":
         if let luma = SubjectMask.maskedMeanLuma(image: image, mask: mask) {
             print(String(format: "subject mean luma: %.3f", luma))
         }
+        let skin = FaceSkin.read(in: image)
+        print(skin.skinLuma.map { String(format: "faces: %d, skin luma: %.3f", skin.faceCount, $0) }
+              ?? "faces: \(skin.faceCount) (no skin metered)")
         let subjectMask = Mask(id: "subject", type: "subject", source: "segmentation",
                                invert: false, feather: 15, opacity: 1.0,
                                adjustments: ["exposure_ev": 0.7, "shadows": 25])
