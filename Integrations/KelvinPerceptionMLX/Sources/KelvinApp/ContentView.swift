@@ -248,6 +248,7 @@ final class AppState: ObservableObject {
         maskEnabled = Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, true) })
         maskStrength = Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, $0.opacity * 100) })
         updateActiveRecipe()
+        resetHistory()          // the chosen candidate is the new base for undo
         // NOTE: selecting/browsing candidates does NOT record a pick — only a deliberate
         // choice (export) does. Recording on every selection floods the store with fake
         // preferences and corrupts the learned profile.
@@ -261,7 +262,55 @@ final class AppState: ObservableObject {
         updateActiveRecipe()
     }
 
-    func onEdit() { updateActiveRecipe() }
+    func onEdit() { updateActiveRecipe(); scheduleCommit() }
+
+    // MARK: Undo / redo (coalesced edit history)
+
+    @Published var canUndo = false
+    @Published var canRedo = false
+    private var undoStack: [EditSnapshot] = []
+    private var redoStack: [EditSnapshot] = []
+    private var committed: EditSnapshot?
+    private var commitToken = 0
+
+    private func snapshot() -> EditSnapshot {
+        EditSnapshot(edit: edit, userMasks: userMasks, maskEnabled: maskEnabled, maskStrength: maskStrength)
+    }
+    private func applySnapshot(_ s: EditSnapshot) {
+        edit = s.edit; userMasks = s.userMasks; maskEnabled = s.maskEnabled; maskStrength = s.maskStrength
+        updateActiveRecipe()
+    }
+    /// Reset the history to the current state — call when a fresh candidate/photo becomes the base.
+    func resetHistory() { undoStack = []; redoStack = []; committed = snapshot(); refreshUndoState() }
+
+    /// After an edit burst settles (~0.45 s of no further edits), record the prior stable state as
+    /// one undo step — so dragging a slider is a single undo, not hundreds.
+    private func scheduleCommit() {
+        commitToken += 1
+        let t = commitToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+            guard let self, self.commitToken == t else { return }
+            if let prev = self.committed, prev != self.snapshot() {
+                self.undoStack.append(prev)
+                if self.undoStack.count > 60 { self.undoStack.removeFirst() }
+                self.redoStack.removeAll()
+            }
+            self.committed = self.snapshot()
+            self.refreshUndoState()
+        }
+    }
+    private func refreshUndoState() { canUndo = !undoStack.isEmpty; canRedo = !redoStack.isEmpty }
+
+    func undo() {
+        guard let prev = undoStack.popLast() else { return }
+        redoStack.append(snapshot()); committed = prev
+        applySnapshot(prev); refreshUndoState()
+    }
+    func redo() {
+        guard let next = redoStack.popLast() else { return }
+        undoStack.append(snapshot()); committed = next
+        applySnapshot(next); refreshUndoState()
+    }
 
     /// Which brush mask is currently being painted (drag on the preview paints into it), and the
     /// brush size (fraction of the smaller edge).
@@ -848,6 +897,17 @@ struct ContentView: View {
             )
     }
 
+    private func editToolLabel(_ text: String, enabled: Bool) -> some View {
+        Text(text)
+            .font(Theme.ui(11, .semibold))
+            .foregroundColor(enabled ? Theme.ink : Theme.inkFaint)
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 7).fill(Theme.surface2.opacity(enabled ? 1 : 0.4))
+                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.hairline, lineWidth: 1))
+            )
+    }
+
     private func addMaskLabel(_ text: String) -> some View {
         Text(text)
             .font(Theme.ui(11, .semibold)).foregroundColor(Theme.ink)
@@ -863,6 +923,18 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 22) {
                 HistogramView(image: appState.lastRenderedCI)
 
+                HStack(spacing: 8) {
+                    Button(action: appState.undo) { editToolLabel("Undo", enabled: appState.canUndo) }
+                        .buttonStyle(.plain).disabled(!appState.canUndo)
+                        .keyboardShortcut("z", modifiers: .command)
+                    Button(action: appState.redo) { editToolLabel("Redo", enabled: appState.canRedo) }
+                        .buttonStyle(.plain).disabled(!appState.canRedo)
+                        .keyboardShortcut("z", modifiers: [.command, .shift])
+                    Spacer()
+                    Button(action: appState.resetToCandidate) { editToolLabel("Reset all", enabled: true) }
+                        .buttonStyle(.plain)
+                }
+
                 sectionLabel("Candidates", trailing: nil)
                 VStack(spacing: 8) {
                     ForEach(appState.candidates) { candidate in
@@ -875,8 +947,7 @@ struct ContentView: View {
 
                 let ch = appState.onEdit   // re-render on any slider change
 
-                sectionLabel("White balance", trailing: "Reset")
-                    .onTapGesture { appState.resetToCandidate() }
+                sectionLabel("White balance", trailing: nil)
                 VStack(spacing: 14) {
                     ToneSlider(label: "Temp", value: appState.temperatureBinding, range: 2500...9500, step: 10, unit: " K", onChange: ch)
                     ToneSlider(label: "Tint", value: $appState.edit.tint, range: -100...100, step: 1, unit: "", onChange: ch)
@@ -1170,7 +1241,15 @@ struct ToneSlider: View {
 
 /// A hand-added parametric mask — a radial/linear gradient or a brushed region — all plain values
 /// so SwiftUI binds to it directly. Converts to the engine's `Mask` at render time.
-struct UserMaskVM: Identifiable {
+/// A snapshot of the full manual-edit state, for undo/redo.
+struct EditSnapshot: Equatable {
+    var edit: GlobalAdjustments
+    var userMasks: [UserMaskVM]
+    var maskEnabled: [String: Bool]
+    var maskStrength: [String: Double]
+}
+
+struct UserMaskVM: Identifiable, Equatable {
     enum Kind { case radial, linear, brush }
     let id = UUID()
     var kind: Kind
