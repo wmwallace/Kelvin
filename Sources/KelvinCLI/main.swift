@@ -22,6 +22,7 @@ func printUsage() {
     Usage:
       \(tool) render --in <image> --recipe <recipe.json> --out <output>
       \(tool) engine --in <image> --perception <perception.json> --out <recipe.json>
+      \(tool) candidates --in <image> --perception <perception.json> --out-dir <dir>
       \(tool) eval --corpus <dir> [--out <report.json>] [--engine-version <v>]
 
     render options:
@@ -33,6 +34,11 @@ func printUsage() {
       --in          Path to the source image (RAW, JPEG, or PNG). Required.
       --perception  Path to a hand-labelled perception JSON (Stage 1). Required.
       --out         Where to write the generated recipe JSON. Required.
+
+    candidates options:
+      --in          Path to the source image (RAW, JPEG, or PNG). Required.
+      --perception  Path to a hand-labelled perception JSON (Stage 1). Required.
+      --out-dir     Directory to write one <style>.json per candidate. Required.
 
     eval options:
       --corpus          Directory containing a manifest.json. Required.
@@ -103,6 +109,38 @@ case "engine":
         )
         try RecipeIO.save(recipe, to: URL(fileURLWithPath: outPath))
         print("Wrote \(outPath) [\(recipe.label ?? "recipe")]")
+    } catch {
+        fail("\(error)")
+    }
+
+case "candidates":
+    let rest = Array(arguments.dropFirst())
+
+    guard let inPath = value(for: "--in", in: rest) else { fail("candidates requires --in") }
+    guard let perceptionPath = value(for: "--perception", in: rest) else { fail("candidates requires --perception") }
+    guard let outDirPath = value(for: "--out-dir", in: rest) else { fail("candidates requires --out-dir") }
+
+    let outDir = URL(fileURLWithPath: outDirPath, isDirectory: true)
+
+    do {
+        let image = try ImageDecoder.decode(url: URL(fileURLWithPath: inPath))
+        let stats = try ImageStatistics.compute(image)
+        let perception = try PerceptionIO.load(from: URL(fileURLWithPath: perceptionPath))
+        // One perception, one statistics pass → N recipes (parameter swaps, no re-perception).
+        let recipes = RecipeEngine.candidates(
+            perception: perception,
+            statistics: stats,
+            perceptionHash: PerceptionIO.hash(perception),
+            generatedAt: ISO8601DateFormatter().string(from: Date())
+        )
+
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        for recipe in recipes {
+            let name = (recipe.id ?? recipe.label ?? "candidate") + ".json"
+            try RecipeIO.save(recipe, to: outDir.appendingPathComponent(name))
+        }
+        let labels = recipes.map { $0.label ?? "?" }.joined(separator: ", ")
+        print("Wrote \(recipes.count) candidates to \(outDir.path) [\(labels)]")
     } catch {
         fail("\(error)")
     }

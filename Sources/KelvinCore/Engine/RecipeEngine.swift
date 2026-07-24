@@ -201,8 +201,12 @@ public enum RecipeEngine {
     ///
     /// Returns `temperatureK == nil` when no correction is warranted, so an already-neutral
     /// image stays a byte-identical no-op (the renderer skips WB entirely on nil).
-    static func whiteBalance(_ p: Perception, _ s: ImageStatistics) -> (temperatureK: Double?, tint: Double) {
-        let strength = wbStrength(p)
+    /// `strengthScale` lets a candidate style deliberately under-correct (< 1) to keep some of
+    /// the cast — a warm/moody look — while the default 1.0 preserves the single-recipe path.
+    static func whiteBalance(
+        _ p: Perception, _ s: ImageStatistics, strengthScale: Double = 1.0
+    ) -> (temperatureK: Double?, tint: Double) {
+        let strength = wbStrength(p) * strengthScale
 
         // Deadband: don't chase tiny casts. Keeps neutral input a no-op and avoids adding a
         // WB filter pass that would only introduce rounding error.
