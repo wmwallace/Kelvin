@@ -21,7 +21,7 @@ public enum LocalMasks {
         var subjectLuma: Double?
         var skyLuma: Double?
 
-        if let subject = SubjectMask.person(in: image) {
+        if let subject = SubjectMask.subject(in: image) {
             bitmaps["subject"] = subject
             subjectLuma = SubjectMask.maskedMeanLuma(image: image, mask: subject)
             // Prefer metered skin brightness when a face is present: it's what the subject-lift

@@ -36,10 +36,22 @@ public actor MLXPerceptionProvider: PerceptionProvider {
     /// - Parameters:
     ///   - modelID: Hugging Face repo id of an MLX VLM.
     ///   - maxTokens: generation cap; a perception object is short, so this bounds a runaway.
-    public init(modelID: String = defaultModelID, maxTokens: Int = 512) {
+    public init(modelID: String? = nil, maxTokens: Int = 512) {
+        // `KELVIN_MODEL=<hf-repo-id>` swaps the perception model without a rebuild, so a newer or
+        // larger VLM can be A/B'd against the default on real photos. Anything mlx-swift-lm's VLM
+        // registry can build works — the seam is the *prompt and parser*, not the weights, so a
+        // different model that still answers in the closed perception vocabulary drops straight in.
+        //
+        // Licence is the constraint, not capability: this project needs commercially-clean weights
+        // (docs/DECISIONS.md), which rules out a lot of otherwise-strong models.
         self.modelID = modelID
+            ?? ProcessInfo.processInfo.environment["KELVIN_MODEL"]
+            ?? Self.defaultModelID
         self.maxTokens = maxTokens
     }
+
+    /// Which model this provider is actually running — worth surfacing when comparing two.
+    public var activeModelID: String { modelID }
 
     public func perceive(_ image: CIImage) async throws -> Perception {
         let container = try await loadedContainer()

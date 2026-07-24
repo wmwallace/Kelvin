@@ -133,3 +133,56 @@ where the entire point is parametric, reversible, sidecar-stored adjustment.
 3. Target user for v1: working photographer with a shoot to process, or casual user with
    one photo? The answer changes the first UI substantially.
 4. Naming (D9) and license (D8), before external release.
+
+---
+
+## D-model-2 — Which additional models are worth adding, and which are blocked on licence
+
+**Date:** 2026-07-24 · **Status:** analysis; nothing integrated yet
+
+Two capabilities are currently *heuristic* because no model was wired in, and both were
+identified as real limits rather than guesses:
+
+1. **Hair / clothing / body-part masks.** Vision gives a whole-person segmentation and nothing
+   finer, so "select just the hair" or "just the jacket" is impossible today.
+2. **"Does this look good?"** `AestheticEvaluator` measures craft floors — clipping, tonal range,
+   skin plausibility, subject modelling. Those are objective and they work, but none of them is
+   trained on what people actually *prefer*. It can tell you a frame is defective; it cannot tell
+   you a frame is beautiful.
+
+### Candidates surveyed
+
+| Need | Model | Licence | Notes |
+|---|---|---|---|
+| Human parsing (18 classes incl. hair, face, top, pants, hat) | **FASHN Human Parser** (SegFormer-B4, released Jan 2026) | **verify before use** | Closest fit by far; SegFormer-B4 is small enough for on-device. |
+| Face + hair only | **face-parsing.PyTorch** | MIT | ~51 MB, much narrower scope, but licence is unambiguous. |
+| Aesthetic / quality scoring | **Q-Align** (ICML 2024, Q-Future) | **verify** — built on mPLUG-Owl2, whose terms may not be Apache | State of the art on IQA + IAA; a full LMM, so heavy next to a 2.9 GB VLM already resident. |
+| Aesthetic scoring, cheap | **MLP head on CLIP/SigLIP embeddings** (the LAION-Aesthetics approach) | MIT for the common heads | A few MB. Interesting because the head can be trained on *this user's* picks rather than a generic notion of beauty. |
+| Newer perception VLM | **Qwen3.5-4B** (mlx-community, 4-bit) | Apache-2.0 | Drop-in: same family and licence as the current Qwen2.5-VL-3B, newer weights. |
+
+### Decisions
+
+- **Perception model is now swappable at runtime** via `KELVIN_MODEL=<hf-repo-id>`, so a newer
+  VLM can be compared against the default on real photos without a rebuild. The seam is the
+  prompt and the parser, not the weights.
+- **Nothing else is integrated yet, deliberately.** Two blockers, both real:
+  - *Licence.* This project has a commercial-clean stance (D-corpus). Several of the strongest
+    options have terms that are unclear or inherited from a base model with restrictions. A
+    weights licence must be read before integration, not after.
+  - *Toolchain.* These ship as PyTorch. Getting them on-device means CoreML conversion or an MLX
+    port, which needs torch + coremltools installed and hundreds of MB to GB of weights
+    downloaded. That is a deliberate setup step for the owner to opt into, not something to
+    install unilaterally.
+
+### If one is added, this is the order
+
+1. **Human parsing** — unblocks a concrete, already-requested feature (hair/clothing masks) and
+   the output plugs straight into the existing mask pipeline as another supplied bitmap. Highest
+   value per unit of risk.
+2. **A preference head trained on the owner's own picks** — more interesting than a generic
+   aesthetic model, because it serves the project's actual differentiator (the preference loop)
+   rather than importing someone else's taste. Also the smallest model of the lot. Blocked on
+   having enough logged picks to train against, which is a data problem, not a modelling one.
+3. **A generic aesthetic model (Q-Align)** — last. Heaviest, licence least certain, and it would
+   impose an averaged notion of "good" that the owner has already shown differs from his own
+   (he preferred Natural where the scorer preferred the flattest option).

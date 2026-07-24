@@ -286,7 +286,11 @@ case "mask":
     let outDir = URL(fileURLWithPath: outDirPath, isDirectory: true)
     do {
         let image = try ImageDecoder.decode(url: URL(fileURLWithPath: inPath))
-        guard let mask = SubjectMask.person(in: image) else { fail("no person found in \(inPath)") }
+        let personMask = SubjectMask.person(in: image)
+        guard let mask = personMask ?? SubjectMask.foreground(in: image) else {
+            fail("no subject found in \(inPath)")
+        }
+        print(personMask != nil ? "source: person segmentation" : "source: foreground instance (no person)")
         try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
         try ImageWriter.write(mask, to: outDir.appendingPathComponent("mask.png"), format: .png)
         if let luma = SubjectMask.maskedMeanLuma(image: image, mask: mask) {
