@@ -1,0 +1,33 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+
+# Xcode / SwiftPM
+.build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+xcuserdata/
+.swiftpm/xcode/
+Package.resolved
+
+# Build artifacts
+build/
+*.o
+*.dylib
+
+# Models & corpora — large binaries, never committed
+# (recipe sidecars are small and MAY be committed; model checkpoints and RAW corpora are not)
+*.gguf
+*.mlx
+*.safetensors
+/corpus/
+/models/
+
+# Editor cruft
+*.swp
+*~
+.idea/
+.vscode/
