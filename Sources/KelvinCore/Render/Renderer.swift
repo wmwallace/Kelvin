@@ -3,26 +3,24 @@ import CoreImage
 
 /// Render: buffer + recipe → buffer. Pure. No I/O, no UI, no model (ARCHITECTURE.md).
 ///
-/// Milestone 1 scope: global tone and color only — no masks, no curves, no detail, no
-/// geometry. Those fields round-trip through the schema but are not yet applied.
+/// Applies global tone and colour: white balance, exposure, highlight/shadow recovery,
+/// whites/blacks, contrast, saturation, clarity, vibrance, and a luma tone curve. Masks,
+/// per-colour HSL, per-channel RGB curves, detail, and geometry round-trip through the schema
+/// but are not yet applied (tracked as follow-ups).
 ///
-/// Load-bearing property: a field at its neutral value contributes NO filter to the chain.
-/// A fully-neutral recipe therefore returns the input image unchanged, which is what makes
-/// "neutral is a byte-identical no-op" true by construction rather than by luck
-/// (docs/RECIPE-SCHEMA.md invariant #1).
+/// Load-bearing property: a field at its neutral value contributes NO filter to the chain, so
+/// a fully-neutral recipe returns the input image unchanged — "neutral is a byte-identical
+/// no-op" holds by construction, not by luck (docs/RECIPE-SCHEMA.md invariant #1).
 public enum Renderer {
 
-    /// Order of operations is fixed here in code, not implied by JSON key order
-    /// (invariant #5): white balance → exposure → tone (highlights/shadows) → contrast →
-    /// vibrance → saturation. Curves, HSL, masks, and detail slot in after tone in later
-    /// milestones.
+    /// Order of operations is fixed here in code, not implied by JSON key order (invariant #5):
+    /// white balance → exposure → highlight/shadow → whites/blacks → contrast/saturation →
+    /// clarity → vibrance → curve. (Curve precedes HSL in the schema; HSL is a later milestone.)
     public static func render(_ image: CIImage, with recipe: Recipe) -> CIImage {
         let g = recipe.global
         var img = image
 
-        // White balance. temperature_k neutral is "as-shot" (nil) → skip entirely when
-        // nil. When present, M1 references a D65 (6500K) neutral point; a future milestone
-        // will read the true as-shot temperature from EXIF.
+        // White balance. temperature_k neutral is "as-shot" (nil) → skip entirely when nil.
         if let temperatureK = g.temperatureK {
             img = img.applyingFilter("CITemperatureAndTint", parameters: [
                 "inputNeutral": CIVector(x: 6500, y: 0),
@@ -46,13 +44,36 @@ public enum Renderer {
             ])
         }
 
-        // Contrast and saturation (CIColorControls, neutral 1.0 / 1.0). Applied together
-        // when either is non-neutral. Brightness stays at its neutral 0.
+        // Whites / blacks. Endpoint tone shaping: `blacks` moves the low quarter, `whites` the
+        // high quarter, with pure black (0→0) and pure white (1→1) anchored so the range is
+        // not clipped. Neutral (both 0) is the identity curve, hence skipped.
+        if g.whites != 0 || g.blacks != 0 {
+            let b = g.blacks / 100.0
+            let w = g.whites / 100.0
+            img = img.applyingFilter("CIToneCurve", parameters: [
+                "inputPoint0": CIVector(x: 0.0, y: 0.0),
+                "inputPoint1": CIVector(x: 0.25, y: clamp01(0.25 + b * 0.15)),
+                "inputPoint2": CIVector(x: 0.5, y: 0.5),
+                "inputPoint3": CIVector(x: 0.75, y: clamp01(0.75 + w * 0.15)),
+                "inputPoint4": CIVector(x: 1.0, y: 1.0)
+            ])
+        }
+
+        // Contrast and saturation (CIColorControls, neutral 1.0 / 1.0). Brightness stays 0.
         if g.contrast != 0 || g.saturation != 0 {
             img = img.applyingFilter("CIColorControls", parameters: [
                 kCIInputContrastKey: 1.0 + (g.contrast / 100.0) * 0.5,
                 kCIInputSaturationKey: 1.0 + (g.saturation / 100.0),
                 kCIInputBrightnessKey: 0.0
+            ])
+        }
+
+        // Clarity: mid-radius local contrast, approximated with an unsharp mask whose radius
+        // scales with the image so a proxy and full-res behave comparably. Neutral (0) skips.
+        if g.clarity != 0 {
+            img = img.applyingFilter("CIUnsharpMask", parameters: [
+                "inputRadius": clarityRadius(for: img),
+                "inputIntensity": g.clarity / 100.0
             ])
         }
 
@@ -63,11 +84,61 @@ public enum Renderer {
             ])
         }
 
-        // NOTE: whites, blacks, clarity, texture, and dehaze have no clean 1:1 Core Image
-        // primitive and are intentionally NOT applied in M1. They clamp and round-trip
-        // through the schema; a neutral value is a no-op regardless, so the M1 gating test
-        // is unaffected. Tracked for the tone-mapping milestone.
+        // Luma tone curve. The recipe stores control points in 0…255; resample to the five
+        // points CIToneCurve accepts. An absent or identity curve applies nothing. Per-channel
+        // R/G/B curves are a later milestone (they need CIColorCurves, not CIToneCurve).
+        if let points = recipe.curve?.luma, let five = tuneCurvePoints(points) {
+            img = img.applyingFilter("CIToneCurve", parameters: [
+                "inputPoint0": five.0, "inputPoint1": five.1, "inputPoint2": five.2,
+                "inputPoint3": five.3, "inputPoint4": five.4
+            ])
+        }
 
         return img
+    }
+
+    // MARK: - Helpers
+
+    private static func clamp01(_ x: Double) -> Double { min(max(x, 0), 1) }
+
+    /// Unsharp radius scaled to the shorter image edge (finite extents only; a sensible
+    /// constant otherwise), so "clarity" reads as local contrast rather than edge sharpening.
+    private static func clarityRadius(for image: CIImage) -> Double {
+        let extent = image.extent
+        guard !extent.isInfinite, extent.width > 0, extent.height > 0 else { return 3.0 }
+        return max(1.0, Double(min(extent.width, extent.height)) * 0.01)
+    }
+
+    /// Convert recipe curve control points (`[[x, y]]` in 0…255, any count ≥ 2) into the five
+    /// evenly-spaced points CIToneCurve wants, by linear interpolation in 0…1 space. Returns
+    /// nil when the curve is effectively the identity (so it contributes no filter).
+    static func tuneCurvePoints(
+        _ raw: [[Double]]
+    ) -> (CIVector, CIVector, CIVector, CIVector, CIVector)? {
+        // Normalise, keep valid pairs, sort by x.
+        let pts = raw.compactMap { pair -> (x: Double, y: Double)? in
+            guard pair.count >= 2 else { return nil }
+            return (clamp01(pair[0] / 255.0), clamp01(pair[1] / 255.0))
+        }.sorted { $0.x < $1.x }
+        guard pts.count >= 2 else { return nil }
+
+        func sample(_ x: Double) -> Double {
+            if x <= pts.first!.x { return pts.first!.y }
+            if x >= pts.last!.x { return pts.last!.y }
+            for i in 1..<pts.count where x <= pts[i].x {
+                let a = pts[i - 1], b = pts[i]
+                let t = (b.x - a.x) > 1e-9 ? (x - a.x) / (b.x - a.x) : 0
+                return a.y + t * (b.y - a.y)
+            }
+            return pts.last!.y
+        }
+
+        let xs = [0.0, 0.25, 0.5, 0.75, 1.0]
+        let ys = xs.map(sample)
+        // Identity check: every sampled y matches its x → no-op curve, skip it.
+        if zip(xs, ys).allSatisfy({ abs($0 - $1) < 0.002 }) { return nil }
+
+        let v = zip(xs, ys).map { CIVector(x: $0, y: $1) }
+        return (v[0], v[1], v[2], v[3], v[4])
     }
 }
