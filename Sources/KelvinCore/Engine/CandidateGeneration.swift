@@ -72,8 +72,10 @@ public extension RecipeEngine {
         g.blacks = points.blacks
 
         // The S-curve carries each style's contrast character: Vivid/Dramatic push it, Soft eases
-        // it and lifts a matte toe (film look).
-        let curve = toneCurve(p, s, strength: curveStrength(p, s) * style.curveScale, toe: style.matteToe)
+        // it and lifts a matte toe (film look). The split-tone grade scales with that character —
+        // Dramatic reads most cinematic, Soft barely graded.
+        let curve = toneCurve(p, s, strength: curveStrength(p, s) * style.curveScale,
+                              toe: style.matteToe, grade: 0.38 * style.curveScale)
 
         return Recipe(
             schemaVersion: Recipe.currentSchemaVersion,

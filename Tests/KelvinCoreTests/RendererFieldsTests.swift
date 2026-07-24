@@ -46,6 +46,27 @@ final class RendererFieldsTests: XCTestCase {
                        "neutral fields + identity curve must be a no-op")
     }
 
+    // MARK: - Per-channel curves (colour grade / split-tone)
+
+    func testChannelCurvesChangeOutput() throws {
+        let source = TestSupport.makeGradientImage()
+        let neutral = try bytes(Renderer.render(source, with: .neutral))
+        // Warm the highlights via the red channel — a split-tone move; output must change.
+        let graded = recipe(curve: Curve(luma: nil,
+            red: [[0, 0], [192, 205], [255, 255]], green: nil, blue: nil))
+        XCTAssertNotEqual(try bytes(Renderer.render(source, with: graded)), neutral,
+                          "a per-channel curve should render")
+    }
+
+    func testIdentityChannelCurvesAreNoOp() throws {
+        let source = TestSupport.makeGradientImage()
+        // Identity R/G/B curves must contribute nothing (byte-identical no-op invariant).
+        let identity = recipe(curve: Curve(luma: nil,
+            red: [[0, 0], [255, 255]], green: [[0, 0], [255, 255]], blue: [[0, 0], [255, 255]]))
+        XCTAssertEqual(try bytes(Renderer.render(source, with: identity)), try bytes(source),
+                       "identity per-channel curves must be a no-op")
+    }
+
     // MARK: - Whites / blacks
 
     func testWhitesChangeOutput() throws {

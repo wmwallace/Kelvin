@@ -122,12 +122,21 @@ public enum Renderer {
         }
 
         // Luma tone curve. The recipe stores control points in 0…255; resample to the five
-        // points CIToneCurve accepts. An absent or identity curve applies nothing. Per-channel
-        // R/G/B curves are a later milestone (they need CIColorCurves, not CIToneCurve).
+        // points CIToneCurve accepts. An absent or identity curve applies nothing.
         if let points = recipe.curve?.luma, let five = tuneCurvePoints(points) {
             img = img.applyingFilter("CIToneCurve", parameters: [
                 "inputPoint0": five.0, "inputPoint1": five.1, "inputPoint2": five.2,
                 "inputPoint3": five.3, "inputPoint4": five.4
+            ])
+        }
+
+        // Per-channel R/G/B curves — colour grading (split-tone): a warm highlight / cool shadow
+        // response for cinematic depth. Applied via CIColorCurves; identity channels are a no-op.
+        if let curve = recipe.curve, let cdata = channelCurvesData(curve) {
+            img = img.applyingFilter("CIColorCurves", parameters: [
+                "inputCurvesData": cdata,
+                "inputCurvesDomain": CIVector(x: 0, y: 1),
+                "inputColorSpace": ImageWriter.outputColorSpace
             ])
         }
 
@@ -300,5 +309,43 @@ public enum Renderer {
 
         let v = zip(xs, ys).map { CIVector(x: $0, y: $1) }
         return (v[0], v[1], v[2], v[3], v[4])
+    }
+
+    /// Build a `CIColorCurves` data blob (32 samples × RGB) from the recipe's per-channel curves.
+    /// Absent channels pass through as identity; returns nil when the net effect is identity, so a
+    /// neutral recipe stays a byte-identical no-op.
+    static func channelCurvesData(_ curve: Curve) -> Data? {
+        guard curve.red != nil || curve.green != nil || curve.blue != nil else { return nil }
+
+        func sampler(_ pts: [[Double]]?) -> ((Double) -> Double)? {
+            guard let pts = pts else { return nil }
+            let clean = pts.compactMap { p -> (x: Double, y: Double)? in
+                p.count >= 2 ? (clamp01(p[0] / 255.0), clamp01(p[1] / 255.0)) : nil
+            }.sorted { $0.x < $1.x }
+            guard clean.count >= 2 else { return nil }
+            return { x in
+                if x <= clean.first!.x { return clean.first!.y }
+                if x >= clean.last!.x { return clean.last!.y }
+                for i in 1..<clean.count where x <= clean[i].x {
+                    let a = clean[i - 1], b = clean[i]
+                    let t = (b.x - a.x) > 1e-9 ? (x - a.x) / (b.x - a.x) : 0
+                    return a.y + t * (b.y - a.y)
+                }
+                return clean.last!.y
+            }
+        }
+
+        let rs = sampler(curve.red), gs = sampler(curve.green), bs = sampler(curve.blue)
+        let n = 32
+        var floats = [Float](repeating: 0, count: n * 3)
+        var changed = false
+        for i in 0..<n {
+            let x = Double(i) / Double(n - 1)
+            let r = rs?(x) ?? x, g = gs?(x) ?? x, b = bs?(x) ?? x
+            if abs(r - x) > 0.002 || abs(g - x) > 0.002 || abs(b - x) > 0.002 { changed = true }
+            floats[i * 3] = Float(r); floats[i * 3 + 1] = Float(g); floats[i * 3 + 2] = Float(b)
+        }
+        guard changed else { return nil }
+        return floats.withUnsafeBytes { Data($0) }
     }
 }

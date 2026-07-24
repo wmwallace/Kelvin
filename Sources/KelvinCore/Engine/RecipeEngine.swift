@@ -57,8 +57,8 @@ public enum RecipeEngine {
             g.vibrance = vibrance(p, s)
             g.saturation = saturation(p)
             // The S-curve carries the punch (anchored midtones); it's the "rebuild" after the
-            // highlight/shadow recovery flattens the ends.
-            curve = toneCurve(p, s, strength: curveStrength(p, s))
+            // highlight/shadow recovery flattens the ends. A subtle grade adds cinematic depth.
+            curve = toneCurve(p, s, strength: curveStrength(p, s), grade: 0.45)
         } else {
             // Corrective-only. Vibrance is allowed a token amount so a flat frame is not left
             // visibly lifeless, but nothing scene-specific.
@@ -336,10 +336,13 @@ public enum RecipeEngine {
     /// clips. This is the "rebuild" half of flatten-then-rebuild: after highlight-recovery and
     /// shadow-lift flatten the ends, the S-curve puts punch back into the midtones under control.
     /// `strength` (0…1) scales the depth of the S; a matte `toe` lifts the black end for a film look.
-    static func toneCurve(_ p: Perception, _ s: ImageStatistics, strength: Double, toe: Double = 0) -> Curve? {
+    static func toneCurve(
+        _ p: Perception, _ s: ImageStatistics, strength: Double, toe: Double = 0, grade: Double = 0
+    ) -> Curve? {
         guard p.intent != .archival, p.intent != .productAccurate else { return nil }
         let amt = strength * 15.0                       // 0…~15 luma units at the quarter points
-        guard amt >= 1 || toe >= 1 else { return nil }
+        let g = max(0, grade)
+        guard amt >= 1 || toe >= 1 || g > 0.01 else { return nil }
         let lo = 64.0, hi = 192.0
         let luma: [[Double]] = [
             [0, toe],                                   // matte toe lifts the black end (film look)
@@ -348,7 +351,16 @@ public enum RecipeEngine {
             [hi, hi + amt],                             // lift highlights
             [255, 255]
         ]
-        return Curve(luma: luma, red: nil, green: nil, blue: nil)
+
+        // Colour grade — a subtle teal-shadow / warm-highlight split-tone for cinematic depth and
+        // subject separation. Reduce the shadow-teal when a person is present so shadowed skin
+        // doesn't turn sickly green. All amounts small (≤ ~7/255) — this is seasoning, not a filter.
+        guard g > 0.01 else { return Curve(luma: luma, red: nil, green: nil, blue: nil) }
+        let teal = g * (p.subject.type == .person ? 0.45 : 1.0)
+        let red: [[Double]]   = [[0, 0], [lo, lo - 3 * g], [128, 128], [hi, hi + 7 * g], [255, 255]]
+        let green: [[Double]] = [[0, 1.5 * teal], [lo, lo + 2 * teal], [128, 128], [hi, hi - 1 * g], [255, 255]]
+        let blue: [[Double]]  = [[0, 3 * teal], [lo, lo + 6 * teal], [128, 128], [hi, hi - 6 * g], [255, 255 - 3 * g]]
+        return Curve(luma: luma, red: red, green: green, blue: blue)
     }
 
     /// How much S-curve punch the frame wants, 0…~1.2. Flat frames get more, already-contrasty
