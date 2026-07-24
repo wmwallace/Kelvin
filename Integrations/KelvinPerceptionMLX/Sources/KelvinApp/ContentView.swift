@@ -1142,9 +1142,6 @@ struct ContentView: View {
         }
         .background(Theme.base)
         .preferredColorScheme(.dark)
-        // Text in a Mac app should be selectable — copying a filename, a lens name, or a set of
-        // coordinates out of the Capture panel is an ordinary thing to want to do.
-        .textSelection(.enabled)
         .task { await appState.loadDemoIfRequested() }
         .sheet(isPresented: $appState.showBatchSheet) { batchSheet }
     }
@@ -1191,6 +1188,7 @@ struct ContentView: View {
                         .font(Theme.ui(40, .medium))
                         .foregroundColor(Theme.ink)
                     Text("Drop a photo. Kelvin reads the scene on-device and offers a few finished looks — pick one, tune it, then apply it across the shoot.")
+                        .textSelection(.enabled)
                         .font(Theme.ui(14))
                         .foregroundColor(Theme.inkDim)
                         .multilineTextAlignment(.center)
@@ -1507,6 +1505,10 @@ struct ContentView: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
+        // Selectable HERE and not app-wide: enabling it globally let text selection swallow
+        // clicks meant for buttons and sliders. This panel is the one place with values worth
+        // pasting somewhere else — a lens name, coordinates, the pixel dimensions.
+        .textSelection(.enabled)
         .background(
             RoundedRectangle(cornerRadius: 8).fill(Theme.surface.opacity(0.5))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.hairline.opacity(0.6), lineWidth: 1))
