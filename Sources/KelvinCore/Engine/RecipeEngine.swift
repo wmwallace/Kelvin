@@ -57,6 +57,9 @@ public enum RecipeEngine {
             g.blacks = blacks
             g.vibrance = vibrance(p, s)
             g.saturation = saturation(p)
+            let local = localContrast(p, s, iso: iso)
+            g.clarity = local.clarity
+            g.texture = local.texture
             // The S-curve carries the punch (anchored midtones); it's the "rebuild" after the
             // highlight/shadow recovery flattens the ends. A subtle grade adds cinematic depth.
             curve = toneCurve(p, s, strength: curveStrength(p, s), grade: 0.45)
@@ -233,6 +236,55 @@ public enum RecipeEngine {
         if extremeRange { amount += 15 }
         if clippingBothEnds { amount += 10 }
         return roundedClamp(amount, to: 0...80, step: 1)
+    }
+
+    /// Local contrast — clarity (mid-scale) and texture (fine-scale).
+    ///
+    /// The engine has never set either, so every candidate came out with zero micro-contrast and
+    /// the "bite" had to be dialled in by hand. That was a defensible omission while clarity was a
+    /// plain unsharp mask that ringed along every hard edge; now that the halo is suppressed
+    /// (see `Clarity`), applying it automatically is safe and the frames read better for it.
+    ///
+    /// Scene decides the amount, because this is one of the few controls where the right answer
+    /// genuinely differs by subject rather than by taste:
+    ///   • Rock, foliage, architecture and macro detail are what clarity is *for*.
+    ///   • A face is what it is worst at — mid-scale contrast hardens the planes of the skin, which
+    ///     is the over-processed portrait look. Portraits get none.
+    ///   • Noise is fine-scale, so amplifying fine-scale detail amplifies noise; high-ISO and night
+    ///     frames are held back.
+    static func localContrast(_ p: Perception, _ s: ImageStatistics, iso: Double?)
+        -> (clarity: Double, texture: Double) {
+        guard p.intent != .archival, p.intent != .productAccurate else { return (0, 0) }
+
+        var clarity: Double
+        var texture: Double
+        switch p.scene {
+        case .macro:              clarity = 16; texture = 12
+        case .landscape:          clarity = 14; texture = 8
+        case .street:             clarity = 12; texture = 6
+        case .interior:           clarity = 6;  texture = 3
+        case .night:              clarity = 4;  texture = 0
+        case .portrait:           clarity = 0;  texture = 0   // never harden a face by default
+        case .event:              clarity = p.subject.type == .person ? 0 : 8
+                                  texture = p.subject.type == .person ? 0 : 4
+        case .stillLife:          clarity = 10; texture = 8
+        case .document, .other:   clarity = 8;  texture = 4
+        }
+
+        // A person anywhere in frame caps it, whatever the scene was called — a portrait mislabelled
+        // "event" or "street" should still not get crunchy skin.
+        if p.subject.present && p.subject.type == .person {
+            clarity = min(clarity, 5); texture = min(texture, 2)
+        }
+        // Flat frames have the most to gain; hazy ones are already handled by dehaze, so don't stack.
+        if p.problems.contains(.flat) || p.problems.contains(.lowContrast) { clarity += 5 }
+        // Local contrast amplifies noise, which is fine-scale by nature.
+        let noisy = p.problems.contains(.noise) || (iso ?? 0) > 3200
+        if noisy { clarity *= 0.5; texture = 0 }
+        if p.problems.contains(.softFocus) { clarity *= 0.6 }   // won't rescue focus, just adds grit
+
+        return (roundedClamp(clarity, to: 0...30, step: 1),
+                roundedClamp(texture, to: 0...20, step: 1))
     }
 
     // MARK: - Exposure

@@ -68,6 +68,11 @@ public extension RecipeEngine {
         g.contrast = styledContrast(p, s, style)
         g.vibrance = styledVibrance(p, s, style)
         g.saturation = styledSaturation(p, style)
+        // Local contrast follows the style's contrast character — Soft stays smooth, Dramatic bites.
+        let local = localContrast(p, s, iso: iso)
+        g.clarity = roundedClamp(local.clarity * style.curveScale, to: 0...30, step: 1)
+        g.texture = roundedClamp(local.texture * style.curveScale, to: 0...20, step: 1)
+
         let points = styledPoints(p, s, style)
         g.whites = points.whites
         g.blacks = points.blacks
