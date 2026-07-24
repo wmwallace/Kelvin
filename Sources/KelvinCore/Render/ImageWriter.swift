@@ -96,4 +96,32 @@ public enum ImageWriter {
         ctx.draw(cg, in: CGRect(x: 0, y: 0, width: width, height: height))
         return Data(bytes)
     }
+
+    /// Rasterize to a fixed `width`×`height` RGBA8 grid in sRGB, so two images of
+    /// different pixel dimensions can be compared sample-for-sample. Used by the eval
+    /// metrics. Returns row-major RGBA8 bytes of length `width*height*4`.
+    public static func rgba8Sampled(_ image: CIImage, width: Int, height: Int) throws -> Data {
+        let extent = image.extent
+        guard !extent.isInfinite,
+              let cg = context.createCGImage(image, from: extent, format: .RGBA8, colorSpace: outputColorSpace)
+        else {
+            throw Error.rasterFailed
+        }
+        let bytesPerRow = width * 4
+        var bytes = [UInt8](repeating: 0, count: bytesPerRow * height)
+        guard let ctx = CGContext(
+            data: &bytes,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: outputColorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            throw Error.rasterFailed
+        }
+        ctx.interpolationQuality = .medium
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return Data(bytes)
+    }
 }

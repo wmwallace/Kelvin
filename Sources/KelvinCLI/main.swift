@@ -21,11 +21,17 @@ func printUsage() {
 
     Usage:
       \(tool) render --in <image> --recipe <recipe.json> --out <output>
+      \(tool) eval --corpus <dir> [--out <report.json>] [--engine-version <v>]
 
     render options:
       --in       Path to the source image (RAW, JPEG, or PNG). Required.
       --recipe   Path to a recipe JSON sidecar. Required.
       --out      Output path. Extension picks the format (.png or .jpg). Required.
+
+    eval options:
+      --corpus          Directory containing a manifest.json. Required.
+      --out             Where to write report.json. Optional; table always prints.
+      --engine-version  Label recorded in the report. Default 0.1.0.
 
     Other:
       -h, --help  Show this help.
@@ -68,6 +74,35 @@ case "render":
         let rendered = Renderer.render(image, with: recipe)
         try ImageWriter.write(rendered, to: outURL)
         print("Wrote \(outURL.path)")
+    } catch {
+        fail("\(error)")
+    }
+
+case "eval":
+    let rest = Array(arguments.dropFirst())
+
+    guard let corpusPath = value(for: "--corpus", in: rest) else { fail("eval requires --corpus") }
+    let corpusURL = URL(fileURLWithPath: corpusPath)
+    let engineVersion = value(for: "--engine-version", in: rest) ?? "0.1.0"
+
+    do {
+        let corpus = try Corpus.load(root: corpusURL)
+        let report = try Evaluator.run(corpus: corpus, engineVersion: engineVersion)
+
+        print(report.renderTable())
+
+        if let outPath = value(for: "--out", in: rest) {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(report)
+            try data.write(to: URL(fileURLWithPath: outPath))
+            print("Wrote \(outPath)")
+        }
+
+        // Surface the no-op invariant as a non-zero exit so CI can gate on it.
+        if !report.noOpFidelityOK {
+            fail("no-op fidelity failed: a neutral recipe altered pixels")
+        }
     } catch {
         fail("\(error)")
     }
