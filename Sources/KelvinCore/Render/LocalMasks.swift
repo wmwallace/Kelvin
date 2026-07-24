@@ -30,7 +30,16 @@ public enum LocalMasks {
             let face = FaceSkin.read(in: image)
             if let skin = face.skinLuma { subjectLuma = skin }
         }
-        if let sky = SkyMask.detect(in: image) {
+        if var sky = SkyMask.detect(in: image) {
+            // Subtract the subject from the sky so sky adjustments never touch a person standing
+            // against it — otherwise their bright hair/shoulders, poking into the upper frame,
+            // could be caught by the sky mask and get the wrong local edit. sky ← sky × (1−subject).
+            if let subject = bitmaps["subject"] {
+                let notSubject = subject.applyingFilter("CIColorInvert")
+                sky = sky.applyingFilter("CIMultiplyCompositing",
+                                         parameters: [kCIInputBackgroundImageKey: notSubject])
+                          .cropped(to: image.extent)
+            }
             bitmaps["sky"] = sky
             skyLuma = SubjectMask.maskedMeanLuma(image: image, mask: sky)
         }
