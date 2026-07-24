@@ -118,6 +118,12 @@ public enum Renderer {
             img = Clarity.apply(img, amount: g.clarity, radius: clarityRadius(for: img))
         }
 
+        // Texture: fine-scale detail (positive) or edge-preserving smoothing (negative). Separate
+        // from clarity by radius — see Clarity.texture.
+        if g.texture != 0 {
+            img = Clarity.texture(img, amount: g.texture, radius: clarityRadius(for: img))
+        }
+
         // Vibrance (CIVibrance, neutral 0.0).
         if g.vibrance != 0 {
             img = img.applyingFilter("CIVibrance", parameters: [

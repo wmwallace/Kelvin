@@ -73,6 +73,33 @@ final class ClarityTests: XCTestCase {
         XCTAssertNotEqual(try ImageWriter.rgba8Bytes(out), try ImageWriter.rgba8Bytes(source))
     }
 
+    // MARK: - Texture
+
+    func testPositiveTextureAddsFineDetail() throws {
+        let source = TestSupport.makeGradientImage(width: 96, height: 96)
+        let out = Clarity.texture(source, amount: 60, radius: 10)
+        XCTAssertNotEqual(try ImageWriter.rgba8Bytes(out), try ImageWriter.rgba8Bytes(source),
+                          "the Texture slider must actually do something — it used to be inert")
+    }
+
+    /// Negative texture must smooth while KEEPING edges — that's the difference between skin
+    /// softening and just blurring the face.
+    func testNegativeTexturePreservesEdgesWhileSmoothing() throws {
+        let source = edgeImage()
+        let out = Clarity.texture(source, amount: -100, radius: 8)
+        let line = try scanline(out)
+        let mid = line.count / 2
+        // The step across the boundary must survive; a Gaussian blur would wash it out.
+        let step = (line[(mid + 8)] ) - (line[(mid - 9)])
+        XCTAssertGreaterThan(step, 90, "an edge-preserving smooth must keep the edge (was 115)")
+    }
+
+    func testZeroTextureIsANoOp() throws {
+        let source = TestSupport.makeGradientImage()
+        XCTAssertEqual(try ImageWriter.rgba8Bytes(Clarity.texture(source, amount: 0, radius: 8)),
+                       try ImageWriter.rgba8Bytes(source))
+    }
+
     func testZeroClarityIsANoOp() throws {
         let source = TestSupport.makeGradientImage()
         XCTAssertEqual(try ImageWriter.rgba8Bytes(Clarity.apply(source, amount: 0, radius: 8)),

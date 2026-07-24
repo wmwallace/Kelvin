@@ -48,6 +48,39 @@ enum Clarity {
             .cropped(to: extent)
     }
 
+    /// **Texture** — fine-scale detail, the companion to clarity's mid-scale local contrast.
+    ///
+    /// The two differ by radius, and that difference is the whole point on a portrait: clarity at a
+    /// mid radius hardens the planes of a face, while texture works small enough to bring out fabric
+    /// weave, hair and foliage without that effect.
+    ///
+    /// Negative texture is where the guided filter really earns its place. Softening with a Gaussian
+    /// smears eyelashes and the edge of a lip along with the skin; smoothing with an *edge-preserving*
+    /// filter takes down pores and blemishes while leaving every real boundary intact. That is what
+    /// skin softening is supposed to be, and it falls out of the same primitive.
+    static func texture(_ image: CIImage, amount: Double, radius: Double) -> CIImage {
+        guard amount != 0 else { return image }
+        let extent = image.extent
+        let fine = max(1.0, radius * 0.4)          // finer than clarity, by design
+
+        if amount > 0 {
+            return apply(image, amount: amount, radius: fine)
+        }
+        // Negative: blend toward an edge-preserving smooth, never a blur.
+        guard let smoothed = CIFilter(name: "CIGuidedFilter", parameters: [
+            kCIInputImageKey: image,
+            "inputGuideImage": image,
+            kCIInputRadiusKey: fine,
+            "inputEpsilon": 0.01                   // larger ⇒ smooths more within flat regions
+        ])?.outputImage?.cropped(to: extent) else {
+            return apply(image, amount: amount, radius: fine)   // fall back to the plain path
+        }
+        return image.applyingFilter("CIDissolveTransition", parameters: [
+            kCIInputTargetImageKey: smoothed,
+            kCIInputTimeKey: min(1.0, -amount / 100.0)
+        ]).cropped(to: extent)
+    }
+
     /// A map of where an edge-blind blur and an edge-aware one disagree — i.e. where a plain
     /// unsharp mask would ring. White = high risk.
     private static func haloRisk(of image: CIImage, radius: Double, extent: CGRect) -> CIImage? {
