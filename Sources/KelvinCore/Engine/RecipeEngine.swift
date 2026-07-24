@@ -62,7 +62,8 @@ public enum RecipeEngine {
             g.texture = local.texture
             // The S-curve carries the punch (anchored midtones); it's the "rebuild" after the
             // highlight/shadow recovery flattens the ends. A subtle grade adds cinematic depth.
-            curve = toneCurve(p, s, strength: curveStrength(p, s), grade: 0.45)
+            curve = toneCurve(p, s, strength: curveStrength(p, s) * curveDamping(whites, blacks),
+                              grade: 0.45)
         } else {
             // Corrective-only. Vibrance is allowed a token amount so a flat frame is not left
             // visibly lifeless, but nothing scene-specific.
@@ -442,7 +443,16 @@ public enum RecipeEngine {
             whites = min(28, max(0, (0.965 - s.whitePoint) * 210)) * rangeGate   // whitePoint 0.84 → ~26
         }
         if s.shadowClip < 0.02 {
-            blacks = -min(24, max(0, (s.blackPoint - 0.02) * 240)) * rangeGate   // blackPoint 0.12 → ~-24
+            // Ease off when a large part of the picture LIVES in the shadows.
+            //
+            // Endpoint-setting assumes the darkest tones are a thin tail that falls short of black.
+            // When a big region sits just above the black point — a headland against fog, trees at
+            // dusk — driving that point down takes the whole region with it. Measured on exactly
+            // that frame: the faithful render put 23% of the picture below readable black, against
+            // 1% in the original. Full strength up to a quarter of the frame in shadow, tapering to
+            // a third of it by the time half the frame is down there.
+            let shadowGuard = 1 - 0.67 * clamp((s.shadowRegion - 0.25) / 0.25, to: 0...1)
+            blacks = -min(24, max(0, (s.blackPoint - 0.02) * 240)) * rangeGate * shadowGuard
         }
         if p.problems.contains(.flat) { whites += 6 * rangeGate; blacks -= 6 * rangeGate }
         return (roundedClamp(whites, to: 0...30, step: 1), roundedClamp(blacks, to: -30...0, step: 1))
@@ -459,7 +469,6 @@ public enum RecipeEngine {
         guard p.intent != .archival, p.intent != .productAccurate else { return nil }
         let amt = strength * 15.0                       // 0…~15 luma units at the quarter points
         let g = max(0, grade)
-        guard amt >= 1 || toe >= 1 || g > 0.01 else { return nil }
         let lo = 64.0, hi = 192.0
         let luma: [[Double]] = [
             [0, toe],                                   // matte toe lifts the black end (film look)
@@ -482,6 +491,19 @@ public enum RecipeEngine {
 
     /// How much S-curve punch the frame wants, 0…~1.2. Flat frames get more, already-contrasty
     /// or extreme-range frames get less (they'd only clip).
+    /// Endpoint placement and the S-curve BOTH build contrast, so applying each at full strength
+    /// double-counts. A colourist who has already driven the endpoints hard does not then lay a
+    /// full S-curve on top; the second move lands on midtones the first has already stretched.
+    ///
+    /// A flat frame is where both peak — endpoints at their −30/+30 limit *and* the curve boosted
+    /// for low dynamic range — and the measured result was an edit that overshot the truth by more
+    /// than doing nothing. So the curve yields as the endpoint load rises: full strength when the
+    /// endpoints are idle, a little under half at the limit.
+    static func curveDamping(_ whites: Double, _ blacks: Double) -> Double {
+        let load = clamp((abs(whites) + abs(blacks)) / 60.0, to: 0...1)
+        return 1 - 0.55 * load
+    }
+
     static func curveStrength(_ p: Perception, _ s: ImageStatistics) -> Double {
         var st = 0.7
         if s.dynamicRange < 0.5 { st += 0.3 }

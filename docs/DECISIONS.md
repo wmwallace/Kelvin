@@ -186,3 +186,47 @@ identified as real limits rather than guesses:
 3. **A generic aesthetic model (Q-Align)** — last. Heaviest, licence least certain, and it would
    impose an averaged notion of "good" that the owner has already shown differs from his own
    (he preferred Natural where the scorer preferred the flattest option).
+
+## D-tone-1 — Display-referred tone controls, and the flat-recovery gap
+
+**Decision:** the tone stage (endpoints, contrast, dehaze, curves) is applied in sRGB, not in
+Core Image's default scene-linear working space. Clarity, texture and vibrance stay linear.
+
+**Why.** Every one of those controls is written in the numbers a photographer reads — "the quarter
+tone", "mid grey", a contrast slider pivoting at 50%. Applied in linear light those numbers land
+somewhere else: linear 0.5 is display 0.73, so the contrast pivot sat up in the highlights and the
+control was, in practice, a shadow-crusher. Measured on a display ramp in the working space the
+app actually used:
+
+| display in | contrast +3 | contrast +24 |
+|---|---|---|
+| 0.05 | 0.00 | 0.00 |
+| 0.10 | 0.02 | 0.00 |
+| 0.20 | 0.17 | 0.00 |
+
+A contrast of +3 — nominally imperceptible — wiped out everything below display 0.10. On a foggy
+headland the *faithful* "Natural" render put 21% of the frame into unreadable black against 1% in
+the original; ablation pinned contrast as the cause. After the fix that is 5.7%, and the heavy
+looks went from 46–49% to 12–22%.
+
+Scoped deliberately to the tone controls. Sweeping clarity/texture/vibrance in too changed their
+effective strength and cost ~5 ΔE on the benchmark's flat case — they were not part of the bug.
+
+**Consequence — a real gap, recorded not tuned away.** With the tone controls behaving truthfully,
+the engine is now measurably *worse than doing nothing* at recovering a genuinely flat frame
+(11.8 ΔE vs 8.9 on the synthetic benchmark; 12.3 vs 9.6 on a real photograph). It still beats
+naive-auto comfortably (23.3).
+
+The cause is structural: `whites`/`blacks` bend the QUARTER tones of a curve pinned at 0 and 1.
+Nothing in the recipe can map a compressed 0.235…0.764 range back out to 0…1, so a flat frame gets
+its midtones redistributed instead of its range restored. It needs a levels-style range stretch.
+An attempt to express that by moving the luma curve's outer control points off 0/255 made it far
+worse (29.9 ΔE) — `CIToneCurve` does not behave that way — and was reverted rather than shipped.
+
+This was invisible before because the degradation constant that produced a "flat" test frame under
+the broken renderer produced a barely-flattened one (dynamic range 0.74, where the evaluator's own
+flat threshold is 0.45). The corpus now uses a degradation that is actually flat, and
+`EngineBenchmarkTests` asserts the naive-auto floor for that case with this gap cited.
+
+**Not decided here:** whether the range stretch lands as a new recipe field or a reinterpretation
+of the existing endpoints. That changes the schema, so it is the owner's call (CLAUDE.md).

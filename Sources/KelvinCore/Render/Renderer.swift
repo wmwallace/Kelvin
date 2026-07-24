@@ -65,6 +65,33 @@ public enum Renderer {
             ])
         }
 
+        // ---- DISPLAY-REFERRED TONE STAGE ----
+        //
+        // Everything from here to the end of the curves is written in the numbers a photographer
+        // reads: "the quarter tone", "mid grey", a contrast slider pivoting at 50%. Core Image's
+        // default working space is scene-LINEAR, where those numbers land somewhere else entirely
+        // — linear 0.5 is display 0.73, so a contrast pivot nominally at "mid grey" actually sits
+        // up in the highlights and the control becomes almost purely a shadow-crusher.
+        //
+        // Measured on a display ramp before this fix, in the working space the app really uses:
+        //     contrast  +3:  display 0.05 → 0.00,  0.10 → 0.02
+        //     contrast +24:  display 0.20 → 0.00
+        // A contrast of +3 — nominally imperceptible — was wiping out everything below display
+        // 0.10. On a foggy headland the faithful "Natural" render put 21% of the frame into
+        // unreadable black against 1% in the original, and ablation pinned contrast as the cause.
+        //
+        // So: encode to sRGB, do the display-referred shaping there, and decode back. Only when
+        // something in the stage is actually non-neutral, so an all-neutral recipe still skips
+        // every filter and stays a byte-identical no-op (RECIPE-SCHEMA.md invariant).
+        //
+        // Deliberately scoped to the TONE controls — endpoints, contrast, dehaze, curves. Clarity,
+        // texture and vibrance stay in linear, where they were calibrated: they were not part of
+        // this bug, and moving them changed their strength enough to cost 5 ΔE on the engine
+        // benchmark's flat case. Fix the thing that is broken, not everything nearby.
+        let tonePass = g.whites != 0 || g.blacks != 0 || g.contrast != 0 || g.saturation != 0
+            || g.dehaze != 0
+        if tonePass { img = img.applyingFilter("CILinearToSRGBToneCurve") }
+
         // Whites / blacks. Endpoint tone shaping: `blacks` moves the low quarter, `whites` the
         // high quarter, with pure black (0→0) and pure white (1→1) anchored so the range is
         // not clipped. Neutral (both 0) is the identity curve, hence skipped.
@@ -112,6 +139,9 @@ public enum Renderer {
             ])
         }
 
+        // ---- back to scene-linear: clarity/texture/vibrance are calibrated there ----
+        if tonePass { img = img.applyingFilter("CISRGBToneCurveToLinear") }
+
         // Clarity: mid-radius local contrast, approximated with an unsharp mask whose radius
         // scales with the image so a proxy and full-res behave comparably. Neutral (0) skips.
         if g.clarity != 0 {
@@ -131,6 +161,14 @@ public enum Renderer {
             ])
         }
 
+        // Curves, also display-referred: the recipe writes control points in 0…255, meaning the
+        // shape a photographer would draw on a histogram. Applied in linear light an S-curve whose
+        // quarter point reads 64→48 lands far deeper than drawn, which is the same fault as the
+        // contrast pivot above, so the curves get the same sRGB round trip.
+        let curvePass = (recipe.curve?.luma).flatMap(tuneCurvePoints) != nil
+            || recipe.curve.flatMap(channelCurvesData) != nil
+        if curvePass { img = img.applyingFilter("CILinearToSRGBToneCurve") }
+
         // Luma tone curve. The recipe stores control points in 0…255; resample to the five
         // points CIToneCurve accepts. An absent or identity curve applies nothing.
         if let points = recipe.curve?.luma, let five = tuneCurvePoints(points) {
@@ -149,6 +187,9 @@ public enum Renderer {
                 "inputColorSpace": ImageWriter.outputColorSpace
             ])
         }
+
+        // ---- back to scene-linear for HSL, B&W, masks and detail ----
+        if curvePass { img = img.applyingFilter("CISRGBToneCurveToLinear") }
 
         // Per-colour HSL (after the curve, per the schema's curve → HSL order). Baked into a
         // colour-cube LUT; an empty or all-neutral `hsl` produces no cube, so nothing applies.

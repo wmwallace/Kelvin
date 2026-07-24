@@ -29,6 +29,17 @@ public struct ImageStatistics: Equatable, Sendable {
     public var highlightClip: Double
     /// Fraction of pixels with every channel at/below 1 (crushed blacks).
     public var shadowClip: Double
+    /// Fraction of the frame below 0.08 luma — dark enough that detail is no longer readable,
+    /// **whether or not it is technically clipped**.
+    ///
+    /// `shadowClip` requires every channel at/below 1, which turns out to be a poor proxy for
+    /// "lost the shadows": a heavy contrast render measured 0.3% shadowClip while pushing 48% of
+    /// the frame into unreadable black, and so scored as flawless. This is the number that sees it.
+    public var shadowMass: Double
+    /// Fraction of the frame below 0.20 luma — how much of the picture actually *lives* in the
+    /// shadows. Not a defect on its own; it says how much there is to lose, so the engine can
+    /// ease off deepening the blacks when a large part of the subject sits down there.
+    public var shadowRegion: Double
     /// Mean CIELAB a (green ↔ magenta). Positive = magenta cast.
     public var chromaA: Double
     /// Mean CIELAB b (blue ↔ yellow). Positive = yellow/warm cast.
@@ -40,8 +51,11 @@ public struct ImageStatistics: Equatable, Sendable {
     public init(
         meanLuma: Double, medianLuma: Double, blackPoint: Double, shadowLevel: Double,
         highlightLevel: Double, whitePoint: Double, highlightClip: Double, shadowClip: Double,
-        chromaA: Double, chromaB: Double
+        chromaA: Double, chromaB: Double,
+        shadowMass: Double = 0, shadowRegion: Double = 0
     ) {
+        self.shadowMass = shadowMass
+        self.shadowRegion = shadowRegion
         self.meanLuma = meanLuma
         self.medianLuma = medianLuma
         self.blackPoint = blackPoint
@@ -63,7 +77,7 @@ public struct ImageStatistics: Equatable, Sendable {
             return ImageStatistics(
                 meanLuma: 0, medianLuma: 0, blackPoint: 0, shadowLevel: 0,
                 highlightLevel: 0, whitePoint: 0, highlightClip: 0, shadowClip: 0,
-                chromaA: 0, chromaB: 0
+                chromaA: 0, chromaB: 0, shadowMass: 0, shadowRegion: 0
             )
         }
 
@@ -71,6 +85,7 @@ public struct ImageStatistics: Equatable, Sendable {
         var lumaSum = 0.0
         var sa = 0.0, sb = 0.0
         var hi = 0, lo = 0
+        var unreadable = 0, inShadow = 0
 
         data.withUnsafeBytes { dp in
             let p = dp.bindMemory(to: UInt8.self)
@@ -92,6 +107,8 @@ public struct ImageStatistics: Equatable, Sendable {
 
                 if r8 >= 254 || g8 >= 254 || b8 >= 254 { hi += 1 }
                 if r8 <= 1 && g8 <= 1 && b8 <= 1 { lo += 1 }
+                if y < 0.08 { unreadable += 1 }
+                if y < 0.20 { inShadow += 1 }
             }
         }
 
@@ -112,7 +129,9 @@ public struct ImageStatistics: Equatable, Sendable {
             highlightClip: Double(hi) / n,
             shadowClip: Double(lo) / n,
             chromaA: sa / n,
-            chromaB: sb / n
+            chromaB: sb / n,
+            shadowMass: Double(unreadable) / n,
+            shadowRegion: Double(inShadow) / n
         )
     }
 

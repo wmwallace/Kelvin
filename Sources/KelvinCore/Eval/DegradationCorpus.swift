@@ -35,7 +35,7 @@ public enum DegradationCorpus {
         Degradation(id: "overexposed",  recipe: make { $0.exposureEV = 1.0 }),
         Degradation(id: "warm-cast",    recipe: make { $0.temperatureK = 4000 }),
         Degradation(id: "cool-cast",    recipe: make { $0.temperatureK = 8800 }),
-        Degradation(id: "flat",         recipe: make { $0.contrast = -35; $0.saturation = -20 }),
+        Degradation(id: "flat",         recipe: make { $0.contrast = -70; $0.saturation = -20 }),
         Degradation(id: "dull",         recipe: make { $0.saturation = -45 })
     ]
 

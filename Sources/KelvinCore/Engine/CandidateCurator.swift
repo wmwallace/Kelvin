@@ -34,6 +34,8 @@ public enum CandidateCurator {
 
     /// Below this, a candidate has a defect serious enough that offering it is a disservice.
     public static let qualityFloor = 0.55
+    /// The faithful rendering, which is always shown — see `select`.
+    public static let faithfulStyleID = "natural"
     /// How different two candidates must be to both earn a place, in the distance below.
     public static let minimumSeparation = 12.0
 
@@ -54,7 +56,13 @@ public enum CandidateCurator {
     /// everything trips the floor, the least-bad option is still offered rather than an empty picker.
     public static func select(from candidates: [Scored], count: Int = 4) -> [Scored] {
         guard !candidates.isEmpty else { return [] }
-        let clean = candidates.filter { $0.score.overall >= qualityFloor }
+        // The faithful rendering is ALWAYS on the menu. It is the reference every other look is a
+        // departure from, and the one a photographer expects to be able to fall back to — so it is
+        // exempt from the quality floor that culls the rest. A frame difficult enough that even the
+        // faithful read trips a defect is exactly the frame where you most want to see it and
+        // decide for yourself, rather than being handed only stylised alternatives.
+        let isFaithful = { (c: Scored) in c.recipe.id == faithfulStyleID }
+        let clean = candidates.filter { $0.score.overall >= qualityFloor || isFaithful($0) }
         let pool = clean.isEmpty
             ? [candidates.max { $0.score.overall < $1.score.overall }!]   // least-bad, not nothing
             : clean

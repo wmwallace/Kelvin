@@ -21,7 +21,7 @@ public enum AestheticEvaluator {
 
     /// A specific, fixable defect — so the UI can offer a one-click correction, not just a warning.
     public enum Issue: String, Sendable, Equatable {
-        case blownHighlights, crushedShadows, flat, colorCast
+        case blownHighlights, crushedShadows, flat, colorCast, shadowDetailLost
         case skinOverSaturated, skinAshy, skinHue
         case subjectFlat, subjectTooDark, subjectBlown
 
@@ -32,6 +32,7 @@ public enum AestheticEvaluator {
             case .crushedShadows:    return "crushed shadows — lost detail"
             case .flat:              return "looks flat (narrow tonal range)"
             case .colorCast:         return "strong colour cast"
+            case .shadowDetailLost:  return "shadows gone to black — detail lost"
             case .skinOverSaturated: return "skin over-saturated"
             case .skinAshy:          return "skin looks ashy/desaturated"
             case .skinHue:           return "skin hue pushed off-natural"
@@ -49,6 +50,9 @@ public enum AestheticEvaluator {
         public let clipping: Double
         public let skin: Double
         public let colorCast: Double
+        /// How much of the frame survives as readable shadow rather than featureless black.
+        /// 1.0 when nothing has been lost.
+        public var shadowDetail: Double = 1.0
         /// How well the person in the frame is rendered — modelling, placement, intact features.
         /// 1.0 when there is no face to judge.
         public var subject: Double = 1.0
@@ -133,6 +137,20 @@ public enum AestheticEvaluator {
             if !terms.isEmpty { subject = terms.min() ?? 1.0 }
         }
 
+        // --- SHADOW DETAIL. `clipping` above asks whether pixels are pinned at pure black, which
+        // turns out to miss the failure people actually see. On a foggy headland, a heavy contrast
+        // render pushed 48% of the frame below 0.08 luma — a featureless silhouette where trees
+        // had been — while measuring only 0.3% shadowClip, and so scored a flawless 1.00 and was
+        // offered to the user. Detail dies well before a pixel reaches zero.
+        //
+        // The free allowance is generous (10% of a frame can legitimately be deep black: night
+        // sky, a dark backdrop, a vignette) so this stays inert on normal images and only bites
+        // when a large part of the picture has genuinely been destroyed. It is a defect check,
+        // NOT a reward for lifting shadows — a flat edit gains nothing here that a well-judged
+        // contrasty one doesn't also get.
+        let shadowDetail = penalty(s.shadowMass, free: 0.10, bad: 0.40)
+        if s.shadowMass > 0.18 { issues.append(.shadowDetailLost) }
+
         // --- Colour cast: a gentle warmth is flattering; a strong global tint is a WB error.
         // chromaA/chromaB are Lab-ish; magnitude ~>18 is a visible cast.
         let castMag = (s.chromaA * s.chromaA + s.chromaB * s.chromaB).squareRoot()
@@ -145,12 +163,14 @@ public enum AestheticEvaluator {
         // is what someone looking at the photograph is responding to.
         let hasFace = (face?.faceCount ?? 0) > 0
         let w: [(Double, Double)] = hasFace
-            ? [(subject, 0.34), (skin, 0.24), (clipping, 0.22), (colorCast, 0.12), (tonalRange, 0.08)]
-            : [(clipping, 0.42), (colorCast, 0.28), (tonalRange, 0.30)]
+            ? [(subject, 0.30), (skin, 0.21), (clipping, 0.16), (shadowDetail, 0.15),
+               (colorCast, 0.10), (tonalRange, 0.08)]
+            : [(clipping, 0.28), (shadowDetail, 0.24), (colorCast, 0.24), (tonalRange, 0.24)]
         let overall = w.reduce(0.0) { $0 + $1.0 * $1.1 } / w.reduce(0.0) { $0 + $1.1 }
 
         return Score(overall: overall, tonalRange: tonalRange, clipping: clipping,
-                     skin: skin, colorCast: colorCast, subject: subject, issues: issues)
+                     skin: skin, colorCast: colorCast, shadowDetail: shadowDetail,
+                     subject: subject, issues: issues)
     }
 
     /// Convenience: measure a rendered image (statistics + skin) and score it. Use this to rank
