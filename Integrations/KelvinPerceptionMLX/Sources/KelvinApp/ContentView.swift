@@ -105,6 +105,15 @@ final class AppState: ObservableObject {
     @Published var deltaVibrance = 0.0
     @Published var deltaSaturation = 0.0
 
+    /// Sensor dust/spots detected once on load (normalised → resolution-independent, so the same
+    /// set heals the proxy preview, the full-res export, and every frame of a batch — dust sits at
+    /// a fixed sensor position across a whole shoot).
+    private var healSpots: [HealSpot] = []
+    @Published var detectedSpotCount = 0
+    /// Opt-in: dust removal is off by default so a clean frame is never touched, and the user
+    /// decides when a spot is dust versus real detail.
+    @Published var removeDust = false { didSet { updateActiveRecipe() } }
+
     @Published var isProcessing = false
     @Published var statusMessage = "Drop a photo to read the light."
     @Published var learnedProfile: PreferenceProfile = .empty
@@ -180,6 +189,12 @@ final class AppState: ObservableObject {
             self.skyLuma = measured.skyLuma
             let proxyMasks = measured.bitmaps
 
+            // Scan for sensor dust once (normalised coords reused everywhere). Conservative — a
+            // clean frame yields none. Off until the user opts in.
+            self.healSpots = DustDetector.detect(in: proxy)
+            self.detectedSpotCount = self.healSpots.count
+            self.removeDust = false
+
             statusMessage = "Composing candidates…"
             // Clean candidates straight from the engine — no cross-image "profile". The way to
             // reuse an edit is to pick/tune one photo, then Batch apply that exact look.
@@ -233,6 +248,7 @@ final class AppState: ObservableObject {
         g.saturation = clampStep(g.saturation + deltaSaturation, -100...100, 1)
         var finalRecipe = candidate.baseRecipe
         finalRecipe.global = g
+        finalRecipe.heal = removeDust && !healSpots.isEmpty ? healSpots : nil
         self.activeRecipe = finalRecipe
         self.activePreviewImage = ciToNSImage(Renderer.render(proxy, with: finalRecipe, maskBitmaps: proxyMaskBitmaps))
     }
@@ -300,6 +316,9 @@ final class AppState: ObservableObject {
                                                         style: style, subjectLuma: m.subjectLuma,
                                                         skyLuma: m.skyLuma)
                     applyTweaks(tweaks, to: &recipe.global)
+                    // Sensor dust sits at the same normalised position on every frame of a shoot,
+                    // so the spots found on the reference photo heal the whole batch.
+                    recipe.heal = (removeDust && !healSpots.isEmpty) ? healSpots : nil
                     let masks = (recipe.masks?.isEmpty == false) ? LocalMasks.measure(in: image).bitmaps : [:]
                     let out = outputDir.appendingPathComponent(file.deletingPathExtension().lastPathComponent)
                         .appendingPathExtension("jpg")
@@ -579,6 +598,19 @@ struct ContentView: View {
                     ToneSlider(label: "Vibrance", value: $appState.deltaVibrance, range: -30...30, step: 1, unit: "", onChange: appState.updateSliderDeltas)
                     ToneSlider(label: "Saturation", value: $appState.deltaSaturation, range: -30...30, step: 1, unit: "", onChange: appState.updateSliderDeltas)
                 }
+
+                sectionLabel("Repair", trailing: appState.detectedSpotCount > 0 ? "\(appState.detectedSpotCount) spots" : nil)
+                Toggle(isOn: $appState.removeDust) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Remove dust spots").font(Theme.ui(13, .medium)).foregroundColor(Theme.ink)
+                        Text(appState.detectedSpotCount > 0
+                             ? "Patch \(appState.detectedSpotCount) detected spot\(appState.detectedSpotCount == 1 ? "" : "s") from nearby pixels"
+                             : "No spots detected on this frame")
+                            .font(Theme.mono(10)).foregroundColor(Theme.inkDim)
+                    }
+                }
+                .toggleStyle(.switch).tint(Theme.glow)
+                .disabled(appState.detectedSpotCount == 0)
             }
             .padding(20)
         }
