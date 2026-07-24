@@ -75,3 +75,62 @@ enum EditStore {
         return Set(photos.filter { fm.fileExists(atPath: url(for: $0).path) })
     }
 }
+
+/// Keep it or lose it. Deliberately binary.
+///
+/// The temptation is five stars plus colour labels plus flags, and that is the documented mistake:
+/// dozens of possible states per image is the enemy of speed, and speed is the whole point when a
+/// shoot is too big to hold in your head. A first pass wants one decision with no thinking in it.
+enum PhotoFlag: String, Codable, Sendable {
+    case keep, reject
+}
+
+/// Which frames a photographer has decided about, stored beside the edits.
+///
+/// Kept out of the photo folder for the same reason edits are — Kelvin never writes next to
+/// someone's originals — and keyed by resolved path so moving the app or reopening a folder
+/// finds the same decisions.
+@MainActor
+enum FlagStore {
+    private static var url: URL { EditStore.directory.appendingPathComponent("flags.json") }
+
+    private static var cache: [String: PhotoFlag] = load()
+
+    private static func load() -> [String: PhotoFlag] {
+        guard let data = try? Data(contentsOf: url),
+              let decoded = try? JSONDecoder().decode([String: PhotoFlag].self, from: data)
+        else { return [:] }
+        return decoded
+    }
+
+    private static func persist() {
+        try? FileManager.default.createDirectory(at: EditStore.directory,
+                                                 withIntermediateDirectories: true)
+        try? JSONEncoder().encode(cache).write(to: url, options: .atomic)
+    }
+
+    static func flag(for photo: URL) -> PhotoFlag? {
+        cache[photo.standardizedFileURL.path]
+    }
+
+    /// Setting the flag it already has clears it — the same key both flags and unflags, so a
+    /// mistaken keystroke is undone by repeating it rather than by finding a different one.
+    static func toggle(_ flag: PhotoFlag, for photo: URL) {
+        let key = photo.standardizedFileURL.path
+        cache[key] = (cache[key] == flag) ? nil : flag
+        persist()
+    }
+
+    static func clear(for photo: URL) {
+        cache.removeValue(forKey: photo.standardizedFileURL.path)
+        persist()
+    }
+
+    static func flags(among photos: [URL]) -> [URL: PhotoFlag] {
+        var out: [URL: PhotoFlag] = [:]
+        for photo in photos {
+            if let f = cache[photo.standardizedFileURL.path] { out[photo] = f }
+        }
+        return out
+    }
+}

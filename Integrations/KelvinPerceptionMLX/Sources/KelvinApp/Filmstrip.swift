@@ -77,11 +77,80 @@ struct FilmstripView: View {
     let thumbnail: (URL) -> NSImage?
     let onSelect: (URL) -> Void
     var onDismiss: (URL) -> Void = { _ in }
+    var flags: [URL: PhotoFlag] = [:]
+    var totalCount: Int = 0
+    var keeperCount: Int = 0
+    var rejectCount: Int = 0
+    var onFlag: (URL, PhotoFlag) -> Void = { _, _ in }
+    @Binding var filter: AppState.StripFilter
     @State private var hovered: URL?
+    /// Collapsed by default is wrong — you would not know the strip exists — but it must be
+    /// possible to get the shoot off the screen entirely when working one photo.
+    @AppStorage("filmstrip.expanded") private var expanded = true
 
     var body: some View {
         VStack(spacing: 0) {
             Rectangle().fill(Theme.hairline).frame(height: 1)
+            header
+            if expanded { strip }
+        }
+        .background(Theme.surface.opacity(0.6))
+    }
+
+    /// Counts, the filter, and the fold. Visible whether or not the strip is showing, so a folded
+    /// strip still reports where the cull has got to.
+    private var header: some View {
+        HStack(spacing: 10) {
+            Button { withAnimation(.easeOut(duration: 0.16)) { expanded.toggle() } } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8, weight: .bold))
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                    Text("\(photos.count) of \(totalCount)")
+                        .font(Theme.mono(10, .semibold)).tracking(1)
+                }
+                .foregroundColor(Theme.inkDim)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(expanded ? "Hide the shoot" : "Show the shoot")
+
+            if keeperCount > 0 || rejectCount > 0 {
+                HStack(spacing: 8) {
+                    if keeperCount > 0 {
+                        Label("\(keeperCount)", systemImage: "flag.fill")
+                            .font(Theme.mono(9)).foregroundColor(Theme.glow)
+                    }
+                    if rejectCount > 0 {
+                        Label("\(rejectCount)", systemImage: "xmark")
+                            .font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
+                    }
+                }
+                .labelStyle(.titleAndIcon)
+            }
+
+            Spacer()
+
+            // Three states, not a menu of them: everything, what you kept, what you have not
+            // decided about yet. The third is the one that makes a long shoot finishable.
+            Picker("", selection: $filter) {
+                ForEach(AppState.StripFilter.allCases, id: \.self) { f in
+                    Text(f.rawValue).tag(f)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 220)
+            .controlSize(.small)
+
+            Text("P keep · X reject · ←→ move")
+                .font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+    }
+
+    private var strip: some View {
+        Group {
             ScrollViewReader { proxy in
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
@@ -98,7 +167,6 @@ struct FilmstripView: View {
                 }
             }
         }
-        .background(Theme.surface.opacity(0.6))
     }
 
     private func cell(_ url: URL) -> some View {
@@ -114,11 +182,24 @@ struct FilmstripView: View {
                 }
                 .frame(width: 78, height: 56)
                 .clipShape(RoundedRectangle(cornerRadius: 5))
+                // A rejected frame stays visible but recedes — you can see the decision without
+                // it competing with the frames still in play.
+                .opacity(flags[url] == .reject ? 0.32 : 1)
                 .overlay(
                     RoundedRectangle(cornerRadius: 5)
                         .stroke(isCurrent ? Theme.glow : Theme.hairline,
                                 lineWidth: isCurrent ? 2 : 1)
                 )
+                .overlay(alignment: .bottomLeading) {
+                    if let flag = flags[url] {
+                        Image(systemName: flag == .keep ? "flag.fill" : "xmark")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundColor(flag == .keep ? Theme.base : Theme.ink)
+                            .padding(3)
+                            .background(Circle().fill(flag == .keep ? Theme.glow : Theme.surface2))
+                            .padding(3)
+                    }
+                }
                 // A dot marks frames you've already worked on, so a pass through a shoot is legible.
                 if editedURLs.contains(url) && hovered != url {
                     Circle().fill(Theme.glow)

@@ -203,6 +203,60 @@ final class AppState: ObservableObject {
     @Published var folderPhotos: [URL] = []
     /// Photos whose edit differs from the candidate Kelvin generated (drives the strip's dot).
     @Published var editedURLs: Set<URL> = []
+
+    // MARK: Culling — deciding what stays, before editing what's left
+    //
+    // A folder is often two hundred frames and the workspace showed all of them, which is the
+    // thing that makes a shoot feel unmanageable. The established answer is to decide first and
+    // edit second: one binary decision per frame, driven from the keyboard, then hide everything
+    // you rejected. Ratings and colour labels are deliberately absent — dozens of possible states
+    // per photo is what makes culling slow.
+
+    /// Keep/reject per photo, loaded for the current folder.
+    @Published var flags: [URL: PhotoFlag] = [:]
+
+    /// Which frames the strip is showing.
+    enum StripFilter: String, CaseIterable {
+        case all = "All", keepers = "Keepers", undecided = "Undecided"
+    }
+    @Published var stripFilter: StripFilter = .all
+
+    /// Photos the strip should actually display, after the filter. The frame you are editing is
+    /// always included — filtering the open photo out from under yourself is disorienting.
+    var visiblePhotos: [URL] {
+        folderPhotos.filter { url in
+            if url == imageURL { return true }
+            switch stripFilter {
+            case .all:       return flags[url] != .reject
+            case .keepers:   return flags[url] == .keep
+            case .undecided: return flags[url] == nil
+            }
+        }
+    }
+
+    var keeperCount: Int { folderPhotos.filter { flags[$0] == .keep }.count }
+    var rejectCount: Int { folderPhotos.filter { flags[$0] == .reject }.count }
+
+    func setFlag(_ flag: PhotoFlag, for url: URL) {
+        FlagStore.toggle(flag, for: url)
+        flags[url] = FlagStore.flag(for: url)
+    }
+
+    /// Flag the open photo and step to the next one — the whole point of a cull pass is that one
+    /// keystroke both decides and advances.
+    func flagCurrentAndAdvance(_ flag: PhotoFlag) {
+        guard let url = imageURL else { return }
+        setFlag(flag, for: url)
+        Task { await advance(by: 1) }
+    }
+
+    /// Move through the folder in the order the strip shows.
+    func advance(by step: Int) async {
+        let list = visiblePhotos
+        guard let url = imageURL, let index = list.firstIndex(of: url), list.count > 1 else { return }
+        let next = list[(index + step + list.count) % list.count]
+        await openPhoto(next)
+    }
     /// Frames dismissed from the strip this session. Held separately because opening any photo
     /// re-scans the folder — without this, a dismissed frame simply reappeared.
     private var dismissedURLs: Set<URL> = []
@@ -237,6 +291,13 @@ final class AppState: ObservableObject {
             if let image { self.thumbnails[url] = image }
         }
         return nil
+    }
+
+    /// How many masks are actually doing something, for the folded section's badge. A collapsed
+    /// section must still say whether there is anything inside it, or folding it away hides work.
+    var maskCountLabel: String? {
+        let active = baseMaskIds.filter { maskEnabled[$0] ?? true }.count + userMasks.count
+        return active > 0 ? "\(active)" : nil
     }
 
     /// The filename Kelvin suggests for an export — built from what it understood about the
@@ -453,6 +514,7 @@ final class AppState: ObservableObject {
         folderPhotos = PhotoBrowser.siblings(of: url).filter { !dismissedURLs.contains($0) || $0 == url }
         // Photos edited in an earlier session already carry a dot.
         editedURLs.formUnion(EditStore.edited(among: folderPhotos))
+        flags = FlagStore.flags(among: folderPhotos)
         capture = CaptureInfoReader.read(url: url)
         userMasks = []; paintingMaskId = nil; selectedUserMaskId = nil   // hand-drawn masks are per-photo
         zoom = 1; pan = .zero
@@ -1353,6 +1415,25 @@ struct ContentView: View {
                     .allowsHitTesting(false)
             }
         }
+        // Culling is keyboard work. Clicking a flag costs a second or two per frame, which across
+        // a few hundred frames is most of an hour of pure motion — so the decision and the move to
+        // the next photo are one keystroke. Hidden buttons rather than a visible toolbar: they
+        // exist to carry the shortcut, not to be clicked.
+        .overlay {
+            if appState.proxyCI != nil {
+                Group {
+                    Button("") { appState.flagCurrentAndAdvance(.keep) }
+                        .keyboardShortcut("p", modifiers: [])
+                    Button("") { appState.flagCurrentAndAdvance(.reject) }
+                        .keyboardShortcut("x", modifiers: [])
+                    Button("") { Task { await appState.advance(by: 1) } }
+                        .keyboardShortcut(.rightArrow, modifiers: [])
+                    Button("") { Task { await appState.advance(by: -1) } }
+                        .keyboardShortcut(.leftArrow, modifiers: [])
+                }
+                .opacity(0).frame(width: 0, height: 0)
+            }
+        }
         .task { await appState.loadDemoIfRequested() }
         .sheet(isPresented: $appState.showBatchSheet) { batchSheet }
     }
@@ -1498,12 +1579,18 @@ struct ContentView: View {
                 }
                 previewFooter
                 if appState.folderPhotos.count > 1 {
-                    FilmstripView(photos: appState.folderPhotos,
+                    FilmstripView(photos: appState.visiblePhotos,
                                   current: appState.imageURL,
                                   editedURLs: appState.editedURLs,
                                   thumbnail: appState.thumbnail(for:),
                                   onSelect: { url in Task { await appState.openPhoto(url) } },
-                                  onDismiss: { appState.dismiss($0) })
+                                  onDismiss: { appState.dismiss($0) },
+                                  flags: appState.flags,
+                                  totalCount: appState.folderPhotos.count,
+                                  keeperCount: appState.keeperCount,
+                                  rejectCount: appState.rejectCount,
+                                  onFlag: { url, flag in appState.setFlag(flag, for: url) },
+                                  filter: $appState.stripFilter)
                 }
             }
             .frame(minWidth: 460)
@@ -1766,8 +1853,9 @@ struct ContentView: View {
     }
 
     private var sidebar: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
+        let ch = appState.onEdit   // re-render on any slider change
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
                 HistogramView(image: appState.lastRenderedCI)
 
                 HStack(spacing: 8) {
@@ -1782,7 +1870,8 @@ struct ContentView: View {
                         .buttonStyle(.plain)
                 }
 
-                sectionLabel("Candidates", trailing: nil)
+                Group {
+                CollapsibleSection("Candidates", defaultOpen: true) {
                 if appState.candidates.isEmpty {
                     // Say what's happening instead of leaving a hole. The photo is already on
                     // screen, so this is the only part still pending.
@@ -1801,10 +1890,9 @@ struct ContentView: View {
                         }
                     }
                 }
+                }
 
-                let ch = appState.onEdit   // re-render on any slider change
-
-                sectionLabel("Looks", trailing: appState.activeLookId == nil ? nil : "On")
+                CollapsibleSection("Looks", trailing: appState.activeLookId == nil ? nil : "On") {
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(LookPreset.Group.allCases, id: \.self) { group in
                         let looks = LookPreset.library.filter { $0.group == group }
@@ -1824,15 +1912,16 @@ struct ContentView: View {
                         }.buttonStyle(.plain)
                     }
                 }
+                }
 
-                sectionLabel("White balance", trailing: nil)
+                // LIGHT — white balance and tone together. They are one decision: how the frame
+                // is exposed and coloured by its light source. Open by default because this is
+                // what gets touched on essentially every photograph.
+                CollapsibleSection("Light", defaultOpen: true) {
                 VStack(spacing: 14) {
                     ToneSlider(label: "Temp", value: appState.temperatureBinding, range: 2500...9500, step: 10, unit: " K", onChange: ch)
                     ToneSlider(label: "Tint", value: $appState.edit.tint, range: -100...100, step: 1, unit: "", onChange: ch)
-                }
-
-                sectionLabel("Tone", trailing: nil)
-                VStack(spacing: 14) {
+                    Divider().overlay(Theme.hairline).padding(.vertical, 2)
                     ToneSlider(label: "Exposure", value: $appState.edit.exposureEV, range: -5...5, step: 0.05, unit: " EV", onChange: ch)
                     ToneSlider(label: "Contrast", value: $appState.edit.contrast, range: -100...100, step: 1, unit: "", onChange: ch)
                     ToneSlider(label: "Highlights", value: $appState.edit.highlights, range: -100...100, step: 1, unit: "", onChange: ch)
@@ -1840,23 +1929,28 @@ struct ContentView: View {
                     ToneSlider(label: "Whites", value: $appState.edit.whites, range: -100...100, step: 1, unit: "", onChange: ch)
                     ToneSlider(label: "Blacks", value: $appState.edit.blacks, range: -100...100, step: 1, unit: "", onChange: ch)
                 }
+                }
 
-                sectionLabel("Presence", trailing: nil)
+                }
+                Group {
+                CollapsibleSection("Presence") {
                 VStack(spacing: 14) {
                     ToneSlider(label: "Texture", value: $appState.edit.texture, range: -100...100, step: 1, unit: "", onChange: ch)
                     ToneSlider(label: "Clarity", value: $appState.edit.clarity, range: -100...100, step: 1, unit: "", onChange: ch)
                     ToneSlider(label: "Dehaze", value: $appState.edit.dehaze, range: 0...100, step: 1, unit: "", onChange: ch)
                     ToneSlider(label: "Fusion", value: $appState.edit.fusion, range: 0...100, step: 1, unit: "", onChange: ch)
                 }
+                }
 
-                sectionLabel("Color", trailing: nil)
+                // COLOUR — the global pair and the per-colour mixer are the same decision at two
+                // levels of detail, so they live together rather than as two headings.
+                CollapsibleSection("Colour") {
                 VStack(spacing: 14) {
                     ToneSlider(label: "Vibrance", value: $appState.edit.vibrance, range: -100...100, step: 1, unit: "", onChange: ch)
                     ToneSlider(label: "Saturation", value: $appState.edit.saturation, range: -100...100, step: 1, unit: "", onChange: ch)
                 }
-
-                sectionLabel("Color mixer", trailing: nil)
                 VStack(spacing: 12) {
+                    Divider().overlay(Theme.hairline).padding(.vertical, 2)
                     HStack(spacing: 6) {
                         ForEach(appState.hslBands, id: \.self) { band in
                             Circle().fill(Self.bandColor(band))
@@ -1871,15 +1965,17 @@ struct ContentView: View {
                     ToneSlider(label: "Saturation", value: appState.hslBinding(\.s), range: -100...100, step: 1, unit: "", onChange: ch)
                     ToneSlider(label: "Luminance", value: appState.hslBinding(\.l), range: -100...100, step: 1, unit: "", onChange: ch)
                 }
+                }
 
-                sectionLabel("Geometry", trailing: nil)
+                CollapsibleSection("Geometry") {
                 VStack(spacing: 12) {
                     ToneSlider(label: "Straighten", value: $appState.straighten, range: -15...15, step: 0.1, unit: "°", onChange: ch)
                     Button(action: appState.autoStraighten) { addMaskLabel("Auto-level horizon") }
                         .buttonStyle(.plain)
                 }
+                }
 
-                sectionLabel("Masks", trailing: nil)
+                CollapsibleSection("Masks", trailing: appState.maskCountLabel) {
                 VStack(spacing: 12) {
                     // Auto-detected masks (subject / sky): toggle + strength.
                     ForEach(appState.baseMaskIds, id: \.self) { mid in
@@ -1923,8 +2019,9 @@ struct ContentView: View {
                         }
                     }
                 }
+                }
 
-                sectionLabel("Repair", trailing: appState.detectedSpotCount > 0 ? "\(appState.detectedSpotCount) spots" : nil)
+                CollapsibleSection("Repair", trailing: appState.detectedSpotCount > 0 ? "\(appState.detectedSpotCount) spots" : nil) {
                 Toggle(isOn: $appState.removeDust) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Remove dust spots").font(Theme.ui(13, .medium)).foregroundColor(Theme.ink)
@@ -1936,16 +2033,70 @@ struct ContentView: View {
                 }
                 .toggleStyle(.switch).tint(Theme.glow)
                 .disabled(appState.detectedSpotCount == 0)
+                }
 
-                // Last: a record of the photograph, not a control reached for mid-edit. Keeping
-                // it above Tone and Colour pushed the controls actually used on every photo
-                // further down the scroll.
+                // Last: a record of the photograph, not a control reached for mid-edit.
                 if appState.capture.camera != nil || appState.capture.summaryText != nil {
-                    sectionLabel("Capture", trailing: nil)
-                    capturePanel
+                    CollapsibleSection("Capture") { capturePanel }
+                }
                 }
             }
             .padding(20)
+        }
+    }
+
+    /// A sidebar section that can be folded away, remembering its state between launches.
+    ///
+    /// The panel had eleven sections stacked in one scroll, every one of them always open. Most of
+    /// them are not touched on most photos, so reaching the ones that are meant scrolling past the
+    /// rest — and the sheer wall of controls is the thing that makes an editor feel heavy. Folded
+    /// by default, the panel shows what you actually reach for and hides the rest until asked.
+    private struct CollapsibleSection<Content: View>: View {
+        let title: String
+        var trailing: String?
+        var accent: Bool = false
+        @AppStorage private var isOpen: Bool
+        @ViewBuilder let content: () -> Content
+
+        init(_ title: String, trailing: String? = nil, accent: Bool = false,
+             defaultOpen: Bool = false, @ViewBuilder content: @escaping () -> Content) {
+            self.title = title
+            self.trailing = trailing
+            self.accent = accent
+            // Keyed by title so a section keeps its state across launches. Sections a photographer
+            // opens once tend to be ones they want open every time.
+            self._isOpen = AppStorage(wrappedValue: defaultOpen, "sidebar.section.\(title)")
+            self.content = content
+        }
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 14) {
+                Button {
+                    withAnimation(.easeOut(duration: 0.16)) { isOpen.toggle() }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(Theme.inkFaint)
+                            .rotationEffect(.degrees(isOpen ? 90 : 0))
+                        Text(title.uppercased())
+                            .font(Theme.mono(10, .semibold)).tracking(2)
+                            .foregroundColor(isOpen ? Theme.ink : Theme.inkDim)
+                        Spacer()
+                        if let trailing {
+                            Text(trailing.uppercased())
+                                .font(Theme.mono(9, .semibold)).tracking(1.5)
+                                .foregroundColor(Theme.glow)
+                                .padding(.horizontal, 7).padding(.vertical, 2)
+                                .background(Capsule().fill(Theme.glow.opacity(0.14)))
+                        }
+                    }
+                    .contentShape(Rectangle())    // the whole row is the target, not just the text
+                }
+                .buttonStyle(.plain)
+
+                if isOpen { content() }
+            }
         }
     }
 
