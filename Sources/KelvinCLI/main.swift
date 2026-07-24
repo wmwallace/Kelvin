@@ -24,6 +24,7 @@ func printUsage() {
       \(tool) engine --in <image> --perception <perception.json> --out <recipe.json>
       \(tool) candidates --in <image> --perception <perception.json> --out-dir <dir>
       \(tool) batch --in-dir <dir> --recipe <recipe.json> --out-dir <dir> [--format png|jpg]
+      \(tool) corpus-init --root <dir> --references <a,b,c> [--source <dir>] [--perception <dir>]
       \(tool) eval --corpus <dir> [--out <report.json>] [--engine-version <v>]
 
     render options:
@@ -46,6 +47,14 @@ func printUsage() {
       --recipe      Path to a recipe JSON sidecar. Required.
       --out-dir     Directory to write rendered outputs (originals untouched). Required.
       --format      png (default) or jpg.
+
+    corpus-init options:
+      --root        Dataset root containing the source and expert folders. Required.
+      --references  Comma-separated expert subfolders (e.g. target_a,target_b,target_c). Required.
+      --source      Source-image subfolder. Default "source".
+      --perception  Optional subfolder of per-image perception JSON (<id>.json).
+      --camera      Optional subfolder of manufacturer JPEGs (<id>.jpg).
+      --out         Where to write manifest.json. Default <root>/manifest.json.
 
     eval options:
       --corpus          Directory containing a manifest.json. Required.
@@ -178,6 +187,33 @@ case "batch":
         for failure in outcome.failures {
             FileHandle.standardError.write(Data("  skipped \(failure.source.lastPathComponent): \(failure.message)\n".utf8))
         }
+    } catch {
+        fail("\(error)")
+    }
+
+case "corpus-init":
+    let rest = Array(arguments.dropFirst())
+
+    guard let rootPath = value(for: "--root", in: rest) else { fail("corpus-init requires --root") }
+    guard let refsArg = value(for: "--references", in: rest) else { fail("corpus-init requires --references") }
+    let references = refsArg.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
+    guard !references.isEmpty else { fail("--references must list at least one folder") }
+
+    let root = URL(fileURLWithPath: rootPath, isDirectory: true)
+    let options = CorpusBuilder.Options(
+        sourceDir: value(for: "--source", in: rest) ?? "source",
+        referenceDirs: references,
+        perceptionDir: value(for: "--perception", in: rest),
+        cameraJpegDir: value(for: "--camera", in: rest)
+    )
+
+    do {
+        let outURL = value(for: "--out", in: rest).map { URL(fileURLWithPath: $0) }
+        let manifest = try CorpusBuilder.write(root: root, options: options, to: outURL)
+        let labelled = manifest.entries.filter { $0.perception != nil }.count
+        print("Wrote manifest with \(manifest.entries.count) entries "
+            + "(\(references.count) experts each, \(labelled) with perception labels) to "
+            + (outURL?.path ?? root.appendingPathComponent("manifest.json").path))
     } catch {
         fail("\(error)")
     }
