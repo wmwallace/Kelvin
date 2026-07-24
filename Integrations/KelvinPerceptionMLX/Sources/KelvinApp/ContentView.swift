@@ -112,6 +112,8 @@ final class AppState: ObservableObject {
     private var editBaseline = GlobalAdjustments.neutral
     /// Manual straighten angle (degrees); auto-crops the corners. Per-photo framing.
     @Published var straighten = 0.0
+    /// What the camera recorded — body, lens, exposure, when and where.
+    @Published var capture = CaptureInfo()
     /// The creative look layered on the chosen candidate, if any (see `LookPreset`).
     @Published var activeLookId: String?
     /// Per-colour HSL (the colour mixer): band → {h,s,l}. Empty bands are dropped.
@@ -214,6 +216,15 @@ final class AppState: ObservableObject {
         let t = PhotoBrowser.thumbnail(for: url)
         if let t { thumbnails[url] = t }
         return t
+    }
+
+    /// The filename Kelvin suggests for an export — built from what it understood about the
+    /// photo, so a folder of exports is searchable instead of a wall of `kelvin-edit`.
+    func suggestedExportName(ext: String = "jpg") -> String {
+        guard let url = imageURL else { return "kelvin-edit." + ext }
+        let look = activeLookId.flatMap { LookPreset.named($0)?.name }
+            ?? candidates.first { $0.id == selectedCandidateId }?.label
+        return ExportNaming.filename(for: url, perception: perception, look: look, ext: ext)
     }
 
     /// "12 Mar, 14:03" from an ISO timestamp — a restored edit should say *when*, not show a
@@ -358,6 +369,7 @@ final class AppState: ObservableObject {
         folderPhotos = PhotoBrowser.siblings(of: url)
         // Photos edited in an earlier session already carry a dot.
         editedURLs.formUnion(EditStore.edited(among: folderPhotos))
+        capture = CaptureInfoReader.read(url: url)
         userMasks = []; paintingMaskId = nil; selectedUserMaskId = nil   // hand-drawn masks are per-photo
         zoom = 1; pan = .zero
         do {
@@ -936,8 +948,10 @@ final class AppState: ObservableObject {
                     // so the spots found on the reference photo heal the whole batch.
                     recipe.heal = (removeDust && !healSpots.isEmpty) ? healSpots : nil
                     let masks = (recipe.masks?.isEmpty == false) ? LocalMasks.measure(in: image).bitmaps : [:]
-                    let out = outputDir.appendingPathComponent(file.deletingPathExtension().lastPathComponent)
-                        .appendingPathExtension("jpg")
+                    // Name each output from what the model read about THAT frame, so a batch
+                    // comes out searchable rather than as a wall of camera serial numbers.
+                    let stem = ExportNaming.stem(for: file, perception: perception, look: style.label)
+                    let out = ExportNaming.uniqueURL(in: outputDir, stem: stem, ext: "jpg")
                     try ImageWriter.write(Renderer.render(image, with: recipe, maskBitmaps: masks),
                                           to: out, format: .jpeg(quality: 0.97))
                     written.append(out)
@@ -1417,6 +1431,55 @@ struct ContentView: View {
         }
     }
 
+    /// What the camera recorded. Read-only — this is the photograph's own history, not something
+    /// to edit, so it's presented as a record rather than as controls.
+    private var capturePanel: some View {
+        let c = appState.capture
+        return VStack(alignment: .leading, spacing: 7) {
+            if let camera = c.camera {
+                Text(camera).font(Theme.ui(12, .medium)).foregroundColor(Theme.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let lens = c.lens {
+                Text(lens).font(Theme.mono(10)).foregroundColor(Theme.inkDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let summary = c.summaryText {
+                Text(summary).font(Theme.mono(10)).foregroundColor(Theme.glow)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let bias = c.exposureBiasText {
+                Text("Exposure bias " + bias).font(Theme.mono(9)).foregroundColor(Theme.inkDim)
+            }
+            if let size = c.dimensionsText {
+                Text(size).font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
+            }
+            if let date = c.captured {
+                Text(DateFormatter.localizedString(from: date, dateStyle: .medium, timeStyle: .short))
+                    .font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
+            }
+            if let location = c.locationText {
+                // Clickable: coordinates are only useful if you can get to a map from them.
+                if let url = c.mapURL {
+                    Link(destination: url) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "mappin.and.ellipse").font(.system(size: 9))
+                            Text(location).font(Theme.mono(9))
+                        }.foregroundColor(Theme.glow)
+                    }
+                } else {
+                    Text(location).font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8).fill(Theme.surface.opacity(0.5))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.hairline.opacity(0.6), lineWidth: 1))
+        )
+    }
+
     private func lookChip(_ look: LookPreset) -> some View {
         let on = appState.activeLookId == look.id
         return Button(action: { appState.applyLook(on ? nil : look.id) }) {
@@ -1482,6 +1545,11 @@ struct ContentView: View {
                 }
 
                 let ch = appState.onEdit   // re-render on any slider change
+
+                if appState.capture.camera != nil || appState.capture.summaryText != nil {
+                    sectionLabel("Capture", trailing: nil)
+                    capturePanel
+                }
 
                 sectionLabel("Looks", trailing: appState.activeLookId == nil ? nil : "On")
                 VStack(alignment: .leading, spacing: 10) {
@@ -1672,7 +1740,8 @@ struct ContentView: View {
     private func openExportPanel() {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.jpeg, .png]
-        panel.nameFieldStringValue = "kelvin-edit.jpg"
+        // Suggest a name that says what the photo IS — still fully editable in the panel.
+        panel.nameFieldStringValue = appState.suggestedExportName()
         if panel.runModal() == .OK, let url = panel.url {
             Task { await appState.exportFullResolution(to: url) }
         }

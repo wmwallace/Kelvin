@@ -137,6 +137,12 @@ if first == "label" {
             print("  dropped: " + droppedNames.joined(separator: ", "))
         }
 
+        if let best = curated.first {
+            print("\n── suggested export name ──")
+            print("  " + ExportNaming.filename(for: imageURL, perception: perception,
+                                               look: best.recipe.label))
+        }
+
         if let cleanest = scored.max(by: { $0.score < $1.score }) {
             // "Cleanest" = fewest craft defects, NOT "best look" (that's the user's taste). The
             // score is a guardrail: it flags clipping / bad skin / casts, it doesn't pick a mood.

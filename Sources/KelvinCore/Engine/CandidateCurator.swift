@@ -9,14 +9,16 @@ import Foundation
 /// equivalent. They aren't, and the aesthetic evaluator already knows it — those exact frames score
 /// 0.31 and 0.52 while the sensible ones sit above 0.9.
 ///
-/// So: generate widely, then curate. Two things are balanced, because optimising either alone
-/// fails:
+/// So: generate widely, then curate — on three rules.
 ///
-///   • **Quality.** Anything with a real craft defect — clipped detail, implausible skin — is
-///     dropped outright. A bad option is worse than a missing one.
-///   • **Divergence.** Ranking purely by score returns four shades of the same safe look, which
-///     defeats the point of offering a choice at all (docs/EVALUATION.md counts candidate
-///     divergence as a success criterion). So each pick must differ from those already chosen.
+///   • **Quality demotes; it never promotes.** Anything with a real craft defect is dropped, but a
+///     high score does not earn a candidate the top slot. See `select` for why that distinction is
+///     load-bearing rather than pedantic.
+///   • **Order is the engine's.** Natural leads: a faithful rendering is the most consistently
+///     right answer and the one a photographer expects to open on.
+///   • **Divergence.** Each pick must differ from those already chosen, or the set collapses into
+///     four shades of one look and offering a choice becomes theatre (docs/EVALUATION.md counts
+///     candidate divergence as a success criterion).
 public enum CandidateCurator {
 
     /// A candidate with the verdict on how well it turned out.
@@ -35,28 +37,38 @@ public enum CandidateCurator {
     /// How different two candidates must be to both earn a place, in the distance below.
     public static let minimumSeparation = 12.0
 
-    /// Pick the set to show, best first.
+    /// Pick the set to show, in the engine's own order.
+    ///
+    /// The score is used to **demote, never to promote**. That distinction is the whole design and
+    /// getting it wrong is easy: an earlier version ranked by score, and on a backlit sunset it put
+    /// Soft first — because Soft avoids every defect by being flat, so it scored 1.00 while making
+    /// the subject look washed out. The evaluator measures *defect-freedom*, which is not the same
+    /// as *looks good*; the safest possible edit is to do nothing interesting, and a ranking built
+    /// on that will reliably recommend blandness.
+    ///
+    /// So candidates keep the engine's order — Natural leads, because a faithful rendering is the
+    /// most consistently right answer and the one a photographer expects to see first — and the
+    /// score's only job is to drop the ones with real defects.
     ///
     /// Guarantees at least one result whenever any candidate exists: if a photo is hard enough that
-    /// everything trips the floor, the least-bad option is still offered rather than showing an
-    /// empty picker.
+    /// everything trips the floor, the least-bad option is still offered rather than an empty picker.
     public static func select(from candidates: [Scored], count: Int = 4) -> [Scored] {
         guard !candidates.isEmpty else { return [] }
-        let ranked = candidates.sorted { $0.score.overall > $1.score.overall }
-        let clean = ranked.filter { $0.score.overall >= qualityFloor }
-        let pool = clean.isEmpty ? Array(ranked.prefix(1)) : clean
+        let clean = candidates.filter { $0.score.overall >= qualityFloor }
+        let pool = clean.isEmpty
+            ? [candidates.max { $0.score.overall < $1.score.overall }!]   // least-bad, not nothing
+            : clean
 
         var chosen: [Scored] = []
-        for candidate in pool {
+        for candidate in pool {                 // engine order, not score order
             guard chosen.count < count else { break }
-            // Take it if it's meaningfully different from everything already picked.
             let distinct = chosen.allSatisfy {
                 distance(candidate.recipe, $0.recipe) >= minimumSeparation
             }
             if distinct { chosen.append(candidate) }
         }
-        // If divergence was strict enough to leave a short list, fill from the best of the rest —
-        // a photographer asked for options, and four near-identical ones still beat two.
+        // If divergence was strict enough to leave a short list, fill from the rest — a
+        // photographer asked for options, and four near-identical ones still beat two.
         if chosen.count < count {
             for candidate in pool where chosen.count < count {
                 if !chosen.contains(where: { $0.recipe.id == candidate.recipe.id }) {

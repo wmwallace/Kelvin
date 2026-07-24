@@ -178,6 +178,20 @@ case "candidates":
                 try ImageWriter.write(rendered, to: outDir.appendingPathComponent(base + ".png"), format: .png)
             }
         }
+        // What the picker would actually show, after scoring and curation.
+        let scoredItems = recipes.compactMap { recipe -> CandidateCurator.Scored? in
+            let out = Renderer.render(image, with: recipe, maskBitmaps: measured.bitmaps)
+            guard let score = AestheticEvaluator.score(rendered: out) else { return nil }
+            return .init(recipe: recipe, score: score)
+        }
+        let curatedSet = CandidateCurator.select(from: scoredItems, count: 4)
+        print("curated: " + curatedSet.map {
+            String(format: "%@ %.2f", $0.recipe.label ?? "?", $0.score.overall)
+        }.joined(separator: ", "))
+        let dropped = recipes.compactMap { $0.label }
+            .filter { l in !curatedSet.contains { $0.recipe.label == l } }
+        if !dropped.isEmpty { print("dropped: " + dropped.joined(separator: ", ")) }
+
         let labels = recipes.map { $0.label ?? "?" }.joined(separator: ", ")
         let sky = measured.skyLuma.map { String(format: "sky luma %.2f", $0) } ?? "no sky"
         print("Wrote \(recipes.count) candidates to \(outDir.path) [\(labels)] (\(sky))")
@@ -381,6 +395,24 @@ case "fuse":
         }
         print("Wrote \(outPath)")
     } catch { fail("\(error)") }
+
+case "info":
+    // What the camera recorded — the same data the app's Capture panel shows.
+    let rest = Array(arguments.dropFirst())
+    guard let inPath = value(for: "--in", in: rest) else { fail("info requires --in") }
+    let info = CaptureInfoReader.read(url: URL(fileURLWithPath: inPath))
+    func row(_ label: String, _ value: String?) {
+        guard let value else { return }
+        print("  " + label.padding(toLength: 12, withPad: " ", startingAt: 0) + value)
+    }
+    row("Camera", info.camera)
+    row("Lens", info.lens)
+    row("Exposure", info.summaryText)
+    row("Bias", info.exposureBiasText)
+    row("Size", info.dimensionsText)
+    row("Captured", info.captured.map { DateFormatter.localizedString(from: $0, dateStyle: .medium, timeStyle: .short) })
+    row("Location", info.locationText)
+    if info.camera == nil && info.summaryText == nil { print("  (no capture metadata in this file)") }
 
 case "horizon":
     // Debug: print the detected leveling angle.

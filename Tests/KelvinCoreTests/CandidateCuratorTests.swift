@@ -27,12 +27,18 @@ final class CandidateCuratorTests: XCTestCase {
         XCTAssertTrue(ids.contains("good"))
     }
 
-    func testBestFirst() {
+    /// The score DEMOTES, it never promotes. Ranking by it recommended blandness — the flattest
+    /// candidate avoids every defect and so scores highest, which is not the same as looking good.
+    /// Engine order is preserved so Natural leads.
+    func testKeepsEngineOrderRatherThanRankingByScore() {
         let picked = CandidateCurator.select(from: [
-            scored("mid", 0.75, contrast: 30), scored("best", 0.98, contrast: 0),
-            scored("low", 0.60, contrast: 60)
+            scored("natural", 0.85, contrast: 0),
+            scored("flat", 1.00, contrast: 40),     // scores perfectly by being safe
+            scored("other", 0.90, contrast: 80)
         ], count: 3)
-        XCTAssertEqual(picked.first?.recipe.id, "best")
+        XCTAssertEqual(picked.first?.recipe.id, "natural",
+                       "a faithful rendering leads; the top score does not jump the queue")
+        XCTAssertEqual(picked.map { $0.recipe.id }, ["natural", "flat", "other"])
     }
 
     /// Ranking on score alone returns four shades of the same look, which defeats offering a choice.
@@ -54,7 +60,7 @@ final class CandidateCuratorTests: XCTestCase {
             scored("bad1", 0.30), scored("bad2", 0.25)
         ], count: 4)
         XCTAssertEqual(picked.count, 1, "offer the least-bad option, not nothing")
-        XCTAssertEqual(picked.first?.recipe.id, "bad1")
+        XCTAssertEqual(picked.first?.recipe.id, "bad1", "the least-bad of a bad set")
     }
 
     func testEmptyInputIsEmptyOutput() {
