@@ -104,7 +104,7 @@ final class AppState: ObservableObject {
     /// Objective craft flags on the current edit (clipping, skin, cast) — empty when clean.
     @Published var activeCraftIssues: [AestheticEvaluator.Issue] = []
 
-    /// The full editable global adjustment set (absolute values, Lightroom-style). Sliders bind
+    /// The full editable global adjustment set, held as ABSOLUTE values rather than deltas. Sliders bind
     /// straight to its fields; it starts from the chosen candidate and the user takes it from there.
     @Published var edit = GlobalAdjustments.neutral
     /// The candidate's values as generated — the baseline manual edits are measured against (for

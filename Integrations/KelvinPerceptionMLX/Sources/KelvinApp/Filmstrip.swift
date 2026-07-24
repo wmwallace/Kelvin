@@ -68,8 +68,8 @@ struct PhotoSession {
     }
 }
 
-/// A horizontal strip of the folder's photos under the preview, Lightroom-style — bottom placement
-/// keeps it clear of the edit panel.
+/// A horizontal strip of the folder's photos under the preview. Bottom placement is the
+/// convention in editing software and keeps the strip clear of the edit panel.
 struct FilmstripView: View {
     let photos: [URL]
     let current: URL?

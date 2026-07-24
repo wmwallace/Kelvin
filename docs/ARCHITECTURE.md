@@ -110,5 +110,5 @@ The first row is the one users feel. Protect it above all others.
   models, different failure modes.
 - **Cloud anything.** No sync, no accounts, no telemetry in v1.
 - **Cross-platform.** See `DECISIONS.md`.
-- **A catalogue system to rival Lightroom.** A flat, fast, folder-based library. Do not
+- **A full digital-asset-management catalogue.** A flat, fast, folder-based library. Do not
   build a database-backed asset manager.

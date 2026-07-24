@@ -1,7 +1,7 @@
 import Foundation
 
-/// A **look** — a named finishing move applied *on top of* whichever candidate you picked, in the
-/// spirit of a Lightroom preset.
+/// A **look** — a named finishing move applied *on top of* whichever candidate you picked. What
+/// the rest of the industry would call a preset.
 ///
 /// The distinction from a `CandidateStyle` matters. A style is Kelvin's own reading of the photo:
 /// it varies with what the engine measured, and every one of the four is a legitimate answer to
