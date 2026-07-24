@@ -153,7 +153,12 @@ public enum Renderer {
         // Masked local adjustments (schema order: … HSL → masks). Applied only when the caller
         // supplied the mask bitmap for that mask.
         for mask in recipe.masks ?? [] {
-            guard mask.opacity > 0, let bitmap = maskBitmaps[mask.id] ?? maskBitmaps[mask.type] else { continue }
+            guard mask.opacity > 0 else { continue }
+            // Parametric shapes (gradients) generate their own bitmap here; segmentation masks
+            // (subject/sky) use the bitmap the caller supplied.
+            let bitmap: CIImage? = mask.shape.map { gradientMask($0, extent: img.extent) }
+                ?? maskBitmaps[mask.id] ?? maskBitmaps[mask.type]
+            guard let bitmap else { continue }
             img = applyMaskedAdjustments(img, mask: mask, maskBitmap: bitmap)
         }
 
@@ -233,6 +238,41 @@ public enum Renderer {
             "inputBackgroundImage": base,
             "inputMaskImage": m
         ])
+    }
+
+    /// Generate a grayscale mask (white = full effect) from a parametric shape — a radial or
+    /// linear gradient. Coordinates are normalised, top-left origin; Core Image is bottom-left, so
+    /// y is flipped. White marks where the mask's adjustments apply; `applyMaskedAdjustments`
+    /// then handles invert/opacity.
+    static func gradientMask(_ shape: MaskShape, extent: CGRect) -> CIImage? {
+        guard !extent.isInfinite, extent.width > 0, extent.height > 0 else { return nil }
+        let w = extent.width, h = extent.height, minEdge = min(w, h)
+        let cx = extent.origin.x + shape.cx * w
+        let cy = extent.origin.y + (1 - shape.cy) * h        // flip y to Core Image space
+        let white = CIColor(red: 1, green: 1, blue: 1), black = CIColor(red: 0, green: 0, blue: 0)
+
+        let gradient: CIImage?
+        switch shape.kind {
+        case .radial:
+            let r1 = max(1.0, shape.radius * minEdge)                       // outer (fully black) radius
+            let r0 = max(0.0, r1 - max(1.0, shape.softness * minEdge))      // inner (fully white) radius
+            gradient = CIFilter(name: "CIRadialGradient", parameters: [
+                "inputCenter": CIVector(x: cx, y: cy),
+                "inputRadius0": r0, "inputRadius1": r1,
+                "inputColor0": white, "inputColor1": black
+            ])?.outputImage
+        case .linear:
+            let rad = shape.angle * .pi / 180
+            let dir = (x: sin(rad), y: cos(rad))                            // 0° → transition runs vertically
+            let half = max(1.0, shape.softness * minEdge * 0.5)
+            gradient = CIFilter(name: "CILinearGradient", parameters: [
+                "inputPoint0": CIVector(x: cx - dir.x * half, y: cy - dir.y * half),
+                "inputColor0": white,
+                "inputPoint1": CIVector(x: cx + dir.x * half, y: cy + dir.y * half),
+                "inputColor1": black
+            ])?.outputImage
+        }
+        return gradient?.cropped(to: extent)
     }
 
     /// Cover one spot with a clean patch sampled from `(dx,dy)` away, blended through a feathered

@@ -258,13 +258,17 @@ public struct Mask: Codable, Equatable, Sendable {
     public var feather: Double
     public var opacity: Double
     public var adjustments: [String: Double]
+    /// For hand-drawn *parametric* masks (radial / linear gradients) the geometry lives here and
+    /// the renderer generates the mask from it — no bitmap needed, so it serialises as pure numbers
+    /// (non-negotiable #3). Segmentation masks (subject/sky) leave this nil and supply a bitmap.
+    public var shape: MaskShape?
 
     public init(
         id: String, type: String, source: String?, invert: Bool,
-        feather: Double, opacity: Double, adjustments: [String: Double]
+        feather: Double, opacity: Double, adjustments: [String: Double], shape: MaskShape? = nil
     ) {
         self.id = id; self.type = type; self.source = source; self.invert = invert
-        self.feather = feather; self.opacity = opacity; self.adjustments = adjustments
+        self.feather = feather; self.opacity = opacity; self.adjustments = adjustments; self.shape = shape
     }
 
     public init(from decoder: Decoder) throws {
@@ -276,11 +280,45 @@ public struct Mask: Codable, Equatable, Sendable {
         feather = try c.clampedDouble(.feather, default: 0, in: Ranges.unsigned100)
         opacity = try c.clampedDouble(.opacity, default: 1, in: Ranges.opacity)
         adjustments = try c.decodeIfPresent([String: Double].self, forKey: .adjustments) ?? [:]
+        shape = try c.decodeIfPresent(MaskShape.self, forKey: .shape)
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, type, source, invert, feather, opacity, adjustments
+        case id, type, source, invert, feather, opacity, adjustments, shape
     }
+}
+
+/// A parametric mask shape — all coordinates normalised (0…1), top-left origin, matching HealSpot.
+/// Radial: a soft-edged ellipse around (cx, cy). Linear: a graduated edge through (cx, cy) at
+/// `angle`, transitioning over `softness` — a graduated-ND filter.
+public struct MaskShape: Codable, Equatable, Sendable {
+    public enum Kind: String, Codable, Sendable { case radial, linear }
+    public var kind: Kind
+    public var cx: Double
+    public var cy: Double
+    /// Radial: radius as a fraction of the smaller image edge. Ignored for linear.
+    public var radius: Double
+    /// Linear: gradient direction in degrees (0 = bright at top). Ignored for radial.
+    public var angle: Double
+    /// Edge softness (0…1 fraction of the smaller edge) — the feathered transition width.
+    public var softness: Double
+
+    public init(kind: Kind, cx: Double, cy: Double, radius: Double = 0.3, angle: Double = 0, softness: Double = 0.25) {
+        self.kind = kind; self.cx = cx; self.cy = cy
+        self.radius = radius; self.angle = angle; self.softness = softness
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        kind = (try? c.decode(Kind.self, forKey: .kind)) ?? .radial
+        cx = clamp(try c.decodeIfPresent(Double.self, forKey: .cx) ?? 0.5, to: 0...1)
+        cy = clamp(try c.decodeIfPresent(Double.self, forKey: .cy) ?? 0.5, to: 0...1)
+        radius = clamp(try c.decodeIfPresent(Double.self, forKey: .radius) ?? 0.3, to: 0.01...2)
+        angle = try c.decodeIfPresent(Double.self, forKey: .angle) ?? 0
+        softness = clamp(try c.decodeIfPresent(Double.self, forKey: .softness) ?? 0.25, to: 0...1)
+    }
+
+    enum CodingKeys: String, CodingKey { case kind, cx, cy, radius, angle, softness }
 }
 
 /// Sharpen / noise reduction. 0…100 each. Applied by the renderer as a finishing pass

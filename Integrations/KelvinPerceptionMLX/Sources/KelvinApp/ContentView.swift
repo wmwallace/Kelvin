@@ -113,6 +113,8 @@ final class AppState: ObservableObject {
     @Published var maskEnabled: [String: Bool] = [:]
     @Published var maskStrength: [String: Double] = [:]
     private var baseMasks: [Mask] = []
+    /// Hand-added parametric gradient masks (radial / linear) — the user's own local edits.
+    @Published var userMasks: [UserMaskVM] = []
 
     /// Sensor dust/spots detected once on load (normalised → resolution-independent, so the same
     /// set heals the proxy preview, the full-res export, and every frame of a batch — dust sits at
@@ -161,6 +163,7 @@ final class AppState: ObservableObject {
         isProcessing = true
         statusMessage = "Decoding…"
         imageURL = url
+        userMasks = []          // hand-drawn masks are per-photo
         do {
             let fullRes = try ImageDecoder.decode(url: url)
             self.fullResCI = fullRes
@@ -259,15 +262,26 @@ final class AppState: ObservableObject {
 
     func onEdit() { updateActiveRecipe() }
 
-    /// The masks to render: the candidate's masks, minus any the user switched off, each scaled to
-    /// the user's strength.
+    /// Add a hand-drawn gradient mask, centred, with a gentle starting darken so the user sees it.
+    func addUserMask(_ kind: MaskShape.Kind) {
+        var m = UserMaskVM(kind: kind)
+        m.exposure = -0.6
+        userMasks.append(m)
+        onEdit()
+    }
+
+    func removeUserMask(_ id: UUID) { userMasks.removeAll { $0.id == id }; onEdit() }
+
+    /// The masks to render: the candidate's masks (minus any switched off, scaled to strength),
+    /// plus the user's hand-drawn gradient masks.
     private func activeMasks() -> [Mask]? {
-        let ms = baseMasks.compactMap { m -> Mask? in
+        var ms = baseMasks.compactMap { m -> Mask? in
             guard maskEnabled[m.id] ?? true else { return nil }
             var m = m
             m.opacity = clampStep((maskStrength[m.id] ?? m.opacity * 100) / 100, 0...1, 0.01)
             return m
         }
+        ms += userMasks.map { $0.toMask() }
         return ms.isEmpty ? nil : ms
     }
 
@@ -665,6 +679,16 @@ struct ContentView: View {
             )
     }
 
+    private func addMaskLabel(_ text: String) -> some View {
+        Text(text)
+            .font(Theme.ui(11, .semibold)).foregroundColor(Theme.ink)
+            .frame(maxWidth: .infinity).padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 8).fill(Theme.surface2)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.hairline, lineWidth: 1))
+            )
+    }
+
     private var sidebar: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
@@ -710,18 +734,28 @@ struct ContentView: View {
                     ToneSlider(label: "Saturation", value: $appState.edit.saturation, range: -100...100, step: 1, unit: "", onChange: ch)
                 }
 
-                if !appState.baseMaskIds.isEmpty {
-                    sectionLabel("Masks", trailing: nil)
-                    VStack(spacing: 12) {
-                        ForEach(appState.baseMaskIds, id: \.self) { mid in
-                            MaskControl(
-                                name: mid.capitalized,
-                                isOn: Binding(get: { appState.maskEnabled[mid] ?? true },
-                                              set: { appState.maskEnabled[mid] = $0 }),
-                                strength: Binding(get: { appState.maskStrength[mid] ?? 100 },
-                                                  set: { appState.maskStrength[mid] = $0 }),
-                                onChange: appState.onEdit)
-                        }
+                sectionLabel("Masks", trailing: nil)
+                VStack(spacing: 12) {
+                    // Auto-detected masks (subject / sky): toggle + strength.
+                    ForEach(appState.baseMaskIds, id: \.self) { mid in
+                        MaskControl(
+                            name: mid.capitalized,
+                            isOn: Binding(get: { appState.maskEnabled[mid] ?? true },
+                                          set: { appState.maskEnabled[mid] = $0 }),
+                            strength: Binding(get: { appState.maskStrength[mid] ?? 100 },
+                                              set: { appState.maskStrength[mid] = $0 }),
+                            onChange: appState.onEdit)
+                    }
+                    // Hand-drawn gradient masks: full geometry + local adjustments.
+                    ForEach($appState.userMasks) { $m in
+                        UserMaskEditor(mask: $m, onChange: appState.onEdit,
+                                       onDelete: { appState.removeUserMask(m.id) })
+                    }
+                    HStack(spacing: 8) {
+                        Button(action: { appState.addUserMask(.radial) }) { addMaskLabel("+ Radial") }
+                            .buttonStyle(.plain)
+                        Button(action: { appState.addUserMask(.linear) }) { addMaskLabel("+ Graduated") }
+                            .buttonStyle(.plain)
                     }
                 }
 
@@ -893,6 +927,64 @@ struct ToneSlider: View {
         return step < 1
             ? String(format: "%@%.2f%@", sign, value, unit)
             : String(format: "%@%.0f%@", sign, value, unit)
+    }
+}
+
+// MARK: - Hand-drawn gradient mask (view-model + editor)
+
+/// A hand-added parametric gradient mask, all plain values so SwiftUI binds to it directly.
+/// Converts to the engine's `Mask` (with a `MaskShape`) at render time.
+struct UserMaskVM: Identifiable {
+    let id = UUID()
+    var kind: MaskShape.Kind
+    var cx = 0.5, cy = 0.5, radius = 0.35, angle = 0.0, softness = 0.35
+    var exposure = 0.0, contrast = 0.0, saturation = 0.0
+
+    func toMask() -> Mask {
+        var adj: [String: Double] = [:]
+        if exposure != 0 { adj["exposure_ev"] = exposure }
+        if contrast != 0 { adj["contrast"] = contrast }
+        if saturation != 0 { adj["saturation"] = saturation }
+        return Mask(id: id.uuidString, type: kind.rawValue, source: "gradient", invert: false,
+                    feather: 0, opacity: 1, adjustments: adj,
+                    shape: MaskShape(kind: kind, cx: cx, cy: cy, radius: radius,
+                                     angle: angle, softness: softness))
+    }
+}
+
+struct UserMaskEditor: View {
+    @Binding var mask: UserMaskVM
+    let onChange: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(mask.kind == .radial ? "Radial" : "Graduated")
+                    .font(Theme.ui(12, .semibold)).foregroundColor(Theme.ink)
+                Spacer()
+                Button(action: onDelete) {
+                    Image(systemName: "trash").font(.system(size: 11)).foregroundColor(Theme.inkDim)
+                }.buttonStyle(.plain)
+            }
+            ToneSlider(label: "Center X", value: $mask.cx, range: 0...1, step: 0.01, unit: "", onChange: onChange)
+            ToneSlider(label: "Center Y", value: $mask.cy, range: 0...1, step: 0.01, unit: "", onChange: onChange)
+            if mask.kind == .radial {
+                ToneSlider(label: "Size", value: $mask.radius, range: 0.05...1.2, step: 0.01, unit: "", onChange: onChange)
+            } else {
+                ToneSlider(label: "Angle", value: $mask.angle, range: 0...360, step: 1, unit: "°", onChange: onChange)
+            }
+            ToneSlider(label: "Softness", value: $mask.softness, range: 0...1, step: 0.01, unit: "", onChange: onChange)
+            Rectangle().fill(Theme.hairline).frame(height: 1)
+            ToneSlider(label: "Exposure", value: $mask.exposure, range: -3...3, step: 0.05, unit: " EV", onChange: onChange)
+            ToneSlider(label: "Contrast", value: $mask.contrast, range: -100...100, step: 1, unit: "", onChange: onChange)
+            ToneSlider(label: "Saturation", value: $mask.saturation, range: -100...100, step: 1, unit: "", onChange: onChange)
+        }
+        .padding(11)
+        .background(
+            RoundedRectangle(cornerRadius: 8).fill(Theme.surface.opacity(0.6))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.glow.opacity(0.4), lineWidth: 1))
+        )
     }
 }
 

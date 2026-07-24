@@ -67,6 +67,53 @@ final class RendererFieldsTests: XCTestCase {
                        "identity per-channel curves must be a no-op")
     }
 
+    // MARK: - Parametric gradient masks (manual local edits)
+
+    private func sampledLuma(_ image: CIImage, at x: Int, _ y: Int, grid: Int = 16) throws -> Double {
+        let data = try ImageWriter.rgba8Sampled(image, width: grid, height: grid)
+        return data.withUnsafeBytes { rp -> Double in
+            let px = rp.bindMemory(to: UInt8.self)
+            let i = (y * grid + x) * 4
+            return (0.299 * Double(px[i]) + 0.587 * Double(px[i + 1]) + 0.114 * Double(px[i + 2]))
+        }
+    }
+
+    func testRadialGradientMaskDarkensCenter() throws {
+        let source = TestSupport.makeSolidImage(r: 140, g: 140, b: 140, width: 96, height: 96)
+        let mask = Mask(id: "radial", type: "radial", source: "gradient", invert: false,
+                        feather: 0, opacity: 1.0, adjustments: ["exposure_ev": -1.5],
+                        shape: MaskShape(kind: .radial, cx: 0.5, cy: 0.5, radius: 0.3, softness: 0.3))
+        var r = Recipe.neutral; r.masks = [mask]
+        let out = Renderer.render(source, with: r, maskBitmaps: [:])
+        let center = try sampledLuma(out, at: 8, 8)
+        let corner = try sampledLuma(out, at: 0, 0)
+        XCTAssertLessThan(center, corner - 8, "a radial darken mask should darken the centre, not the corner")
+    }
+
+    func testLinearGradientMaskDarkensOneSide() throws {
+        let source = TestSupport.makeSolidImage(r: 140, g: 140, b: 140, width: 96, height: 96)
+        // angle 0 → a horizontal transition line, so top and bottom get different treatment.
+        let mask = Mask(id: "grad", type: "grad", source: "gradient", invert: false,
+                        feather: 0, opacity: 1.0, adjustments: ["exposure_ev": -1.5],
+                        shape: MaskShape(kind: .linear, cx: 0.5, cy: 0.5, radius: 0, angle: 0, softness: 0.9))
+        var r = Recipe.neutral; r.masks = [mask]
+        let out = Renderer.render(source, with: r, maskBitmaps: [:])
+        let top = try sampledLuma(out, at: 8, 1)
+        let bottom = try sampledLuma(out, at: 8, 14)
+        XCTAssertGreaterThan(abs(top - bottom), 10, "a linear gradient mask should treat the two sides differently")
+    }
+
+    func testShapeMaskNeedsNoSuppliedBitmap() throws {
+        // The whole point: a parametric mask renders with an EMPTY maskBitmaps dict.
+        let mask = Mask(id: "r", type: "r", source: "gradient", invert: false, feather: 0,
+                        opacity: 1.0, adjustments: ["saturation": -80],
+                        shape: MaskShape(kind: .radial, cx: 0.5, cy: 0.5, radius: 0.4, softness: 0.2))
+        var r = Recipe.neutral; r.masks = [mask]
+        let source = TestSupport.makeGradientImage()
+        XCTAssertNotEqual(try bytes(Renderer.render(source, with: r, maskBitmaps: [:])), try bytes(source),
+                          "a gradient mask should render from its shape with no supplied bitmap")
+    }
+
     // MARK: - Whites / blacks
 
     func testWhitesChangeOutput() throws {
