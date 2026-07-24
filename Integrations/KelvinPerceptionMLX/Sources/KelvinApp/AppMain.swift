@@ -9,6 +9,10 @@ struct KelvinApp: App {
         // the process runs as a background/accessory role — its window never shows, and macOS
         // grants it tight (jetsam-prone) memory limits that the 2.9 GB model load can trip.
         NSApplication.shared.setActivationPolicy(.regular)
+        // Dock icon from embedded bytes (works under `swift run` too; no Bundle.module).
+        if let data = Data(base64Encoded: AppIconData.base64), let icon = NSImage(data: data) {
+            NSApplication.shared.applicationIconImage = icon
+        }
     }
 
     var body: some SwiftUI.Scene {

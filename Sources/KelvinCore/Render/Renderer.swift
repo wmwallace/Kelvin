@@ -82,6 +82,29 @@ public enum Renderer {
             ])
         }
 
+        // Dehaze: cut the atmospheric veil (fog, haze) that lifts the black point and flattens
+        // contrast. Approximated as pull-down-blacks + contrast + local contrast + a little
+        // colour, all scaled by `dehaze`. Neutral (0) skips.
+        if g.dehaze != 0 {
+            let d = g.dehaze / 100.0
+            img = img.applyingFilter("CIToneCurve", parameters: [
+                "inputPoint0": CIVector(x: 0.0, y: 0.0),
+                "inputPoint1": CIVector(x: 0.25, y: clamp01(0.25 - d * 0.11)),
+                "inputPoint2": CIVector(x: 0.5, y: clamp01(0.5 - d * 0.02)),
+                "inputPoint3": CIVector(x: 0.75, y: clamp01(0.75 + d * 0.03)),
+                "inputPoint4": CIVector(x: 1.0, y: 1.0)
+            ])
+            img = img.applyingFilter("CIColorControls", parameters: [
+                kCIInputContrastKey: 1.0 + d * 0.20,
+                kCIInputSaturationKey: 1.0 + d * 0.14,
+                kCIInputBrightnessKey: 0.0
+            ])
+            img = img.applyingFilter("CIUnsharpMask", parameters: [
+                "inputRadius": clarityRadius(for: img) * 2.0,
+                "inputIntensity": d * 0.5
+            ])
+        }
+
         // Clarity: mid-radius local contrast, approximated with an unsharp mask whose radius
         // scales with the image so a proxy and full-res behave comparably. Neutral (0) skips.
         if g.clarity != 0 {

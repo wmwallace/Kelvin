@@ -53,6 +53,7 @@ public extension RecipeEngine {
         g.exposureEV = exposure(p, s)
         g.highlights = highlightRecovery(p, s)
         g.shadows = shadowLift(p, s)
+        g.dehaze = dehazeAmount(p, s)
         let wb = whiteBalance(p, s, strengthScale: style.wbStrengthScale)
         g.temperatureK = wb.temperatureK
         g.tint = wb.tint

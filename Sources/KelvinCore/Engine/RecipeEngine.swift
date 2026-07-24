@@ -40,6 +40,7 @@ public enum RecipeEngine {
         g.exposureEV = exposure(p, s)
         g.highlights = highlightRecovery(p, s)
         g.shadows = shadowLift(p, s)
+        g.dehaze = dehazeAmount(p, s)
 
         let wb = whiteBalance(p, s)
         g.temperatureK = wb.temperatureK
@@ -178,6 +179,19 @@ public enum RecipeEngine {
         let fromClip = min(45, s.shadowClip * 300)
         let floor = (crushed ? 28.0 : 0) + (darkSubject ? 18.0 : 0)
         return roundedClamp(max(fromClip, floor), to: 0...70, step: 1)
+    }
+
+    /// Dehaze amount from measured veiling. Fog/haze lifts the black point (nothing is truly
+    /// dark) — the clearest cue — and flattens contrast. Corrective and shared across styles.
+    static func dehazeAmount(_ p: Perception, _ s: ImageStatistics) -> Double {
+        let flagged = p.problems.contains(.haze)
+        let outdoor = p.scene == .landscape || p.scene == .street || p.scene == .other
+        // Real haze is BRIGHT and veiled: the black point is high AND the frame isn't dark
+        // overall. A dark image with a slightly-lifted black point is not hazy — don't dehaze it.
+        let veiled = s.blackPoint > 0.15 && s.medianLuma > 0.38
+        guard flagged || (veiled && outdoor) else { return 0 }
+        let fromVeil = min(45, (s.blackPoint - 0.10) * 300)   // blackPoint 0.25 → ~45
+        return roundedClamp(max(fromVeil, flagged ? 20 : 0), to: 0...55, step: 1)
     }
 
     // MARK: - Contrast (stylistic; confident path only)
