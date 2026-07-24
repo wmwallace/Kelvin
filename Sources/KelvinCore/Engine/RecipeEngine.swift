@@ -79,7 +79,7 @@ public enum RecipeEngine {
             ),
             global: g,
             curve: curve,
-            hsl: nil,
+            hsl: memoryColorHSL(p),
             masks: localMasks(p, s, subjectLuma: subjectLuma, skyLuma: skyLuma),
             detail: detail(p, iso: iso),
             geometry: nil
@@ -149,7 +149,6 @@ public enum RecipeEngine {
         // sky sitting over a lifted black point, or the model called haze — the fog signature.
         let blown = p.problems.contains(.blownHighlights) || luma > 0.82 || s.highlightClip > 0.03
         let veiled = p.problems.contains(.haze) || (luma > 0.55 && s.blackPoint > 0.12)
-        guard blown || veiled else { return nil }
 
         var adj: [String: Double] = [:]
         if blown {
@@ -161,6 +160,13 @@ public enum RecipeEngine {
             adj["contrast"] = 12          // restore the local contrast fog flattens
             adj["saturation"] = 10        // bring back the blue/tone haze washes toward grey
         }
+        // MEMORY COLOUR. People remember sky as *more saturated than it actually is*, and prefer a
+        // reproduction that matches the memory over one that matches the measurement (Yendrikhovskij;
+        // Bodrogi & Tarczali). So a plain, correctly-exposed sky still gets a gentle lift — this is
+        // the difference between "accurate" and "looks right", and it's why a faithful edit can read
+        // as flat. Applied through the sky MASK, not a global blue push, so a blue shirt or a lake
+        // is untouched. Kept small; the research says preferred, not lurid.
+        adj["saturation"] = (adj["saturation"] ?? 0) + (veiled ? 4 : 12)
         guard !adj.isEmpty else { return nil }
 
         // A generous feather keeps the horizon soft; slightly hold back when only defogging.
@@ -168,6 +174,41 @@ public enum RecipeEngine {
             id: "sky", type: "sky", source: "segmentation", invert: false,
             feather: 45, opacity: (veiled && !blown) ? 0.85 : 1.0, adjustments: adj
         )
+    }
+
+    /// A subject whose colour needs holding back: people, and animals too. Warm fur — golden
+    /// retrievers, ginger cats, bay horses — sits in the *same hue range as skin*, so a Vivid push
+    /// turns it orange for exactly the reason it turns skin orange. Only `.person` was protected
+    /// before, which left animal photos exposed to the full colour push.
+    ///
+    /// Note this covers COLOUR only. Sharpening is deliberately not suppressed for animals the way
+    /// it is for faces: fur texture is the subject, skin texture is a flaw.
+    static func warmSubject(_ p: Perception) -> Bool {
+        p.subject.present && (p.subject.type == .person || p.subject.type == .animal)
+    }
+
+    /// Memory colours: the hues people carry an *expectation* for, which measurably differs from
+    /// what a meter records. The literature is consistent — remembered colours are more saturated
+    /// than real ones, with hue largely preserved, and observers prefer reproductions that match
+    /// the memory (Yendrikhovskij et al.; Bodrogi & Tarczali; Zhu et al., CIC 2015). Grass in
+    /// particular is remembered greener *and* yellower than it measures.
+    ///
+    /// Two are handled here as hue bands; sky is handled region-wise in `skyMask` instead, because
+    /// a global blue push would also hit water and clothing.
+    ///
+    /// Skin is deliberately NOT boosted even though the research says remembered skin is slightly
+    /// yellower and more saturated. Over-saturated skin is the single most-noticed reproduction
+    /// error and the engine already caps it; the downside of getting skin wrong is far worse than
+    /// the upside of nudging it. Restraint wins here.
+    static func memoryColorHSL(_ p: Perception) -> [String: HSLAdjustment]? {
+        guard p.intent != .archival, p.intent != .productAccurate else { return nil }
+        let outdoor = p.scene == .landscape || p.scene == .street
+            || p.scene == .other || p.scene == .event
+        guard outdoor else { return nil }
+
+        // Foliage/grass: a touch more saturated, nudged toward yellow — the remembered green.
+        // Negative `h` walks the green band (120°) toward yellow (60°); ±100 spans ±30°.
+        return ["green": HSLAdjustment(h: -8, s: 10, l: 0)]
     }
 
     // MARK: - Exposure
@@ -356,7 +397,7 @@ public enum RecipeEngine {
         // subject separation. Reduce the shadow-teal when a person is present so shadowed skin
         // doesn't turn sickly green. All amounts small (≤ ~7/255) — this is seasoning, not a filter.
         guard g > 0.01 else { return Curve(luma: luma, red: nil, green: nil, blue: nil) }
-        let teal = g * (p.subject.type == .person ? 0.45 : 1.0)
+        let teal = g * (warmSubject(p) ? 0.45 : 1.0)   // protect skin AND warm fur from green shadows
         let red: [[Double]]   = [[0, 0], [lo, lo - 3 * g], [128, 128], [hi, hi + 7 * g], [255, 255]]
         let green: [[Double]] = [[0, 1.5 * teal], [lo, lo + 2 * teal], [128, 128], [hi, hi - 1 * g], [255, 255]]
         let blue: [[Double]]  = [[0, 3 * teal], [lo, lo + 6 * teal], [128, 128], [hi, hi - 6 * g], [255, 255 - 3 * g]]
@@ -444,7 +485,7 @@ public enum RecipeEngine {
         if p.problems.contains(.flat) { v += 5 }
         if p.scene == .landscape { v += 2 }
         // Never over-saturate skin: a person in frame caps vibrance.
-        if p.subject.type == .person { v = min(v, 6) }
+        if warmSubject(p) { v = min(v, 6) }   // holds for animals too — warm fur is skin-hued
         return roundedClamp(v, to: -20...30, step: 1)
     }
 

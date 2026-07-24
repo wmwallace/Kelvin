@@ -89,7 +89,7 @@ public extension RecipeEngine {
             ),
             global: g,
             curve: curve,
-            hsl: nil,
+            hsl: memoryColorHSL(p),
             // Subject lift + sky treatment are corrective — shared across every style.
             masks: localMasks(p, s, subjectLuma: subjectLuma, skyLuma: skyLuma),
             detail: detail(p, iso: iso),
@@ -106,13 +106,13 @@ public extension RecipeEngine {
     static func styledVibrance(_ p: Perception, _ s: ImageStatistics, _ style: CandidateStyle) -> Double {
         var v = vibrance(p, s) * style.vibranceScale + style.vibranceBias
         // Skin protection holds across every style: a Vivid portrait must not go garish.
-        if p.subject.type == .person { v = min(v, 14) }
+        if warmSubject(p) { v = min(v, 14) }   // animals too: warm fur oversaturates like skin
         return roundedClamp(v, to: -30...35, step: 1)
     }
 
     static func styledSaturation(_ p: Perception, _ style: CandidateStyle) -> Double {
         var sat = saturation(p) + style.saturationBias
-        if p.subject.type == .person { sat = min(sat, 4) }
+        if warmSubject(p) { sat = min(sat, 4) }
         return roundedClamp(sat, to: -30...30, step: 1)
     }
 
