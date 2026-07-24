@@ -150,7 +150,6 @@ final class AppState: ObservableObject {
 
     @Published var isProcessing = false
     @Published var statusMessage = "Drop a photo to read the light."
-    @Published var learnedProfile: PreferenceProfile = .empty
     @Published var batchOutcome: BatchApply.Outcome?
     @Published var showBatchSheet = false
 
@@ -520,6 +519,20 @@ final class AppState: ObservableObject {
         nudge(for: issue)
     }
 
+    /// Find the subject mask, creating one if this is the first subject fix, and adjust it.
+    /// Repeated fixes accumulate on the same mask rather than stacking up duplicates.
+    private func adjustSubjectMask(_ change: (inout UserMaskVM) -> Void) {
+        guard hasPerson else { return }     // nothing to act on; the flag will simply persist
+        if let i = userMasks.firstIndex(where: { $0.kind == .subject }) {
+            change(&userMasks[i])
+        } else {
+            var m = UserMaskVM(kind: .subject)
+            m.exposure = 0                  // start neutral; the change below supplies the amount
+            change(&m)
+            userMasks.append(m)
+        }
+    }
+
     /// Called once the craft check has re-run: if the issue survived, go again.
     private func continueFixIfNeeded() {
         guard let issue = fixInProgress else { return }
@@ -555,6 +568,17 @@ final class AppState: ObservableObject {
             edit.blacks = c(edit.blacks - 6, -100...100)
         case .colorCast:
             edit.temperatureK = 5500; edit.tint = 0            // neutralise white balance
+
+        // Subject problems are fixed ON THE SUBJECT. Brightening the whole frame to rescue a
+        // backlit face washes out the sky that made the picture worth taking — the correction has
+        // to be local, which is exactly what an editor would reach for by hand.
+        case .subjectTooDark:
+            adjustSubjectMask { $0.exposure = min(2.0, $0.exposure + 0.35) }
+        case .subjectFlat:
+            // Modelling comes back from contrast within the face, not from global contrast.
+            adjustSubjectMask { $0.contrast = min(60, $0.contrast + 14) }
+        case .subjectBlown:
+            adjustSubjectMask { $0.exposure = max(-2.0, $0.exposure - 0.3) }
         }
         onEdit()
     }
@@ -738,6 +762,7 @@ final class AppState: ObservableObject {
         if kind == .luminance { m.selCenter = 0.78; m.selRange = 0.2 }    // highlights by default
         if kind == .skin { m.selCenter = 0.06; m.selRange = 0.06; m.selSoftness = 0.05; m.exposure = 0.3 }
         if kind == .background { m.exposure = -0.5 }   // darken the background by default
+        if kind == .subject { m.exposure = 0.3 }
         userMasks.append(m)
         selectedUserMaskId = m.id                      // show its canvas handles
         if kind == .brush { paintingMaskId = m.id }    // brush: start painting right away
@@ -908,7 +933,12 @@ final class AppState: ObservableObject {
             let masks = (recipe.masks?.isEmpty == false) ? LocalMasks.measure(in: fullRes).bitmaps : [:]
             try ImageWriter.write(Renderer.render(fullRes, with: recipe, maskBitmaps: masks), to: exportURL)
             statusMessage = "Exported \(exportURL.lastPathComponent)"
-            recordCurrentPick()   // exporting a look IS the deliberate choice worth learning from
+            // Exporting is the one unambiguous signal of preference, so it's logged. NOTE: nothing
+            // currently reads this back — candidates are generated fresh per photo, by design (the
+            // way to reuse an edit is Batch apply, not a cross-image average). The log exists so
+            // that decision can be revisited with real data; it is not a live learning loop, and
+            // the UI must not claim otherwise.
+            recordCurrentPick()
         } catch {
             statusMessage = "Export failed — \(error.localizedDescription)"
         }
@@ -1112,6 +1142,9 @@ struct ContentView: View {
         }
         .background(Theme.base)
         .preferredColorScheme(.dark)
+        // Text in a Mac app should be selectable — copying a filename, a lens name, or a set of
+        // coordinates out of the Capture panel is an ordinary thing to want to do.
+        .textSelection(.enabled)
         .task { await appState.loadDemoIfRequested() }
         .sheet(isPresented: $appState.showBatchSheet) { batchSheet }
     }
@@ -1157,7 +1190,7 @@ struct ContentView: View {
                     Text("Read the light.")
                         .font(Theme.ui(40, .medium))
                         .foregroundColor(Theme.ink)
-                    Text("Drop a photo. Kelvin reads the scene and hands you four finished looks — pick one, and it learns.")
+                    Text("Drop a photo. Kelvin reads the scene on-device and offers a few finished looks — pick one, tune it, then apply it across the shoot.")
                         .font(Theme.ui(14))
                         .foregroundColor(Theme.inkDim)
                         .multilineTextAlignment(.center)
@@ -1324,7 +1357,7 @@ struct ContentView: View {
                 handle(at: CGPoint(x: center.x + dir.x * 54, y: center.y + dir.y * 54), small: true) {
                     appState.rotateLinear(mid, handleAt: $0, in: rect)
                 }
-            case .brush, .colorRange, .luminance, .skin, .background:
+            case .brush, .colorRange, .luminance, .skin, .background, .subject:
                 EmptyView()
             }
         }
@@ -1664,8 +1697,8 @@ struct ContentView: View {
                             Button(action: { appState.addUserMask(.skin) }) { addMaskLabel("+ Skin") }.buttonStyle(.plain)
                         }
                         HStack(spacing: 6) {
+                            Button(action: { appState.addUserMask(.subject) }) { addMaskLabel("+ Subject") }.buttonStyle(.plain)
                             Button(action: { appState.addUserMask(.background) }) { addMaskLabel("+ Background") }.buttonStyle(.plain)
-                            Color.clear.frame(maxWidth: .infinity)
                             Color.clear.frame(maxWidth: .infinity)
                         }
                     }
@@ -1914,7 +1947,7 @@ struct EditSnapshot: Equatable {
 
 struct UserMaskVM: Identifiable, Equatable, Codable {
     enum Kind: String, Codable {
-        case radial, linear, brush, colorRange, luminance, skin, background
+        case radial, linear, brush, colorRange, luminance, skin, background, subject
     }
     var id = UUID()
     var kind: Kind
@@ -1928,6 +1961,7 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
         case .radial: return "Radial"; case .linear: return "Graduated"; case .brush: return "Brush"
         case .colorRange: return "Colour range"; case .luminance: return "Luminance"; case .skin: return "Skin"
         case .background: return "Background"
+        case .subject: return "Subject"
         }
     }
     var hasCanvasHandles: Bool { kind == .radial || kind == .linear }
@@ -1959,6 +1993,9 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
             // type "subject" so the renderer finds the person bitmap; invert → everything else.
             return Mask(id: id.uuidString, type: "subject", source: "segmentation", invert: true,
                         feather: 20, opacity: 1, adjustments: adj)
+        case .subject:
+            return Mask(id: id.uuidString, type: "subject", source: "segmentation", invert: false,
+                        feather: 30, opacity: 1, adjustments: adj)
         }
     }
 }
@@ -1978,7 +2015,7 @@ struct UserMaskEditor: View {
     /// Skin and Background are built from the person segmentation — flag it when there isn't one,
     /// so the mask isn't just quietly inert.
     private var needsPersonButHasNone: Bool {
-        (mask.kind == .skin || mask.kind == .background) && !hasPerson
+(mask.kind == .skin || mask.kind == .background || mask.kind == .subject) && !hasPerson
     }
 
     var body: some View {
@@ -2044,6 +2081,9 @@ struct UserMaskEditor: View {
                 ToneSlider(label: "Tolerance", value: $mask.selRange, range: 0.02...0.18, step: 0.005, unit: "", onChange: onChange)
             case .background:
                 Text("Everything except the detected subject — darken or blur it to make the subject pop.")
+                    .font(Theme.mono(9)).foregroundColor(Theme.inkDim).fixedSize(horizontal: false, vertical: true)
+            case .subject:
+                Text("The detected person — lift, model, or recover them without touching the scene.")
                     .font(Theme.mono(9)).foregroundColor(Theme.inkDim).fixedSize(horizontal: false, vertical: true)
             }
 

@@ -22,23 +22,40 @@ public enum FaceSkin {
         /// checks that are hue/saturation based (fair across complexions), never brightness-based.
         public let skinHueDegrees: Double?
         public let skinSaturation: Double?
+        /// How much tonal range the face itself occupies (p95 − p5 of its luma).
+        ///
+        /// This is what tells a *flat* rendering of a person from a well-modelled one. A face is
+        /// read as a three-dimensional form — brow, cheek, jaw all catch light differently — and an
+        /// edit that compresses that range leaves the subject looking washed out even when the
+        /// frame as a whole measures fine. Being a *range*, it is independent of how light or dark
+        /// the skin is, so it stays fair across complexions.
+        public let skinRange: Double?
+        /// Fraction of the face that has clipped to white or crushed to black — lost features.
+        public let skinClipHigh: Double?
+        public let skinClipLow: Double?
+
+        /// No face found — nothing measured, nothing asserted.
+        public static let empty = Reading(
+            faceCount: 0, skinLuma: nil, skinHueDegrees: nil, skinSaturation: nil,
+            skinRange: nil, skinClipHigh: nil, skinClipLow: nil)
     }
 
     /// Detect faces and meter their skin brightness. Each face box is inset toward the centre
     /// (cheeks/forehead) to avoid hair and background at the edges, then averaged, area-weighted.
     public static func read(in image: CIImage) -> Reading {
         let ext = image.extent
-        guard !ext.isInfinite, ext.width > 0, ext.height > 0 else { return Reading(faceCount: 0, skinLuma: nil, skinHueDegrees: nil, skinSaturation: nil) }
+        guard !ext.isInfinite, ext.width > 0, ext.height > 0 else { return .empty }
 
         let request = VNDetectFaceRectanglesRequest()
         let handler = VNImageRequestHandler(ciImage: image, options: [:])
         guard (try? handler.perform([request])) != nil,
               let faces = request.results, !faces.isEmpty else {
-            return Reading(faceCount: 0, skinLuma: nil, skinHueDegrees: nil, skinSaturation: nil)
+            return .empty
         }
 
         var lumaSum = 0.0, weight = 0.0
         var rSum = 0.0, gSum = 0.0, bSum = 0.0     // area-weighted mean skin colour
+        var faceLuma: [Double] = []                // every sampled face pixel, for range + clipping
         for face in faces {
             // Vision boxes are normalised, bottom-left origin — the same space as a CIImage — so no
             // vertical flip is needed to crop. Inset 18% per side onto skin.
@@ -62,7 +79,9 @@ public enum FaceSkin {
                 let px = rp.bindMemory(to: UInt8.self)
                 for i in stride(from: 0, to: data.count, by: 4) {
                     let r = Double(px[i]) / 255, g = Double(px[i+1]) / 255, bch = Double(px[i+2]) / 255
-                    cropLuma += 0.299*r + 0.587*g + 0.114*bch
+                    let l = 0.299*r + 0.587*g + 0.114*bch
+                    cropLuma += l
+                    faceLuma.append(l)
                     cropR += r; cropG += g; cropB += bch
                     n += 1
                 }
@@ -75,11 +94,25 @@ public enum FaceSkin {
         }
 
         guard weight > 0 else {
-            return Reading(faceCount: faces.count, skinLuma: nil, skinHueDegrees: nil, skinSaturation: nil)
+            return Reading(faceCount: faces.count, skinLuma: nil, skinHueDegrees: nil,
+                           skinSaturation: nil, skinRange: nil, skinClipHigh: nil, skinClipLow: nil)
         }
         let (hue, sat) = hsvHueSaturation(r: rSum / weight, g: gSum / weight, b: bSum / weight)
+
+        // Percentiles rather than min/max: a single specular highlight on the nose shouldn't be
+        // mistaken for the face occupying the whole range.
+        var range: Double?, clipHigh: Double?, clipLow: Double?
+        if faceLuma.count >= 32 {
+            faceLuma.sort()
+            let p5 = faceLuma[Int(Double(faceLuma.count) * 0.05)]
+            let p95 = faceLuma[Int(Double(faceLuma.count) * 0.95)]
+            range = max(0, p95 - p5)
+            clipHigh = Double(faceLuma.filter { $0 > 0.985 }.count) / Double(faceLuma.count)
+            clipLow = Double(faceLuma.filter { $0 < 0.02 }.count) / Double(faceLuma.count)
+        }
         return Reading(faceCount: faces.count, skinLuma: lumaSum / weight,
-                       skinHueDegrees: hue, skinSaturation: sat)
+                       skinHueDegrees: hue, skinSaturation: sat,
+                       skinRange: range, skinClipHigh: clipHigh, skinClipLow: clipLow)
     }
 
     /// HSV hue (degrees) and saturation from mean RGB — enough to check that skin sits in the

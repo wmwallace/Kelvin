@@ -23,6 +23,7 @@ public enum AestheticEvaluator {
     public enum Issue: String, Sendable, Equatable {
         case blownHighlights, crushedShadows, flat, colorCast
         case skinOverSaturated, skinAshy, skinHue
+        case subjectFlat, subjectTooDark, subjectBlown
 
         /// The user-facing message.
         public var message: String {
@@ -34,6 +35,9 @@ public enum AestheticEvaluator {
             case .skinOverSaturated: return "skin over-saturated"
             case .skinAshy:          return "skin looks ashy/desaturated"
             case .skinHue:           return "skin hue pushed off-natural"
+            case .subjectFlat:       return "subject looks flat — no modelling in the face"
+            case .subjectTooDark:    return "subject is much darker than the scene"
+            case .subjectBlown:      return "subject's highlights are clipped"
             }
         }
     }
@@ -45,6 +49,9 @@ public enum AestheticEvaluator {
         public let clipping: Double
         public let skin: Double
         public let colorCast: Double
+        /// How well the person in the frame is rendered — modelling, placement, intact features.
+        /// 1.0 when there is no face to judge.
+        public var subject: Double = 1.0
         /// Specific fixable defects a colourist would call out. Empty = clean.
         public let issues: [Issue]
         /// Human-readable flags (issue messages) — kept for compatibility/display.
@@ -89,6 +96,43 @@ public enum AestheticEvaluator {
             else if sat > 0.75 { issues.append(.skinOverSaturated) }
         }
 
+        // --- SUBJECT QUALITY. When there's a face, this is the thing the viewer actually judges,
+        // and measuring the frame as a whole misses it entirely: an edit can have a perfect
+        // histogram and still leave the person washed out. That is not hypothetical — a flat style
+        // scored a clean 1.00 on a backlit portrait precisely because doing nothing interesting
+        // avoids every global defect, and the person looked wrong.
+        //
+        // Fairness note: all three tests below are RELATIVE — a range, a deficit against the scene,
+        // and a clip fraction. None compares the face to a target brightness, so none of them
+        // penalises darker skin for being darker.
+        var subject = 1.0
+        if let f = face, f.faceCount > 0 {
+            var terms: [Double] = []
+
+            // Modelling: a face is a form, and light falling across brow, cheek and jaw gives it a
+            // spread of tones. Compress that and the subject reads as a flat cut-out.
+            if let range = f.skinRange {
+                let modelling = plateau(range, lo: 0.16, hiPlateau: 0.75, softLo: 0.03, softHi: 1.0)
+                terms.append(modelling)
+                if modelling < 0.6 { issues.append(.subjectFlat) }
+            }
+            // Placement: a subject sitting far below the scene's own midtone is under-rendered —
+            // the classic uncorrected backlight.
+            if let luma = f.skinLuma {
+                let deficit = s.medianLuma - luma
+                let placement = deficit <= 0.14 ? 1.0 : max(0, 1 - (deficit - 0.14) / 0.28)
+                terms.append(placement)
+                if placement < 0.6 { issues.append(.subjectTooDark) }
+            }
+            // Lost features: clipped skin has no detail to recover, at either end.
+            if let hi = f.skinClipHigh, let lo = f.skinClipLow {
+                let intact = min(penalty(hi, free: 0.01, bad: 0.12), penalty(lo, free: 0.02, bad: 0.15))
+                terms.append(intact)
+                if hi > 0.05 { issues.append(.subjectBlown) }
+            }
+            if !terms.isEmpty { subject = terms.min() ?? 1.0 }
+        }
+
         // --- Colour cast: a gentle warmth is flattering; a strong global tint is a WB error.
         // chromaA/chromaB are Lab-ish; magnitude ~>18 is a visible cast.
         let castMag = (s.chromaA * s.chromaA + s.chromaB * s.chromaB).squareRoot()
@@ -97,14 +141,16 @@ public enum AestheticEvaluator {
 
         // Objective floors (clipping, skin) dominate; tonal punch is lighter because matte is a
         // valid style. A face present pulls skin's weight up — it's the thing most worth getting right.
+        // With a person in frame, how the SUBJECT renders outweighs how the frame measures — that
+        // is what someone looking at the photograph is responding to.
         let hasFace = (face?.faceCount ?? 0) > 0
         let w: [(Double, Double)] = hasFace
-            ? [(clipping, 0.32), (skin, 0.34), (colorCast, 0.20), (tonalRange, 0.14)]
+            ? [(subject, 0.34), (skin, 0.24), (clipping, 0.22), (colorCast, 0.12), (tonalRange, 0.08)]
             : [(clipping, 0.42), (colorCast, 0.28), (tonalRange, 0.30)]
         let overall = w.reduce(0.0) { $0 + $1.0 * $1.1 } / w.reduce(0.0) { $0 + $1.1 }
 
         return Score(overall: overall, tonalRange: tonalRange, clipping: clipping,
-                     skin: skin, colorCast: colorCast, issues: issues)
+                     skin: skin, colorCast: colorCast, subject: subject, issues: issues)
     }
 
     /// Convenience: measure a rendered image (statistics + skin) and score it. Use this to rank
