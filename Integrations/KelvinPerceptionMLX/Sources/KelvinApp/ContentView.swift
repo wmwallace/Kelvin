@@ -154,7 +154,12 @@ final class AppState: ObservableObject {
     /// GPU-backed Core Image context — the "accelerator". A Metal device + cached intermediates and
     /// fast downsampling make live slider previews render on the GPU instead of the CPU.
     private let context: CIContext = {
-        let opts: [CIContextOption: Any] = [.cacheIntermediates: true, .highQualityDownsample: false]
+        // Force the high-performance GPU (matters on multi-GPU Macs), cache intermediates, and skip
+        // high-quality downsampling for previews. This is PREVIEW ONLY — export renders through
+        // ImageWriter's own full-precision context, so output quality is never affected.
+        let opts: [CIContextOption: Any] = [
+            .cacheIntermediates: true, .highQualityDownsample: false, .allowLowPower: false
+        ]
         if let device = MTLCreateSystemDefaultDevice() {
             return CIContext(mtlDevice: device, options: opts)
         }
@@ -512,8 +517,18 @@ final class AppState: ObservableObject {
     @Published var lastRenderedCI: CIImage?
     private var craftToken = 0
 
-    /// Fast path — render the proxy and update the preview. Called live on every slider tick, so it
-    /// does NOT run the expensive craft check (Vision face detection); that's debounced separately.
+    /// Moves the thread-safe-but-not-Sendable Core Image inputs across the concurrency boundary.
+    /// CIContext/CIImage are documented thread-safe, so this is sound.
+    private struct RenderInput: @unchecked Sendable {
+        let recipe: Recipe; let proxy: CIImage; let bitmaps: [String: CIImage]
+    }
+    private struct RenderOutput: @unchecked Sendable { let ci: CIImage; let cg: CGImage? }
+    private var renderInFlight = false
+    private var renderDirty = false
+
+    /// Build the recipe (fast, on the main thread — export always sees the latest), then hand the
+    /// GPU render + read-back to a background task so the UI thread stays free while you drag. Only
+    /// one render runs at a time; newer edits coalesce so we never queue a backlog of stale frames.
     private func updateActiveRecipe() {
         guard let selectedId = selectedCandidateId,
               let candidate = candidates.first(where: { $0.id == selectedId }),
@@ -526,10 +541,23 @@ final class AppState: ObservableObject {
             ? Geometry(rotateDeg: straighten, crop: nil, lensCorrection: false) : nil
         finalRecipe.hsl = hsl.isEmpty ? candidate.baseRecipe.hsl : hsl
         self.activeRecipe = finalRecipe
-        let rendered = Renderer.render(proxy, with: finalRecipe, maskBitmaps: proxyMaskBitmaps)
-        self.lastRenderedCI = rendered
-        self.activePreviewImage = ciToNSImage(rendered)
-        scheduleCraftCheck()
+
+        if renderInFlight { renderDirty = true; return }
+        renderInFlight = true
+        let input = RenderInput(recipe: finalRecipe, proxy: proxy, bitmaps: proxyMaskBitmaps)
+        let ctx = context
+        Task.detached(priority: .userInitiated) {
+            let rendered = Renderer.render(input.proxy, with: input.recipe, maskBitmaps: input.bitmaps)
+            let cg = ctx.createCGImage(rendered, from: rendered.extent)
+            let out = RenderOutput(ci: rendered, cg: cg)
+            await MainActor.run {
+                self.lastRenderedCI = out.ci
+                if let cg = out.cg { self.activePreviewImage = NSImage(cgImage: cg, size: .zero) }
+                self.renderInFlight = false
+                self.scheduleCraftCheck()
+                if self.renderDirty { self.renderDirty = false; self.updateActiveRecipe() }
+            }
+        }
     }
 
     /// The objective craft self-check (clipping / skin / cast) runs ~200 ms after the last edit, so

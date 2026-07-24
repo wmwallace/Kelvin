@@ -1,5 +1,7 @@
 import Foundation
 import CoreImage
+import ImageIO
+import Metal
 
 /// Encoding a rendered `CIImage` to a file, plus a deterministic raster helper used by
 /// tests to compare pixels. Output is written in sRGB.
@@ -8,11 +10,12 @@ public enum ImageWriter {
         case jpeg(quality: Double)
         case png
 
-        /// Pick a format from an output path's extension. Defaults to JPEG q0.92.
+        /// Pick a format from an output path's extension. JPEG defaults to q0.97 (near-lossless);
+        /// PNG is lossless. The photographer's output should never be silently over-compressed.
         public static func inferred(from url: URL) -> Format {
             switch url.pathExtension.lowercased() {
             case "png": return .png
-            default: return .jpeg(quality: 0.92)
+            default: return .jpeg(quality: 0.97)
             }
         }
     }
@@ -30,9 +33,19 @@ public enum ImageWriter {
     }
 
     /// A shared software CIContext. Software rendering keeps output deterministic and
-    /// headless-safe (the eval harness and tests must not depend on a GPU being present).
-    /// CIContext is thread-safe and the colorspace is immutable, so sharing is fine.
+    /// headless-safe — the byte-exact raster helpers (`rgba8Bytes`/`rgba8Sampled`) and the no-op
+    /// invariant test must not depend on a GPU being present. CIContext is thread-safe.
     static let context = CIContext(options: [.useSoftwareRenderer: true])
+
+    /// GPU-accelerated context for encoding EXPORTS. High-quality resampling + full precision, but
+    /// hardware-backed so a full-resolution write uses the Metal GPU instead of the CPU — much
+    /// faster on a big RAW, and visually identical to the software path (only the byte-exact test
+    /// helpers above need determinism). Falls back to software if no GPU is present (headless CI).
+    static let exportContext: CIContext = {
+        let opts: [CIContextOption: Any] = [.highQualityDownsample: true, .allowLowPower: false]
+        if let device = MTLCreateSystemDefaultDevice() { return CIContext(mtlDevice: device, options: opts) }
+        return CIContext(options: [.useSoftwareRenderer: true])
+    }()
 
     static let outputColorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
 
@@ -40,17 +53,18 @@ public enum ImageWriter {
         let fmt = format ?? Format.inferred(from: url)
         do {
             switch fmt {
-            case .jpeg:
-                // Quality plumbing (CIImageRepresentationOption) lands with the export
-                // milestone; M1 uses Core Image's default JPEG quality.
-                try context.writeJPEGRepresentation(
+            case .jpeg(let quality):
+                // Honour the requested quality so the export isn't silently over-compressed.
+                let qualityKey = CIImageRepresentationOption(
+                    rawValue: kCGImageDestinationLossyCompressionQuality as String)
+                try exportContext.writeJPEGRepresentation(
                     of: image,
                     to: url,
                     colorSpace: outputColorSpace,
-                    options: [:]
+                    options: [qualityKey: max(0, min(1, quality))]
                 )
             case .png:
-                try context.writePNGRepresentation(
+                try exportContext.writePNGRepresentation(
                     of: image,
                     to: url,
                     format: .RGBA8,
