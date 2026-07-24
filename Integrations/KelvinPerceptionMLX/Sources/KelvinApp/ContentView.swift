@@ -103,12 +103,16 @@ final class AppState: ObservableObject {
     /// Objective craft flags on the current edit (clipping, skin, cast) — empty when clean.
     @Published var activeCraftNotes: [String] = []
 
-    @Published var deltaExposure = 0.0
-    @Published var deltaContrast = 0.0
-    @Published var deltaHighlights = 0.0
-    @Published var deltaShadows = 0.0
-    @Published var deltaVibrance = 0.0
-    @Published var deltaSaturation = 0.0
+    /// The full editable global adjustment set (absolute values, Lightroom-style). Sliders bind
+    /// straight to its fields; it starts from the chosen candidate and the user takes it from there.
+    @Published var edit = GlobalAdjustments.neutral
+    /// The candidate's values as generated — the baseline manual edits are measured against (for
+    /// the "carry my tweaks to the batch" and preference logging), and what Reset returns to.
+    private var editBaseline = GlobalAdjustments.neutral
+    /// Manual mask control: which auto-masks are on, and each one's strength (0…100 → opacity).
+    @Published var maskEnabled: [String: Bool] = [:]
+    @Published var maskStrength: [String: Double] = [:]
+    private var baseMasks: [Mask] = []
 
     /// Sensor dust/spots detected once on load (normalised → resolution-independent, so the same
     /// set heals the proxy preview, the full-res export, and every frame of a batch — dust sits at
@@ -231,31 +235,49 @@ final class AppState: ObservableObject {
     }
 
     func selectCandidate(id: String) {
-        guard candidates.contains(where: { $0.id == id }) else { return }
+        guard let candidate = candidates.first(where: { $0.id == id }) else { return }
         selectedCandidateId = id
-        deltaExposure = 0; deltaContrast = 0; deltaHighlights = 0
-        deltaShadows = 0; deltaVibrance = 0; deltaSaturation = 0
+        // Load the candidate's actual values into the editable set — the user edits from here.
+        edit = candidate.baseRecipe.global
+        editBaseline = candidate.baseRecipe.global
+        baseMasks = candidate.baseRecipe.masks ?? []
+        maskEnabled = Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, true) })
+        maskStrength = Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, $0.opacity * 100) })
         updateActiveRecipe()
         // NOTE: selecting/browsing candidates does NOT record a pick — only a deliberate
         // choice (export) does. Recording on every selection floods the store with fake
         // preferences and corrupts the learned profile.
     }
 
-    func updateSliderDeltas() { updateActiveRecipe() }
+    /// Revert every manual edit back to the candidate as Kelvin generated it.
+    func resetToCandidate() {
+        edit = editBaseline
+        maskEnabled = Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, true) })
+        maskStrength = Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, $0.opacity * 100) })
+        updateActiveRecipe()
+    }
+
+    func onEdit() { updateActiveRecipe() }
+
+    /// The masks to render: the candidate's masks, minus any the user switched off, each scaled to
+    /// the user's strength.
+    private func activeMasks() -> [Mask]? {
+        let ms = baseMasks.compactMap { m -> Mask? in
+            guard maskEnabled[m.id] ?? true else { return nil }
+            var m = m
+            m.opacity = clampStep((maskStrength[m.id] ?? m.opacity * 100) / 100, 0...1, 0.01)
+            return m
+        }
+        return ms.isEmpty ? nil : ms
+    }
 
     private func updateActiveRecipe() {
         guard let selectedId = selectedCandidateId,
               let candidate = candidates.first(where: { $0.id == selectedId }),
               let proxy = proxyCI else { return }
-        var g = candidate.baseRecipe.global
-        g.exposureEV = clampStep(g.exposureEV + deltaExposure, -5...5, 0.05)
-        g.contrast = clampStep(g.contrast + deltaContrast, -100...100, 1)
-        g.highlights = clampStep(g.highlights + deltaHighlights, -100...100, 1)
-        g.shadows = clampStep(g.shadows + deltaShadows, -100...100, 1)
-        g.vibrance = clampStep(g.vibrance + deltaVibrance, -100...100, 1)
-        g.saturation = clampStep(g.saturation + deltaSaturation, -100...100, 1)
         var finalRecipe = candidate.baseRecipe
-        finalRecipe.global = g
+        finalRecipe.global = edit                       // absolute manual values
+        finalRecipe.masks = activeMasks()
         finalRecipe.heal = removeDust && !healSpots.isEmpty ? healSpots : nil
         self.activeRecipe = finalRecipe
         let rendered = Renderer.render(proxy, with: finalRecipe, maskBitmaps: proxyMaskBitmaps)
@@ -268,13 +290,8 @@ final class AppState: ObservableObject {
     func recordCurrentPick() {
         guard let selectedId = selectedCandidateId,
               let candidate = candidates.first(where: { $0.id == selectedId }) else { return }
-        var edits: [String: Double] = [:]
-        if abs(deltaExposure) > 0.01 { edits["exposure_ev"] = (deltaExposure * 100).rounded() / 100 }
-        if abs(deltaContrast) > 0.1 { edits["contrast"] = deltaContrast.rounded() }
-        if abs(deltaHighlights) > 0.1 { edits["highlights"] = deltaHighlights.rounded() }
-        if abs(deltaShadows) > 0.1 { edits["shadows"] = deltaShadows.rounded() }
-        if abs(deltaVibrance) > 0.1 { edits["vibrance"] = deltaVibrance.rounded() }
-        if abs(deltaSaturation) > 0.1 { edits["saturation"] = deltaSaturation.rounded() }
+        // Log the manual adjustments as the DIFF from the candidate Kelvin generated.
+        let edits = manualTweaks()
         let pick = PreferencePick(
             imageId: imageId,
             perceptionHash: candidate.baseRecipe.provenance?.perceptionHash,
@@ -350,10 +367,28 @@ final class AppState: ObservableObject {
         isProcessing = false
     }
 
-    /// The reference photo's manual slider tweaks, to carry onto every batch photo.
+    /// The manual edits as a DIFF from the candidate Kelvin generated — carried onto every batch
+    /// photo (as offsets, so each frame keeps its own adapted baseline) and logged as the pick's
+    /// subsequent edits. Only meaningfully-changed fields are included.
     private func manualTweaks() -> [String: Double] {
-        ["exposure_ev": deltaExposure, "contrast": deltaContrast, "highlights": deltaHighlights,
-         "shadows": deltaShadows, "vibrance": deltaVibrance, "saturation": deltaSaturation]
+        var t: [String: Double] = [:]
+        func d(_ key: String, _ a: Double, _ b: Double, _ eps: Double) { if abs(a - b) > eps { t[key] = a - b } }
+        d("exposure_ev", edit.exposureEV, editBaseline.exposureEV, 0.01)
+        d("contrast", edit.contrast, editBaseline.contrast, 0.5)
+        d("highlights", edit.highlights, editBaseline.highlights, 0.5)
+        d("shadows", edit.shadows, editBaseline.shadows, 0.5)
+        d("whites", edit.whites, editBaseline.whites, 0.5)
+        d("blacks", edit.blacks, editBaseline.blacks, 0.5)
+        d("vibrance", edit.vibrance, editBaseline.vibrance, 0.5)
+        d("saturation", edit.saturation, editBaseline.saturation, 0.5)
+        d("clarity", edit.clarity, editBaseline.clarity, 0.5)
+        d("texture", edit.texture, editBaseline.texture, 0.5)
+        d("dehaze", edit.dehaze, editBaseline.dehaze, 0.5)
+        d("tint", edit.tint, editBaseline.tint, 0.5)
+        if let et = edit.temperatureK, let bt = editBaseline.temperatureK, abs(et - bt) > 5 {
+            t["temperatureK"] = et - bt
+        }
+        return t
     }
 
     private func applyTweaks(_ t: [String: Double], to g: inout GlobalAdjustments) {
@@ -361,8 +396,24 @@ final class AppState: ObservableObject {
         g.contrast = clampStep(g.contrast + (t["contrast"] ?? 0), -100...100, 1)
         g.highlights = clampStep(g.highlights + (t["highlights"] ?? 0), -100...100, 1)
         g.shadows = clampStep(g.shadows + (t["shadows"] ?? 0), -100...100, 1)
+        g.whites = clampStep(g.whites + (t["whites"] ?? 0), -100...100, 1)
+        g.blacks = clampStep(g.blacks + (t["blacks"] ?? 0), -100...100, 1)
         g.vibrance = clampStep(g.vibrance + (t["vibrance"] ?? 0), -100...100, 1)
         g.saturation = clampStep(g.saturation + (t["saturation"] ?? 0), -100...100, 1)
+        g.clarity = clampStep(g.clarity + (t["clarity"] ?? 0), -100...100, 1)
+        g.texture = clampStep(g.texture + (t["texture"] ?? 0), -100...100, 1)
+        g.dehaze = clampStep(g.dehaze + (t["dehaze"] ?? 0), 0...100, 1)
+        g.tint = clampStep(g.tint + (t["tint"] ?? 0), -100...100, 1)
+        if let dt = t["temperatureK"] { g.temperatureK = (g.temperatureK ?? 5500) + dt }
+    }
+
+    /// The ids of the auto-masks on the current candidate (e.g. "subject", "sky"), for the UI.
+    var baseMaskIds: [String] { baseMasks.map { $0.id } }
+
+    /// A binding for the white-balance slider (absolute Kelvin; nil → as-shot shown as 5500).
+    var temperatureBinding: Binding<Double> {
+        Binding(get: { self.edit.temperatureK ?? 5500 },
+                set: { self.edit.temperatureK = $0; self.updateActiveRecipe() })
     }
 
     // Active look's white balance for the rail (nil = as-shot).
@@ -627,14 +678,51 @@ struct ContentView: View {
                     }
                 }
 
-                sectionLabel("Fine-tune", trailing: nil)
+                let ch = appState.onEdit   // re-render on any slider change
+
+                sectionLabel("White balance", trailing: "Reset")
+                    .onTapGesture { appState.resetToCandidate() }
                 VStack(spacing: 14) {
-                    ToneSlider(label: "Exposure", value: $appState.deltaExposure, range: -2...2, step: 0.05, unit: " EV", onChange: appState.updateSliderDeltas)
-                    ToneSlider(label: "Contrast", value: $appState.deltaContrast, range: -30...30, step: 1, unit: "", onChange: appState.updateSliderDeltas)
-                    ToneSlider(label: "Highlights", value: $appState.deltaHighlights, range: -50...50, step: 1, unit: "", onChange: appState.updateSliderDeltas)
-                    ToneSlider(label: "Shadows", value: $appState.deltaShadows, range: -50...50, step: 1, unit: "", onChange: appState.updateSliderDeltas)
-                    ToneSlider(label: "Vibrance", value: $appState.deltaVibrance, range: -30...30, step: 1, unit: "", onChange: appState.updateSliderDeltas)
-                    ToneSlider(label: "Saturation", value: $appState.deltaSaturation, range: -30...30, step: 1, unit: "", onChange: appState.updateSliderDeltas)
+                    ToneSlider(label: "Temp", value: appState.temperatureBinding, range: 2500...9500, step: 10, unit: " K", onChange: ch)
+                    ToneSlider(label: "Tint", value: $appState.edit.tint, range: -100...100, step: 1, unit: "", onChange: ch)
+                }
+
+                sectionLabel("Tone", trailing: nil)
+                VStack(spacing: 14) {
+                    ToneSlider(label: "Exposure", value: $appState.edit.exposureEV, range: -5...5, step: 0.05, unit: " EV", onChange: ch)
+                    ToneSlider(label: "Contrast", value: $appState.edit.contrast, range: -100...100, step: 1, unit: "", onChange: ch)
+                    ToneSlider(label: "Highlights", value: $appState.edit.highlights, range: -100...100, step: 1, unit: "", onChange: ch)
+                    ToneSlider(label: "Shadows", value: $appState.edit.shadows, range: -100...100, step: 1, unit: "", onChange: ch)
+                    ToneSlider(label: "Whites", value: $appState.edit.whites, range: -100...100, step: 1, unit: "", onChange: ch)
+                    ToneSlider(label: "Blacks", value: $appState.edit.blacks, range: -100...100, step: 1, unit: "", onChange: ch)
+                }
+
+                sectionLabel("Presence", trailing: nil)
+                VStack(spacing: 14) {
+                    ToneSlider(label: "Texture", value: $appState.edit.texture, range: -100...100, step: 1, unit: "", onChange: ch)
+                    ToneSlider(label: "Clarity", value: $appState.edit.clarity, range: -100...100, step: 1, unit: "", onChange: ch)
+                    ToneSlider(label: "Dehaze", value: $appState.edit.dehaze, range: 0...100, step: 1, unit: "", onChange: ch)
+                }
+
+                sectionLabel("Color", trailing: nil)
+                VStack(spacing: 14) {
+                    ToneSlider(label: "Vibrance", value: $appState.edit.vibrance, range: -100...100, step: 1, unit: "", onChange: ch)
+                    ToneSlider(label: "Saturation", value: $appState.edit.saturation, range: -100...100, step: 1, unit: "", onChange: ch)
+                }
+
+                if !appState.baseMaskIds.isEmpty {
+                    sectionLabel("Masks", trailing: nil)
+                    VStack(spacing: 12) {
+                        ForEach(appState.baseMaskIds, id: \.self) { mid in
+                            MaskControl(
+                                name: mid.capitalized,
+                                isOn: Binding(get: { appState.maskEnabled[mid] ?? true },
+                                              set: { appState.maskEnabled[mid] = $0 }),
+                                strength: Binding(get: { appState.maskStrength[mid] ?? 100 },
+                                                  set: { appState.maskStrength[mid] = $0 }),
+                                onChange: appState.onEdit)
+                        }
+                    }
                 }
 
                 sectionLabel("Repair", trailing: appState.detectedSpotCount > 0 ? "\(appState.detectedSpotCount) spots" : nil)
@@ -805,5 +893,39 @@ struct ToneSlider: View {
         return step < 1
             ? String(format: "%@%.2f%@", sign, value, unit)
             : String(format: "%@%.0f%@", sign, value, unit)
+    }
+}
+
+// MARK: - Mask control (toggle + strength for an auto-mask)
+
+struct MaskControl: View {
+    let name: String
+    @Binding var isOn: Bool
+    @Binding var strength: Double
+    let onChange: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle(isOn: $isOn) {
+                Text(name).font(Theme.ui(13, .medium)).foregroundColor(Theme.ink)
+            }
+            .toggleStyle(.switch).tint(Theme.glow)
+            .onChange(of: isOn) { _ in onChange() }
+
+            if isOn {
+                HStack {
+                    Text("Strength").font(Theme.ui(11)).foregroundColor(Theme.inkDim)
+                    Spacer()
+                    Text("\(Int(strength))%").font(Theme.mono(10)).foregroundColor(Theme.glow)
+                }
+                Slider(value: $strength, in: 0...100, step: 1) { editing in if !editing { onChange() } }
+                    .tint(Theme.glow).controlSize(.small)
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8).fill(Theme.surface.opacity(0.5))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.hairline.opacity(0.6), lineWidth: 1))
+        )
     }
 }
