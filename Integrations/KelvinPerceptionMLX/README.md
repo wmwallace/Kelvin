@@ -44,10 +44,20 @@ but do **not** declare those packages themselves, so they are listed here direct
 ## Verification status
 
 - Dependency graph **resolves** cleanly.
-- Provider code is written against the source-verified `mlx-swift-lm` 3.31.4 API (`ChatSession`,
-  `respond(to:image:)`, `GenerateParameters`, `UserInput.Image.ciImage`, the
-  `#huggingFaceLoadModelContainer` macro).
-- The Swift target's **type-check has not been confirmed in CI**: the sandbox used to author
-  this could not compile MLX's Metal shaders (a `metal`-compiler crash under a beta toolchain,
-  unrelated to this code). Build once on a standard Apple-Silicon Xcode to confirm, and treat
-  any first-build API drift as expected maintenance of the three pinned dependencies above.
+- The target **compiles** (`swift build` → *Build complete*, ~71 s cold), so the provider
+  type-checks against the real `mlx-swift-lm` 3.31.4 API (`ChatSession`, `respond(to:image:)`,
+  `GenerateParameters`, `UserInput.Image.ciImage`, the `#huggingFaceLoadModelContainer` macro).
+- **Live inference is not yet exercised here** — the first `perceive(_:)` call downloads the
+  model (~2–3 GB) from Hugging Face and runs it on the GPU.
+
+### Metal Toolchain prerequisite
+
+Xcode 16+ ships the Metal compiler as a separate component. If `swift build` fails with
+`cannot execute tool 'metal' due to missing Metal Toolchain`, install it once:
+
+```sh
+xcodebuild -downloadComponent MetalToolchain
+```
+
+(This was the sole reason an earlier build attempt failed — not the code and not the toolchain
+version.)
