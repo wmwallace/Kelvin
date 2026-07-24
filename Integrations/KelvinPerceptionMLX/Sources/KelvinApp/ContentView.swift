@@ -194,10 +194,87 @@ final class AppState: ObservableObject {
         await loadPhoto(from: URL(fileURLWithPath: path))
     }
 
+    // MARK: Folder browsing + per-photo sessions
+
+    /// The other photos sitting in the folder you opened from, for the filmstrip.
+    @Published var folderPhotos: [URL] = []
+    /// Photos whose edit differs from the candidate Kelvin generated (drives the strip's dot).
+    @Published var editedURLs: Set<URL> = []
+    /// Full editing state per photo, so switching away and back is instant and lossless — no
+    /// re-running the model. Bounded, because each entry pins decoded images.
+    private var sessions: [URL: PhotoSession] = [:]
+    private var sessionOrder: [URL] = []
+    private static let maxSessions = 8
+    private var thumbnails: [URL: NSImage] = [:]
+
+    func thumbnail(for url: URL) -> NSImage? {
+        if let hit = thumbnails[url] { return hit }
+        let t = PhotoBrowser.thumbnail(for: url)
+        if let t { thumbnails[url] = t }
+        return t
+    }
+
+    /// Capture the current photo's state before leaving it.
+    private func stashCurrentSession() {
+        guard let url = imageURL, let full = fullResCI, let proxy = proxyCI else { return }
+        let session = PhotoSession(
+            url: url, imageId: imageId, fullResCI: full, proxyCI: proxy,
+            originalPreviewImage: originalPreviewImage, perception: perception,
+            candidates: candidates, proxyMaskBitmaps: proxyMaskBitmaps,
+            subjectLuma: subjectLuma, skyLuma: skyLuma,
+            healSpots: healSpots, detectedSpotCount: detectedSpotCount,
+            selectedCandidateId: selectedCandidateId, edit: edit, editBaseline: editBaseline,
+            baseMasks: baseMasks, maskEnabled: maskEnabled, maskStrength: maskStrength,
+            userMasks: userMasks, straighten: straighten, hsl: hsl, removeDust: removeDust)
+        sessions[url] = session
+        sessionOrder.removeAll { $0 == url }
+        sessionOrder.append(url)
+        if session.isEdited { editedURLs.insert(url) } else { editedURLs.remove(url) }
+        while sessionOrder.count > Self.maxSessions, let oldest = sessionOrder.first {
+            sessions.removeValue(forKey: oldest); sessionOrder.removeFirst()
+        }
+    }
+
+    /// Put a previously-edited photo back exactly as it was.
+    private func restore(_ s: PhotoSession) {
+        imageURL = s.url; imageId = s.imageId
+        fullResCI = s.fullResCI; proxyCI = s.proxyCI
+        originalPreviewImage = s.originalPreviewImage
+        perception = s.perception; candidates = s.candidates
+        proxyMaskBitmaps = s.proxyMaskBitmaps
+        subjectLuma = s.subjectLuma; skyLuma = s.skyLuma
+        healSpots = s.healSpots; detectedSpotCount = s.detectedSpotCount
+        selectedCandidateId = s.selectedCandidateId
+        edit = s.edit; editBaseline = s.editBaseline
+        baseMasks = s.baseMasks; maskEnabled = s.maskEnabled; maskStrength = s.maskStrength
+        userMasks = s.userMasks; straighten = s.straighten; hsl = s.hsl; removeDust = s.removeDust
+        brushCache = [:]; selectedUserMaskId = nil; paintingMaskId = nil
+        zoom = 1; pan = .zero; showingOriginal = false
+        updateActiveRecipe()
+        resetHistory()
+        statusMessage = "\(s.url.lastPathComponent) · picking up where you left off"
+        isProcessing = false
+    }
+
+    /// Switch photos from the filmstrip: stash what you were doing, then restore or load fresh.
+    func openPhoto(_ url: URL) async {
+        guard url != imageURL else { return }
+        stashCurrentSession()
+        if let cached = sessions[url] {
+            restore(cached)
+            sessionOrder.removeAll { $0 == url }; sessionOrder.append(url)
+            return
+        }
+        await loadPhoto(from: url)
+    }
+
     func loadPhoto(from url: URL) async {
         isProcessing = true
         statusMessage = "Decoding…"
+        // Keep whatever you were working on before this photo takes over.
+        if imageURL != nil, imageURL != url { stashCurrentSession() }
         imageURL = url
+        folderPhotos = PhotoBrowser.siblings(of: url)
         userMasks = []; paintingMaskId = nil; selectedUserMaskId = nil   // hand-drawn masks are per-photo
         zoom = 1; pan = .zero
         do {
@@ -380,6 +457,12 @@ final class AppState: ObservableObject {
             }
             self.committed = self.snapshot()
             self.refreshUndoState()
+            // Keep the filmstrip's "edited" dot honest as you work, not just on switch.
+            if let url = self.imageURL {
+                let touched = self.edit != self.editBaseline || !self.userMasks.isEmpty
+                    || self.straighten != 0 || !self.hsl.isEmpty || self.removeDust
+                if touched { self.editedURLs.insert(url) } else { self.editedURLs.remove(url) }
+            }
         }
     }
     private func refreshUndoState() { canUndo = !undoStack.isEmpty; canRedo = !redoStack.isEmpty }
@@ -1003,6 +1086,13 @@ struct ContentView: View {
                     .onTapGesture(count: 2) { appState.resetZoom(); zoomStart = 1 }
                 }
                 previewFooter
+                if appState.folderPhotos.count > 1 {
+                    FilmstripView(photos: appState.folderPhotos,
+                                  current: appState.imageURL,
+                                  editedURLs: appState.editedURLs,
+                                  thumbnail: appState.thumbnail(for:),
+                                  onSelect: { url in Task { await appState.openPhoto(url) } })
+                }
             }
             .frame(minWidth: 460)
             .background(Theme.base)
