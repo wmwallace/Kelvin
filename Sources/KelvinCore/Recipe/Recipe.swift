@@ -283,7 +283,8 @@ public struct Mask: Codable, Equatable, Sendable {
     }
 }
 
-/// Sharpen / noise reduction. 0…100 each. Not applied by the M1 renderer.
+/// Sharpen / noise reduction. 0…100 each. Applied by the renderer as a finishing pass
+/// (noise reduction then output sharpening); all-zero is a no-op.
 public struct Detail: Codable, Equatable, Sendable {
     public var sharpen: Double
     public var nrLuma: Double

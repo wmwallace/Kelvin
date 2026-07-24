@@ -148,6 +148,32 @@ public enum Renderer {
             img = applyMaskedAdjustments(img, mask: mask, maskBitmap: bitmap)
         }
 
+        // Detail: noise reduction, then output sharpening — a finishing pass, applied last so the
+        // amounts read the same on a proxy and a full-res export (radius scales with the image).
+        // An absent or all-zero `detail` does nothing, preserving the neutral no-op invariant.
+        if let d = recipe.detail {
+            let extent = img.extent
+            if d.nrLuma > 0 || d.nrColor > 0 {
+                // CINoiseReduction smooths luma + chroma speckle. Map the stronger request to a
+                // gentle noise level; keep sharpness up so edges survive the denoise.
+                img = img.applyingFilter("CINoiseReduction", parameters: [
+                    "inputNoiseLevel": max(d.nrLuma, d.nrColor) / 100.0 * 0.04,
+                    "inputSharpness": 0.4
+                ])
+                // Heavy colour-noise requests get an extra chroma median pass to kill the colour
+                // blotches CINoiseReduction leaves; gated high so gentle amounts stay untouched.
+                if d.nrColor >= 40 { img = img.applyingFilter("CIMedianFilter") }
+            }
+            if d.sharpen > 0 {
+                img = img.applyingFilter("CISharpenLuminance", parameters: [
+                    "inputSharpness": d.sharpen / 100.0 * 0.7,
+                    "inputRadius": clarityRadius(for: img) * 0.5
+                ])
+            }
+            // These filters can bleed the extent; keep the frame exactly the size it came in.
+            if !extent.isInfinite { img = img.cropped(to: extent) }
+        }
+
         return img
     }
 

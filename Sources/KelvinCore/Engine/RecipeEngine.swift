@@ -41,7 +41,7 @@ public enum RecipeEngine {
         g.exposureEV = exposure(p, s)
         g.highlights = highlightRecovery(p, s)
         g.shadows = shadowLift(p, s)
-        g.dehaze = dehazeAmount(p, s)
+        g.dehaze = dehazeAmount(p, s, skyLuma: skyLuma)
 
         let wb = whiteBalance(p, s)
         g.temperatureK = wb.temperatureK
@@ -229,7 +229,16 @@ public enum RecipeEngine {
 
     /// Dehaze amount from measured veiling. Fog/haze lifts the black point (nothing is truly
     /// dark) — the clearest cue — and flattens contrast. Corrective and shared across styles.
-    static func dehazeAmount(_ p: Perception, _ s: ImageStatistics) -> Double {
+    ///
+    /// Crucially, this is the *global* fallback. When a distinct sky is detected (`skyLuma` set)
+    /// the veil is handled locally by the sky mask, which defogs the sky without crushing the
+    /// foreground — so global dehaze stands down. Pulling the black point down globally on a frame
+    /// that already holds real darks (trees, rock) just silhouettes them. Global dehaze therefore
+    /// fires only for skyless whole-frame haze (fog in a forest, aerial haze with no clear sky).
+    static func dehazeAmount(_ p: Perception, _ s: ImageStatistics, skyLuma: Double? = nil) -> Double {
+        // A defined bright sky means the sky mask owns the defog — don't double-apply globally.
+        if let sky = skyLuma, sky > 0.5 { return 0 }
+
         let flagged = p.problems.contains(.haze)
         let outdoor = p.scene == .landscape || p.scene == .street || p.scene == .other
         // Real haze is BRIGHT and veiled: the black point is high AND the frame isn't dark
@@ -382,14 +391,33 @@ public enum RecipeEngine {
         p.intent == .archival ? -4 : 0
     }
 
-    // MARK: - Detail (noise reduction hint; not yet rendered)
+    // MARK: - Detail (noise reduction + output sharpening)
 
-    /// The `noise` problem records a denoise intent. The M1 renderer does not apply detail,
-    /// so this round-trips only; magnitude is a fixed conservative hint, not a measurement,
-    /// because we have no per-image noise estimate yet. Kept small and honest.
+    /// Noise reduction and a little output sharpening — the finishing pass the renderer applies.
+    ///
+    /// NR is driven by the `noise` flag (and lifted for scenes prone to high ISO: night and
+    /// indoor). We have no per-image noise estimate yet, so the amount is a conservative hint,
+    /// not a measurement — kept small and honest.
+    ///
+    /// Output sharpening is scene-appropriate: detail scenes (landscape, macro) want a touch of
+    /// crispness; a portrait wants **none** — crunchy skin is the tell of an amateur edit, and
+    /// over-sharpening reads worse on some skin than others, so we simply don't do it to faces.
     static func detail(_ p: Perception) -> Detail? {
-        guard p.problems.contains(.noise) else { return nil }
-        return Detail(sharpen: 0, nrLuma: 25, nrColor: 25)
+        let noisy = p.problems.contains(.noise)
+        let highISOProne = p.scene == .night || p.scene == .interior || p.lighting.condition == .nightAmbient
+        let nr: Double = noisy ? 30 : (highISOProne ? 15 : 0)
+
+        let sharpen: Double
+        switch p.scene {
+        case .macro:              sharpen = 20
+        case .landscape, .street: sharpen = 14
+        case .portrait:           sharpen = 0     // protect skin — never sharpen a face by default
+        case .event:              sharpen = p.subject.type == .person ? 0 : 10
+        default:                  sharpen = 8
+        }
+
+        guard nr > 0 || sharpen > 0 else { return nil }
+        return Detail(sharpen: sharpen, nrLuma: nr, nrColor: nr)
     }
 
     // MARK: - Helpers
