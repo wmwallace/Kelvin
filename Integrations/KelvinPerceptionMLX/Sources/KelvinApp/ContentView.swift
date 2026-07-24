@@ -2,6 +2,7 @@ import SwiftUI
 import CoreImage
 import CryptoKit
 import UniformTypeIdentifiers
+import Metal
 import KelvinCore
 import KelvinPerceptionMLX
 
@@ -150,7 +151,18 @@ final class AppState: ObservableObject {
     @Published var showBatchSheet = false
 
     private let store: PreferenceStore
-    private let context = CIContext()
+    /// GPU-backed Core Image context — the "accelerator". A Metal device + cached intermediates and
+    /// fast downsampling make live slider previews render on the GPU instead of the CPU.
+    private let context: CIContext = {
+        let opts: [CIContextOption: Any] = [.cacheIntermediates: true, .highQualityDownsample: false]
+        if let device = MTLCreateSystemDefaultDevice() {
+            return CIContext(mtlDevice: device, options: opts)
+        }
+        return CIContext(options: opts)
+    }()
+    /// Zoom (1 = fit) and pan (view points) for inspecting the photo.
+    @Published var zoom = 1.0
+    @Published var pan = CGSize.zero
     // The real on-device VLM. An actor, so the model loads once and is reused across photos.
     private let perceptionProvider = MLXPerceptionProvider()
 
@@ -182,6 +194,7 @@ final class AppState: ObservableObject {
         statusMessage = "Decoding…"
         imageURL = url
         userMasks = []; paintingMaskId = nil; selectedUserMaskId = nil   // hand-drawn masks are per-photo
+        zoom = 1; pan = .zero
         do {
             let fullRes = try ImageDecoder.decode(url: url)
             self.fullResCI = fullRes
@@ -191,18 +204,21 @@ final class AppState: ObservableObject {
             self.imageId = "sha256:" + hash.compactMap { String(format: "%02x", $0) }.joined()
 
             statusMessage = "Building proxy…"
-            let proxy = PerceptionProxy.downsample(fullRes)
+            // The model wants a small 768px proxy (non-negotiable #4); the EDIT proxy is larger so
+            // zooming in shows real detail, and the masks (built from it) stay aligned.
+            let perceptionProxy = PerceptionProxy.downsample(fullRes)
+            let proxy = PerceptionProxy.downsample(fullRes, maxEdge: 1600)
             self.proxyCI = proxy
             // The untouched original, for the before/after compare.
             self.originalPreviewImage = ciToNSImage(proxy)
 
             statusMessage = "Reading the scene…"
-            // Real perception: Qwen2.5-VL reads the proxy. First call loads the model (a few
+            // Real perception: Qwen2.5-VL reads the 768px proxy. First call loads the model (a few
             // seconds once cached); if it can't run, fall back to a conservative read so the
             // app still produces candidates from the measured statistics.
             let perceptionRead: Perception
             do {
-                perceptionRead = try await perceptionProvider.perceive(proxy)
+                perceptionRead = try await perceptionProvider.perceive(perceptionProxy)
             } catch {
                 perceptionRead = Self.conservativeRead
                 statusMessage = "Model unavailable — conservative read"
@@ -381,15 +397,22 @@ final class AppState: ObservableObject {
 
     // MARK: Canvas coordinate mapping (view ⇄ normalised image space)
 
-    /// The rectangle the image actually occupies inside the padded preview area (aspect-fit).
+    /// The rectangle the image actually occupies inside the padded preview area, accounting for
+    /// the current zoom + pan — so on-canvas masks and brush strokes stay aligned when zoomed.
     func imageRect(in container: CGSize, pad: CGFloat = 24) -> CGRect {
         let availW = container.width - 2 * pad, availH = container.height - 2 * pad
         guard let proxy = proxyCI, availW > 0, availH > 0 else { return .zero }
         let aspect = proxy.extent.width / proxy.extent.height
         var w = availW, h = availH
         if aspect > availW / availH { h = availW / aspect } else { w = availH * aspect }
-        return CGRect(x: pad + (availW - w) / 2, y: pad + (availH - h) / 2, width: w, height: h)
+        w *= zoom; h *= zoom
+        let cx = container.width / 2 + pan.width
+        let cy = container.height / 2 + pan.height
+        return CGRect(x: cx - w / 2, y: cy - h / 2, width: w, height: h)
     }
+
+    func resetZoom() { zoom = 1; pan = .zero }
+    func setZoom(_ z: Double) { zoom = min(8, max(1, z)); if zoom == 1 { pan = .zero } }
     func normToView(_ nx: Double, _ ny: Double, in rect: CGRect) -> CGPoint {
         CGPoint(x: rect.minX + nx * rect.width, y: rect.minY + ny * rect.height)
     }
@@ -695,6 +718,8 @@ struct TemperatureRail: View {
 struct ContentView: View {
     @StateObject private var appState = AppState()
     @State private var isTargeted = false
+    @State private var panStart = CGSize.zero
+    @State private var zoomStart = 1.0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -824,19 +849,35 @@ struct ContentView: View {
                                 .resizable().scaledToFit()
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                                 .padding(24)
-                                .overlay(alignment: .topLeading) {
-                                    if appState.showingOriginal { beforeBadge }
-                                    else if appState.paintingMaskId != nil { paintingBadge }
-                                }
+                                .scaleEffect(appState.zoom, anchor: .center)
+                                .offset(appState.pan)
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+                    .overlay(alignment: .topLeading) {
+                        if appState.showingOriginal { beforeBadge }
+                        else if appState.paintingMaskId != nil { paintingBadge }
+                    }
                     .contentShape(Rectangle())
-                    // Drag paints into the active brush mask (no-op unless one is armed).
+                    // One drag does the right thing: paint (brush armed), else pan (zoomed in).
                     .gesture(DragGesture(minimumDistance: 0)
-                        .onChanged { appState.paintAt($0.location, container: geo.size) })
+                        .onChanged { v in
+                            if appState.paintingMaskId != nil { appState.paintAt(v.location, container: geo.size) }
+                            else if appState.zoom > 1.01 {
+                                appState.pan = CGSize(width: panStart.width + v.translation.width,
+                                                      height: panStart.height + v.translation.height)
+                            }
+                        }
+                        .onEnded { _ in panStart = appState.pan })
+                    // Pinch to zoom (trackpad).
+                    .simultaneousGesture(MagnificationGesture()
+                        .onChanged { appState.setZoom(zoomStart * $0) }
+                        .onEnded { _ in zoomStart = appState.zoom })
                     // Draggable handles for the selected radial / graduated mask.
                     .overlay { maskCanvasOverlay(in: geo.size) }
+                    // Double-click to fit.
+                    .onTapGesture(count: 2) { appState.resetZoom(); zoomStart = 1 }
                 }
                 previewFooter
             }
@@ -916,6 +957,22 @@ struct ContentView: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(appState.selectedCandidateId?.capitalized ?? "—")
                     .font(Theme.ui(16, .semibold)).foregroundColor(Theme.ink)
+                Spacer()
+                // Zoom control (pinch or double-click also work).
+                HStack(spacing: 6) {
+                    Button(action: { appState.setZoom(appState.zoom - 0.5); zoomStart = appState.zoom }) {
+                        Image(systemName: "minus.magnifyingglass").foregroundColor(Theme.inkDim)
+                    }.buttonStyle(.plain)
+                    Text("\(Int(appState.zoom * 100))%").font(Theme.mono(10)).foregroundColor(Theme.inkDim).frame(width: 40)
+                    Button(action: { appState.setZoom(appState.zoom + 0.5); zoomStart = appState.zoom }) {
+                        Image(systemName: "plus.magnifyingglass").foregroundColor(Theme.inkDim)
+                    }.buttonStyle(.plain)
+                    if appState.zoom > 1.01 {
+                        Button(action: { appState.resetZoom(); zoomStart = 1 }) {
+                            Text("Fit").font(Theme.ui(10, .semibold)).foregroundColor(Theme.glow)
+                        }.buttonStyle(.plain)
+                    }
+                }
                 Spacer()
                 Text(temp.map { "\(Int($0)) K" } ?? "as-shot")
                     .font(Theme.mono(12))
