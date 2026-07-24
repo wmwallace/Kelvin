@@ -94,6 +94,16 @@ public enum Renderer {
             ])
         }
 
+        // Per-colour HSL (after the curve, per the schema's curve → HSL order). Baked into a
+        // colour-cube LUT; an empty or all-neutral `hsl` produces no cube, so nothing applies.
+        if let hsl = recipe.hsl, let cubeData = HSLCube.makeData(from: hsl) {
+            img = img.applyingFilter("CIColorCubeWithColorSpace", parameters: [
+                "inputCubeDimension": HSLCube.dimension,
+                "inputCubeData": cubeData,
+                "inputColorSpace": ImageWriter.outputColorSpace
+            ])
+        }
+
         return img
     }
 
