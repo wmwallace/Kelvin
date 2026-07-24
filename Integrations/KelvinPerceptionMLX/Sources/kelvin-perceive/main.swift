@@ -106,13 +106,27 @@ if first == "label" {
             generatedAt: ISO8601DateFormatter().string(from: Date())
         )
 
-        print("\n── candidates (engine output — deterministic numbers) ──")
+        print("\n── candidates (engine output — deterministic numbers, aesthetic score) ──")
+        var scored: [(recipe: Recipe, score: Double)] = []
         for recipe in candidates {
             let g = recipe.global
             let label = (recipe.label ?? "?").padding(toLength: 9, withPad: " ", startingAt: 0)
             let wb = g.temperatureK.map { String(format: "%.0fK", $0) } ?? "as-shot"
-            print("  \(label)  " + String(format: "exp %+.2f  contrast %+3.0f  vibrance %+3.0f  wb %@",
-                                          g.exposureEV, g.contrast, g.vibrance, wb as NSString))
+            // Score the *rendered* candidate against the craft floors (tonal range, clipping,
+            // skin plausibility, cast) — objective quality, not taste.
+            let rendered = Renderer.render(image, with: recipe, maskBitmaps: maskBitmaps)
+            let aesthetic = AestheticEvaluator.score(rendered: rendered)
+            scored.append((recipe, aesthetic?.overall ?? 0))
+            let scoreStr = aesthetic.map { String(format: "%.2f", $0.overall) } ?? "  – "
+            let flags = aesthetic?.notes.isEmpty == false ? "  ⚠ " + (aesthetic!.notes.joined(separator: "; ")) : ""
+            print("  \(label)  " + String(format: "exp %+.2f  contrast %+3.0f  vibrance %+3.0f  wb %-7@  score %@",
+                                          g.exposureEV, g.contrast, g.vibrance, wb as NSString, scoreStr as NSString) + flags)
+        }
+        if let cleanest = scored.max(by: { $0.score < $1.score }) {
+            // "Cleanest" = fewest craft defects, NOT "best look" (that's the user's taste). The
+            // score is a guardrail: it flags clipping / bad skin / casts, it doesn't pick a mood.
+            print("  → cleanest (fewest craft defects): \(cleanest.recipe.label ?? "?") "
+                  + "(\(String(format: "%.2f", cleanest.score)))")
         }
 
         if args.count >= 2 {
