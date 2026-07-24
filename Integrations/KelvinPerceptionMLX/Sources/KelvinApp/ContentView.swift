@@ -163,7 +163,7 @@ final class AppState: ObservableObject {
         isProcessing = true
         statusMessage = "Decoding…"
         imageURL = url
-        userMasks = []          // hand-drawn masks are per-photo
+        userMasks = []; paintingMaskId = nil     // hand-drawn masks are per-photo
         do {
             let fullRes = try ImageDecoder.decode(url: url)
             self.fullResCI = fullRes
@@ -262,15 +262,55 @@ final class AppState: ObservableObject {
 
     func onEdit() { updateActiveRecipe() }
 
+    /// Which brush mask is currently being painted (drag on the preview paints into it), and the
+    /// brush size (fraction of the smaller edge).
+    @Published var paintingMaskId: UUID?
+    @Published var brushRadius = 0.09
+
     /// Add a hand-drawn gradient mask, centred, with a gentle starting darken so the user sees it.
-    func addUserMask(_ kind: MaskShape.Kind) {
+    func addUserMask(_ kind: UserMaskVM.Kind) {
         var m = UserMaskVM(kind: kind)
         m.exposure = -0.6
         userMasks.append(m)
+        if kind == .brush { paintingMaskId = m.id }   // brush: start painting right away
         onEdit()
     }
 
-    func removeUserMask(_ id: UUID) { userMasks.removeAll { $0.id == id }; onEdit() }
+    func removeUserMask(_ id: UUID) {
+        userMasks.removeAll { $0.id == id }
+        if paintingMaskId == id { paintingMaskId = nil }
+        onEdit()
+    }
+
+    func clearStrokes(_ id: UUID) {
+        guard let i = userMasks.firstIndex(where: { $0.id == id }) else { return }
+        userMasks[i].stamps = []; onEdit()
+    }
+
+    /// Paint a brush dab at a point in the preview area. `loc` is in the preview view's coordinate
+    /// space (which is padded by `pad`); we back out the aspect-fit letterboxing to get normalised
+    /// image coordinates, then drop a stamp. Throttled by distance so a stroke isn't thousands of
+    /// stamps.
+    func paintAt(_ loc: CGPoint, container: CGSize, pad: CGFloat = 24) {
+        guard let pid = paintingMaskId,
+              let idx = userMasks.firstIndex(where: { $0.id == pid }),
+              let proxy = proxyCI else { return }
+        let availW = container.width - 2 * pad, availH = container.height - 2 * pad
+        guard availW > 0, availH > 0 else { return }
+        let imgAspect = proxy.extent.width / proxy.extent.height
+        var dispW = availW, dispH = availH
+        if imgAspect > availW / availH { dispH = availW / imgAspect } else { dispW = availH * imgAspect }
+        let ox = pad + (availW - dispW) / 2, oy = pad + (availH - dispH) / 2
+        let nx = (loc.x - ox) / dispW, ny = (loc.y - oy) / dispH
+        guard nx >= 0, nx <= 1, ny >= 0, ny <= 1 else { return }
+        // Throttle: skip if the last stamp is closer than ~⅓ of the brush radius.
+        if let last = userMasks[idx].stamps.last {
+            let dx = last.x - nx, dy = last.y - ny
+            if (dx * dx + dy * dy).squareRoot() < brushRadius * 0.33 { return }
+        }
+        userMasks[idx].stamps.append(BrushStamp(x: nx, y: ny, radius: brushRadius, hardness: 0.6))
+        onEdit()
+    }
 
     /// The masks to render: the candidate's masks (minus any switched off, scaled to strength),
     /// plus the user's hand-drawn gradient masks.
@@ -600,21 +640,24 @@ struct ContentView: View {
         HSplitView {
             // Preview + the active look's white balance on the rail
             VStack(spacing: 0) {
-                if let img = (appState.showingOriginal ? appState.originalPreviewImage : appState.activePreviewImage) ?? appState.activePreviewImage {
-                    Image(nsImage: img)
-                        .resizable().scaledToFit()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .padding(24)
-                        .overlay(alignment: .topLeading) {
-                            if appState.showingOriginal {
-                                Text("BEFORE")
-                                    .font(Theme.mono(11, .semibold)).tracking(2)
-                                    .foregroundColor(Theme.base)
-                                    .padding(.horizontal, 10).padding(.vertical, 5)
-                                    .background(Capsule().fill(Theme.ink.opacity(0.75)))
-                                    .padding(30)
-                            }
+                GeometryReader { geo in
+                    ZStack {
+                        if let img = (appState.showingOriginal ? appState.originalPreviewImage : appState.activePreviewImage) ?? appState.activePreviewImage {
+                            Image(nsImage: img)
+                                .resizable().scaledToFit()
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .padding(24)
+                                .overlay(alignment: .topLeading) {
+                                    if appState.showingOriginal { beforeBadge }
+                                    else if appState.paintingMaskId != nil { paintingBadge }
+                                }
                         }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    // Drag paints into the active brush mask (no-op unless one is armed).
+                    .gesture(DragGesture(minimumDistance: 0)
+                        .onChanged { appState.paintAt($0.location, container: geo.size) })
                 }
                 previewFooter
             }
@@ -625,6 +668,20 @@ struct ContentView: View {
                 .frame(width: 360)
                 .background(Theme.surface)
         }
+    }
+
+    private var beforeBadge: some View {
+        Text("BEFORE")
+            .font(Theme.mono(11, .semibold)).tracking(2).foregroundColor(Theme.base)
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(Capsule().fill(Theme.ink.opacity(0.75))).padding(30)
+    }
+
+    private var paintingBadge: some View {
+        Text("PAINTING · drag to brush")
+            .font(Theme.mono(11, .semibold)).tracking(1).foregroundColor(Theme.base)
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(Capsule().fill(Theme.glow.opacity(0.9))).padding(30)
     }
 
     private var previewFooter: some View {
@@ -746,15 +803,23 @@ struct ContentView: View {
                                               set: { appState.maskStrength[mid] = $0 }),
                             onChange: appState.onEdit)
                     }
-                    // Hand-drawn gradient masks: full geometry + local adjustments.
+                    // Hand-drawn masks: gradient geometry or brush strokes + local adjustments.
                     ForEach($appState.userMasks) { $m in
-                        UserMaskEditor(mask: $m, onChange: appState.onEdit,
-                                       onDelete: { appState.removeUserMask(m.id) })
+                        UserMaskEditor(
+                            mask: $m, onChange: appState.onEdit,
+                            onDelete: { appState.removeUserMask(m.id) },
+                            isPainting: appState.paintingMaskId == m.id,
+                            togglePaint: { appState.paintingMaskId = (appState.paintingMaskId == m.id) ? nil : m.id },
+                            clearStrokes: { appState.clearStrokes(m.id) },
+                            brushRadius: Binding(get: { appState.brushRadius },
+                                                 set: { appState.brushRadius = $0 }))
                     }
                     HStack(spacing: 8) {
                         Button(action: { appState.addUserMask(.radial) }) { addMaskLabel("+ Radial") }
                             .buttonStyle(.plain)
-                        Button(action: { appState.addUserMask(.linear) }) { addMaskLabel("+ Graduated") }
+                        Button(action: { appState.addUserMask(.linear) }) { addMaskLabel("+ Grad") }
+                            .buttonStyle(.plain)
+                        Button(action: { appState.addUserMask(.brush) }) { addMaskLabel("+ Brush") }
                             .buttonStyle(.plain)
                     }
                 }
@@ -932,23 +997,33 @@ struct ToneSlider: View {
 
 // MARK: - Hand-drawn gradient mask (view-model + editor)
 
-/// A hand-added parametric gradient mask, all plain values so SwiftUI binds to it directly.
-/// Converts to the engine's `Mask` (with a `MaskShape`) at render time.
+/// A hand-added parametric mask — a radial/linear gradient or a brushed region — all plain values
+/// so SwiftUI binds to it directly. Converts to the engine's `Mask` at render time.
 struct UserMaskVM: Identifiable {
+    enum Kind { case radial, linear, brush }
     let id = UUID()
-    var kind: MaskShape.Kind
+    var kind: Kind
     var cx = 0.5, cy = 0.5, radius = 0.35, angle = 0.0, softness = 0.35
+    var stamps: [BrushStamp] = []          // brush only
     var exposure = 0.0, contrast = 0.0, saturation = 0.0
+
+    var label: String { kind == .radial ? "Radial" : kind == .linear ? "Graduated" : "Brush" }
 
     func toMask() -> Mask {
         var adj: [String: Double] = [:]
         if exposure != 0 { adj["exposure_ev"] = exposure }
         if contrast != 0 { adj["contrast"] = contrast }
         if saturation != 0 { adj["saturation"] = saturation }
-        return Mask(id: id.uuidString, type: kind.rawValue, source: "gradient", invert: false,
-                    feather: 0, opacity: 1, adjustments: adj,
-                    shape: MaskShape(kind: kind, cx: cx, cy: cy, radius: radius,
-                                     angle: angle, softness: softness))
+        switch kind {
+        case .brush:
+            return Mask(id: id.uuidString, type: "brush", source: "brush", invert: false,
+                        feather: 0, opacity: 1, adjustments: adj, stamps: stamps)
+        case .radial, .linear:
+            let sk: MaskShape.Kind = kind == .radial ? .radial : .linear
+            return Mask(id: id.uuidString, type: sk.rawValue, source: "gradient", invert: false,
+                        feather: 0, opacity: 1, adjustments: adj,
+                        shape: MaskShape(kind: sk, cx: cx, cy: cy, radius: radius, angle: angle, softness: softness))
+        }
     }
 }
 
@@ -956,25 +1031,52 @@ struct UserMaskEditor: View {
     @Binding var mask: UserMaskVM
     let onChange: () -> Void
     let onDelete: () -> Void
+    var isPainting = false
+    var togglePaint: () -> Void = {}
+    var clearStrokes: () -> Void = {}
+    var brushRadius: Binding<Double> = .constant(0.09)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text(mask.kind == .radial ? "Radial" : "Graduated")
-                    .font(Theme.ui(12, .semibold)).foregroundColor(Theme.ink)
+                Text(mask.label).font(Theme.ui(12, .semibold)).foregroundColor(Theme.ink)
                 Spacer()
                 Button(action: onDelete) {
                     Image(systemName: "trash").font(.system(size: 11)).foregroundColor(Theme.inkDim)
                 }.buttonStyle(.plain)
             }
-            ToneSlider(label: "Center X", value: $mask.cx, range: 0...1, step: 0.01, unit: "", onChange: onChange)
-            ToneSlider(label: "Center Y", value: $mask.cy, range: 0...1, step: 0.01, unit: "", onChange: onChange)
-            if mask.kind == .radial {
+
+            switch mask.kind {
+            case .brush:
+                HStack(spacing: 8) {
+                    Button(action: togglePaint) {
+                        Text(isPainting ? "Painting…" : "Paint")
+                            .font(Theme.ui(11, .semibold)).foregroundColor(isPainting ? Theme.base : Theme.ink)
+                            .frame(maxWidth: .infinity).padding(.vertical, 7)
+                            .background(RoundedRectangle(cornerRadius: 7)
+                                .fill(isPainting ? Theme.glow : Theme.surface2)
+                                .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.hairline, lineWidth: 1)))
+                    }.buttonStyle(.plain)
+                    Button(action: clearStrokes) {
+                        Text("Clear").font(Theme.ui(11, .semibold)).foregroundColor(Theme.inkDim)
+                            .frame(maxWidth: .infinity).padding(.vertical, 7)
+                            .background(RoundedRectangle(cornerRadius: 7).fill(Theme.surface2)
+                                .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.hairline, lineWidth: 1)))
+                    }.buttonStyle(.plain)
+                }
+                ToneSlider(label: "Brush size", value: brushRadius, range: 0.02...0.35, step: 0.01, unit: "", onChange: {})
+            case .radial:
+                ToneSlider(label: "Center X", value: $mask.cx, range: 0...1, step: 0.01, unit: "", onChange: onChange)
+                ToneSlider(label: "Center Y", value: $mask.cy, range: 0...1, step: 0.01, unit: "", onChange: onChange)
                 ToneSlider(label: "Size", value: $mask.radius, range: 0.05...1.2, step: 0.01, unit: "", onChange: onChange)
-            } else {
+                ToneSlider(label: "Softness", value: $mask.softness, range: 0...1, step: 0.01, unit: "", onChange: onChange)
+            case .linear:
+                ToneSlider(label: "Center X", value: $mask.cx, range: 0...1, step: 0.01, unit: "", onChange: onChange)
+                ToneSlider(label: "Center Y", value: $mask.cy, range: 0...1, step: 0.01, unit: "", onChange: onChange)
                 ToneSlider(label: "Angle", value: $mask.angle, range: 0...360, step: 1, unit: "°", onChange: onChange)
+                ToneSlider(label: "Softness", value: $mask.softness, range: 0...1, step: 0.01, unit: "", onChange: onChange)
             }
-            ToneSlider(label: "Softness", value: $mask.softness, range: 0...1, step: 0.01, unit: "", onChange: onChange)
+
             Rectangle().fill(Theme.hairline).frame(height: 1)
             ToneSlider(label: "Exposure", value: $mask.exposure, range: -3...3, step: 0.05, unit: " EV", onChange: onChange)
             ToneSlider(label: "Contrast", value: $mask.contrast, range: -100...100, step: 1, unit: "", onChange: onChange)
@@ -983,7 +1085,8 @@ struct UserMaskEditor: View {
         .padding(11)
         .background(
             RoundedRectangle(cornerRadius: 8).fill(Theme.surface.opacity(0.6))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.glow.opacity(0.4), lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 8)
+                    .stroke(isPainting ? Theme.glow : Theme.glow.opacity(0.4), lineWidth: isPainting ? 1.5 : 1))
         )
     }
 }

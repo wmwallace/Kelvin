@@ -262,13 +262,18 @@ public struct Mask: Codable, Equatable, Sendable {
     /// the renderer generates the mask from it — no bitmap needed, so it serialises as pure numbers
     /// (non-negotiable #3). Segmentation masks (subject/sky) leave this nil and supply a bitmap.
     public var shape: MaskShape?
+    /// A brush mask: the union of soft circular stamps laid down along the user's strokes. Still
+    /// pure numbers (like HealSpot) — the renderer composites the stamps into the mask.
+    public var stamps: [BrushStamp]?
 
     public init(
         id: String, type: String, source: String?, invert: Bool,
-        feather: Double, opacity: Double, adjustments: [String: Double], shape: MaskShape? = nil
+        feather: Double, opacity: Double, adjustments: [String: Double],
+        shape: MaskShape? = nil, stamps: [BrushStamp]? = nil
     ) {
         self.id = id; self.type = type; self.source = source; self.invert = invert
-        self.feather = feather; self.opacity = opacity; self.adjustments = adjustments; self.shape = shape
+        self.feather = feather; self.opacity = opacity; self.adjustments = adjustments
+        self.shape = shape; self.stamps = stamps
     }
 
     public init(from decoder: Decoder) throws {
@@ -281,11 +286,36 @@ public struct Mask: Codable, Equatable, Sendable {
         opacity = try c.clampedDouble(.opacity, default: 1, in: Ranges.opacity)
         adjustments = try c.decodeIfPresent([String: Double].self, forKey: .adjustments) ?? [:]
         shape = try c.decodeIfPresent(MaskShape.self, forKey: .shape)
+        stamps = try c.decodeIfPresent([BrushStamp].self, forKey: .stamps)
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, type, source, invert, feather, opacity, adjustments, shape
+        case id, type, source, invert, feather, opacity, adjustments, shape, stamps
     }
+}
+
+/// One dab of the brush: a soft circle, normalised top-left origin. `radius` is a fraction of the
+/// smaller image edge; `hardness` (0…1) sets how sharp the edge is. A stroke is many overlapping
+/// stamps — still just numbers, so a brush mask serialises like everything else.
+public struct BrushStamp: Codable, Equatable, Sendable {
+    public var x: Double
+    public var y: Double
+    public var radius: Double
+    public var hardness: Double
+
+    public init(x: Double, y: Double, radius: Double, hardness: Double = 0.5) {
+        self.x = x; self.y = y; self.radius = radius; self.hardness = hardness
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        x = clamp(try c.decodeIfPresent(Double.self, forKey: .x) ?? 0.5, to: 0...1)
+        y = clamp(try c.decodeIfPresent(Double.self, forKey: .y) ?? 0.5, to: 0...1)
+        radius = clamp(try c.decodeIfPresent(Double.self, forKey: .radius) ?? 0.08, to: 0.005...1)
+        hardness = clamp(try c.decodeIfPresent(Double.self, forKey: .hardness) ?? 0.5, to: 0...1)
+    }
+
+    enum CodingKeys: String, CodingKey { case x, y, radius, hardness }
 }
 
 /// A parametric mask shape — all coordinates normalised (0…1), top-left origin, matching HealSpot.

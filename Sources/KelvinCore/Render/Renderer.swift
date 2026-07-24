@@ -154,10 +154,16 @@ public enum Renderer {
         // supplied the mask bitmap for that mask.
         for mask in recipe.masks ?? [] {
             guard mask.opacity > 0 else { continue }
-            // Parametric shapes (gradients) generate their own bitmap here; segmentation masks
-            // (subject/sky) use the bitmap the caller supplied.
-            let bitmap: CIImage? = mask.shape.map { gradientMask($0, extent: img.extent) }
-                ?? maskBitmaps[mask.id] ?? maskBitmaps[mask.type]
+            // Parametric masks (brush stamps, gradients) generate their own bitmap here;
+            // segmentation masks (subject/sky) use the bitmap the caller supplied.
+            let bitmap: CIImage?
+            if let stamps = mask.stamps, !stamps.isEmpty {
+                bitmap = brushMask(stamps, extent: img.extent)
+            } else if let shape = mask.shape {
+                bitmap = gradientMask(shape, extent: img.extent)
+            } else {
+                bitmap = maskBitmaps[mask.id] ?? maskBitmaps[mask.type]
+            }
             guard let bitmap else { continue }
             img = applyMaskedAdjustments(img, mask: mask, maskBitmap: bitmap)
         }
@@ -273,6 +279,28 @@ public enum Renderer {
             ])?.outputImage
         }
         return gradient?.cropped(to: extent)
+    }
+
+    /// Composite brush stamps into a grayscale mask — the union of soft circles the user painted.
+    /// Coordinates normalised, top-left origin (y flipped for Core Image).
+    static func brushMask(_ stamps: [BrushStamp], extent: CGRect) -> CIImage? {
+        guard !extent.isInfinite, extent.width > 0, extent.height > 0, !stamps.isEmpty else { return nil }
+        let w = extent.width, h = extent.height, minEdge = min(w, h)
+        let white = CIColor(red: 1, green: 1, blue: 1), black = CIColor(red: 0, green: 0, blue: 0)
+        var acc = CIImage(color: black).cropped(to: extent)
+        for s in stamps {
+            let cx = extent.origin.x + s.x * w
+            let cy = extent.origin.y + (1 - s.y) * h
+            let r1 = max(1.0, s.radius * minEdge)
+            let r0 = max(0.0, r1 * min(0.95, s.hardness))
+            guard let dab = CIFilter(name: "CIRadialGradient", parameters: [
+                "inputCenter": CIVector(x: cx, y: cy), "inputRadius0": r0, "inputRadius1": r1,
+                "inputColor0": white, "inputColor1": black
+            ])?.outputImage?.cropped(to: extent) else { continue }
+            // Lighten (max) unions overlapping dabs into one smooth region.
+            acc = dab.applyingFilter("CILightenBlendMode", parameters: [kCIInputBackgroundImageKey: acc])
+        }
+        return acc.cropped(to: extent)
     }
 
     /// Cover one spot with a clean patch sampled from `(dx,dy)` away, blended through a feathered

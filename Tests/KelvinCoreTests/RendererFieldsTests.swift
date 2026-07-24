@@ -103,6 +103,18 @@ final class RendererFieldsTests: XCTestCase {
         XCTAssertGreaterThan(abs(top - bottom), 10, "a linear gradient mask should treat the two sides differently")
     }
 
+    func testBrushStampsPaintARegion() throws {
+        let source = TestSupport.makeSolidImage(r: 140, g: 140, b: 140, width: 96, height: 96)
+        let mask = Mask(id: "brush", type: "brush", source: "brush", invert: false, feather: 0,
+                        opacity: 1.0, adjustments: ["exposure_ev": -1.6],
+                        stamps: [BrushStamp(x: 0.25, y: 0.25, radius: 0.16, hardness: 0.6)])
+        var r = Recipe.neutral; r.masks = [mask]
+        let out = Renderer.render(source, with: r, maskBitmaps: [:])
+        let painted = try sampledLuma(out, at: 4, 4)      // near (0.25, 0.25)
+        let elsewhere = try sampledLuma(out, at: 13, 13)  // away from the stroke
+        XCTAssertLessThan(painted, elsewhere - 8, "the brushed region should carry the darken")
+    }
+
     func testShapeMaskNeedsNoSuppliedBitmap() throws {
         // The whole point: a parametric mask renders with an EMPTY maskBitmaps dict.
         let mask = Mask(id: "r", type: "r", source: "gradient", invert: false, feather: 0,
