@@ -37,3 +37,14 @@ render: build
 
 clean:
 	rm -rf "$(BUILD_PATH)" .build
+
+# Launch the editor. This is the command to use for a real shoot — it runs the app straight
+# from the build, which is the path that reliably loads the perception model (a hand-assembled
+# .app bundle still trips a launch issue; see docs).
+app:
+	cd Integrations/KelvinPerceptionMLX && $(SWIFT) run kelvin-app
+
+# Same, but opens on a specific photo — handy for jumping back into one frame.
+#   make open PHOTO=~/Pictures/shoot/_DSC0001.ARW
+open:
+	cd Integrations/KelvinPerceptionMLX && KELVIN_DEMO_IMAGE="$(PHOTO)" $(SWIFT) run kelvin-app
