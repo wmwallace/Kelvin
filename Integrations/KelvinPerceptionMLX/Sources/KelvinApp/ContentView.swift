@@ -811,7 +811,23 @@ final class AppState: ObservableObject {
             edit.whites = c(edit.whites + 6, -100...100)
             edit.blacks = c(edit.blacks - 6, -100...100)
         case .colorCast:
-            edit.temperatureK = 5500; edit.tint = 0            // neutralise white balance
+            // Derive the correction from what is actually on screen. This used to be a hardcoded
+            // `temperatureK = 5500`, commented "neutralise white balance" — but the renderer's
+            // neutral is 6500 and LOWER Kelvin is warmer, so it applied a 1000 K warm shift. It
+            // added orange, re-detected the cast it had just made, and offered to fix it again.
+            //
+            // Applied as a DELTA on top of what is already set, not as an absolute. The measured
+            // image is the *rendered* one, so it already carries the current white balance; taking
+            // the neutralising value as an absolute would discard that and over-correct on the
+            // second pass. Adding the remaining correction each time is what converges.
+            if let rendered = lastRenderedCI, let stats = try? ImageStatistics.compute(rendered) {
+                let wb = RecipeEngine.neutralisingWhiteBalance(for: stats)
+                edit.temperatureK = c((edit.temperatureK ?? 6500) + (wb.temperatureK - 6500),
+                                      2500...9500)
+                edit.tint = c(edit.tint + wb.tint, -100...100)
+            } else {
+                edit.temperatureK = 6500; edit.tint = 0        // the renderer's true no-op
+            }
         case .shadowDetailLost:
             // A large part of the picture has gone to featureless black — not merely clipped, but
             // too dark to read. Lift the shadow end and ease the contrast that drove it there;

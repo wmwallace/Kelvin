@@ -553,6 +553,21 @@ public enum RecipeEngine {
         )
     }
 
+    /// The temperature and tint that pull a MEASURED cast back toward neutral, ignoring intent and
+    /// deadbands — "just take the colour out of it", which is what a user asking to fix a cast means.
+    ///
+    /// Exists because the app had this hand-written as `temperatureK = 5500`, commented
+    /// "neutralise white balance". It is not neutral: the renderer's no-op is 6500, and lower
+    /// Kelvin renders WARMER, so the fix button applied a 1000 K warm shift — it *added* orange,
+    /// then re-detected the cast it had just created and offered to fix it again. Deriving it here,
+    /// from the same measurement and the same signs the engine uses, is what keeps the two in step.
+    public static func neutralisingWhiteBalance(
+        for s: ImageStatistics
+    ) -> (temperatureK: Double, tint: Double) {
+        (roundedClamp(6500 + s.chromaB * 70, to: Ranges.temperatureK, step: 10),
+         roundedClamp(s.chromaA * 1.8, to: Ranges.tint, step: 1))
+    }
+
     /// How hard to correct colour, by intent and lighting mood. Literal intents correct
     /// fully; expressive ones preserve the cast because the cast *is* the look. Golden and
     /// blue hour further protect their signature warmth/coolness.
