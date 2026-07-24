@@ -203,6 +203,9 @@ final class AppState: ObservableObject {
     @Published var folderPhotos: [URL] = []
     /// Photos whose edit differs from the candidate Kelvin generated (drives the strip's dot).
     @Published var editedURLs: Set<URL> = []
+    /// Frames dismissed from the strip this session. Held separately because opening any photo
+    /// re-scans the folder — without this, a dismissed frame simply reappeared.
+    private var dismissedURLs: Set<URL> = []
     /// Full editing state per photo, so switching away and back is instant and lossless — no
     /// re-running the model. Bounded, because each entry pins decoded images.
     private var sessions: [URL: PhotoSession] = [:]
@@ -333,6 +336,7 @@ final class AppState: ObservableObject {
     /// Remove a photo from the strip for this session, and forget any edit it had. The file itself
     /// is never touched — this is about clearing the working set, not deleting someone's work.
     func dismiss(_ url: URL) {
+        dismissedURLs.insert(url)      // survives the folder re-scan that happens on every open
         EditStore.remove(for: url)
         editedURLs.remove(url)
         sessions.removeValue(forKey: url)
@@ -365,7 +369,7 @@ final class AppState: ObservableObject {
         // Keep whatever you were working on before this photo takes over.
         if imageURL != nil, imageURL != url { stashCurrentSession() }
         imageURL = url
-        folderPhotos = PhotoBrowser.siblings(of: url)
+        folderPhotos = PhotoBrowser.siblings(of: url).filter { !dismissedURLs.contains($0) || $0 == url }
         // Photos edited in an earlier session already carry a dot.
         editedURLs.formUnion(EditStore.edited(among: folderPhotos))
         capture = CaptureInfoReader.read(url: url)
@@ -385,7 +389,13 @@ final class AppState: ObservableObject {
             // (1200px balances zoom detail against snappy sliders). Masks build from it, so they
             // stay aligned when zoomed.
             let perceptionProxy = PerceptionProxy.downsample(fullRes)
-            let proxy = PerceptionProxy.downsample(fullRes, maxEdge: 1200)
+            // MATERIALISE the edit proxy. `downsample` returns a *lazy* CIImage — a filter graph
+            // over the full-resolution original — so every later measurement (mask coverage,
+            // subject luma, dust scan, histogram) silently re-renders all 60 megapixels again.
+            // Several of those run per photo, and on a large RAW it pushed loading from seconds
+            // into minutes with the window never appearing. Rendering once here means everything
+            // downstream works on real 1200 px pixels.
+            let proxy = materialise(PerceptionProxy.downsample(fullRes, maxEdge: 1200))
             self.proxyCI = proxy
             // The untouched original, for the before/after compare.
             self.originalPreviewImage = ciToNSImage(proxy)
@@ -401,6 +411,7 @@ final class AppState: ObservableObject {
                 perceptionRead = Self.conservativeRead
                 statusMessage = "Model unavailable — conservative read"
             }
+            guard imageURL == url else { return }
             self.perception = perceptionRead
 
             statusMessage = "Measuring…"
@@ -433,16 +444,30 @@ final class AppState: ObservableObject {
             // backlit sunset, Vivid pushes skin past plausible. Showing those beside the good ones
             // makes the photographer do the culling and implies Kelvin rates them equally. It
             // doesn't, and the evaluator already knows which is which.
-            var scored: [CandidateCurator.Scored] = []
-            var previews: [String: NSImage] = [:]
-            for recipe in recipes {
-                let renderedCI = Renderer.render(proxy, with: recipe, maskBitmaps: proxyMasks)
-                guard let nsImage = ciToNSImage(renderedCI),
-                      let score = AestheticEvaluator.score(rendered: renderedCI) else { continue }
-                let key = recipe.id ?? UUID().uuidString
-                previews[key] = nsImage
-                scored.append(.init(recipe: recipe, score: score))
-            }
+            // Rendering eight candidates and scoring each — every score runs Vision face detection
+            // and a full statistics pass — is far too much to do on the main thread: it froze the
+            // window for the whole of it. Hand the batch to a background task and come back with
+            // the results.
+            let built = await Task.detached(priority: .userInitiated) { () -> CandidateBatch in
+                var scored: [CandidateCurator.Scored] = []
+                var previews: [String: NSImage] = [:]
+                for recipe in recipes {
+                    let renderedCI = Renderer.render(proxy, with: recipe, maskBitmaps: proxyMasks)
+                    guard let cg = Self.sharedContext.createCGImage(renderedCI, from: renderedCI.extent),
+                          let score = AestheticEvaluator.score(rendered: renderedCI) else { continue }
+                    let key = recipe.id ?? UUID().uuidString
+                    previews[key] = NSImage(cgImage: cg, size: .zero)
+                    scored.append(.init(recipe: recipe, score: score))
+                }
+                return CandidateBatch(scored: scored, previews: previews)
+            }.value
+            // Building candidates is now asynchronous, so a second photo can be opened while the
+            // first is still working. Without this guard those results would land on whichever
+            // photo happens to be showing — thumbnails from one frame beside the preview of
+            // another. If we've moved on, drop them.
+            guard imageURL == url else { return }
+            let scored = built.scored
+            let previews = built.previews
             let curated = CandidateCurator.select(from: scored, count: 4)
             self.candidates = curated.compactMap { item in
                 let key = item.recipe.id ?? ""
@@ -1085,6 +1110,28 @@ final class AppState: ObservableObject {
     private func clampStep(_ v: Double, _ r: ClosedRange<Double>, _ step: Double) -> Double {
         let c = min(r.upperBound, max(r.lowerBound, v))
         return (c / step).rounded() * step
+    }
+
+    /// Results of the off-main candidate build. CIContext/CGImage are thread-safe; NSImage built
+    /// from a CGImage is immutable here, so carrying them across is sound.
+    private struct CandidateBatch: @unchecked Sendable {
+        let scored: [CandidateCurator.Scored]
+        let previews: [String: NSImage]
+    }
+
+    /// Shared with the background candidate build — a CIContext is thread-safe and expensive to
+    /// create, so one instance serves both.
+    nonisolated(unsafe) static let sharedContext: CIContext = {
+        let opts: [CIContextOption: Any] = [.cacheIntermediates: true, .highQualityDownsample: false]
+        if let device = MTLCreateSystemDefaultDevice() { return CIContext(mtlDevice: device, options: opts) }
+        return CIContext(options: opts)
+    }()
+
+    /// Render a lazy CIImage into a concrete bitmap-backed one, so downstream passes sample real
+    /// pixels instead of re-evaluating the whole graph each time.
+    private func materialise(_ image: CIImage) -> CIImage {
+        guard let cg = context.createCGImage(image, from: image.extent) else { return image }
+        return CIImage(cgImage: cg)
     }
 
     private func ciToNSImage(_ ciImage: CIImage) -> NSImage? {
