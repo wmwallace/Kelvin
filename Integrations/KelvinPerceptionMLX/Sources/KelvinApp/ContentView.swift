@@ -214,6 +214,51 @@ final class AppState: ObservableObject {
         return t
     }
 
+    /// "12 Mar, 14:03" from an ISO timestamp — a restored edit should say *when*, not show a
+    /// machine string.
+    static func friendlyDate(_ iso: String) -> String {
+        guard let date = ISO8601DateFormatter().date(from: iso) else { return "an earlier session" }
+        let f = DateFormatter()
+        f.dateFormat = "d MMM, HH:mm"
+        return f.string(from: date)
+    }
+
+    /// The current edit, in the form that goes to disk.
+    private func currentSavedEdit() -> SavedEdit {
+        SavedEdit(styleId: selectedCandidateId, global: edit, userMasks: userMasks,
+                  maskEnabled: maskEnabled, maskStrength: maskStrength,
+                  straighten: straighten, hsl: hsl, blackAndWhite: activeRecipe?.blackAndWhite,
+                  removeDust: removeDust,
+                  savedAt: ISO8601DateFormatter().string(from: Date()), contentHint: imageId)
+    }
+
+    /// Write the edit for `url` if it differs from what Kelvin generated, or clear it if the user
+    /// has reset back to the candidate — otherwise a stale file would keep resurrecting an edit
+    /// they undid.
+    private func persistEdit(for url: URL) {
+        let touched = edit != editBaseline || !userMasks.isEmpty || straighten != 0
+            || !hsl.isEmpty || removeDust
+        if touched { EditStore.save(currentSavedEdit(), for: url) }
+        else { EditStore.remove(for: url) }
+    }
+
+    /// Restore a saved edit onto the freshly-generated candidates.
+    private func apply(_ saved: SavedEdit) {
+        if let styleId = saved.styleId, candidates.contains(where: { $0.id == styleId }) {
+            selectCandidate(id: styleId)      // sets the baseline for this style first
+        }
+        edit = saved.global
+        userMasks = saved.userMasks
+        maskEnabled = saved.maskEnabled
+        maskStrength = saved.maskStrength
+        straighten = saved.straighten
+        hsl = saved.hsl
+        removeDust = saved.removeDust
+        brushCache = [:]
+        updateActiveRecipe()
+        resetHistory()
+    }
+
     /// Capture the current photo's state before leaving it.
     private func stashCurrentSession() {
         guard let url = imageURL, let full = fullResCI, let proxy = proxyCI else { return }
@@ -230,6 +275,7 @@ final class AppState: ObservableObject {
         sessionOrder.removeAll { $0 == url }
         sessionOrder.append(url)
         if session.isEdited { editedURLs.insert(url) } else { editedURLs.remove(url) }
+        persistEdit(for: url)
         while sessionOrder.count > Self.maxSessions, let oldest = sessionOrder.first {
             sessions.removeValue(forKey: oldest); sessionOrder.removeFirst()
         }
@@ -275,6 +321,8 @@ final class AppState: ObservableObject {
         if imageURL != nil, imageURL != url { stashCurrentSession() }
         imageURL = url
         folderPhotos = PhotoBrowser.siblings(of: url)
+        // Photos edited in an earlier session already carry a dot.
+        editedURLs.formUnion(EditStore.edited(among: folderPhotos))
         userMasks = []; paintingMaskId = nil; selectedUserMaskId = nil   // hand-drawn masks are per-photo
         zoom = 1; pan = .zero
         do {
@@ -348,7 +396,15 @@ final class AppState: ObservableObject {
             self.candidates = models
             if let first = models.first { selectCandidate(id: first.id) }
 
-            statusMessage = "Ready · pick a look, or Batch apply it to a folder"
+            // If this photo was edited in an earlier session, put that work back rather than
+            // handing back a fresh candidate and quietly losing it.
+            if let saved = EditStore.load(for: url) {
+                apply(saved)
+                editedURLs.insert(url)
+                statusMessage = "Ready · restored your edit from \(Self.friendlyDate(saved.savedAt))"
+            } else {
+                statusMessage = "Ready · pick a look, or Batch apply it to a folder"
+            }
         } catch {
             statusMessage = "Couldn't read that photo — \(error.localizedDescription)"
         }
@@ -457,11 +513,13 @@ final class AppState: ObservableObject {
             }
             self.committed = self.snapshot()
             self.refreshUndoState()
-            // Keep the filmstrip's "edited" dot honest as you work, not just on switch.
+            // Keep the filmstrip's "edited" dot honest as you work, not just on switch, and put
+            // the edit on disk so quitting the app doesn't throw the work away.
             if let url = self.imageURL {
                 let touched = self.edit != self.editBaseline || !self.userMasks.isEmpty
                     || self.straighten != 0 || !self.hsl.isEmpty || self.removeDust
                 if touched { self.editedURLs.insert(url) } else { self.editedURLs.remove(url) }
+                self.persistEdit(for: url)
             }
         }
     }
@@ -1645,9 +1703,11 @@ struct EditSnapshot: Equatable {
     var hsl: [String: HSLAdjustment]
 }
 
-struct UserMaskVM: Identifiable, Equatable {
-    enum Kind { case radial, linear, brush, colorRange, luminance, skin, background }
-    let id = UUID()
+struct UserMaskVM: Identifiable, Equatable, Codable {
+    enum Kind: String, Codable {
+        case radial, linear, brush, colorRange, luminance, skin, background
+    }
+    var id = UUID()
     var kind: Kind
     var cx = 0.5, cy = 0.5, radius = 0.35, angle = 0.0, softness = 0.35
     var stamps: [BrushStamp] = []                       // brush only
