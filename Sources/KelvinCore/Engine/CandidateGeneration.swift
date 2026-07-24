@@ -177,10 +177,10 @@ public struct CandidateStyle: Sendable, Equatable {
     /// calm, editorial film look that still reads clearly apart from the others.
     public static let soft = CandidateStyle(
         id: "soft", label: "Soft",
-        contrastScale: 0.6, contrastBias: -14,
+        contrastScale: 0.55, contrastBias: -16,
         vibranceScale: 0.65, vibranceBias: -8, saturationBias: -9,
-        whitesBias: -5, blacksBias: 13, wbStrengthScale: 1.0,
-        curveScale: 0.55, matteToe: 14
+        whitesBias: -6, blacksBias: 16, wbStrengthScale: 0.85,
+        curveScale: 0.5, matteToe: 20
     )
 
     /// Moody and filmic — deeper contrast and shadows, restrained colour, and a hint of the
@@ -189,8 +189,8 @@ public struct CandidateStyle: Sendable, Equatable {
         id: "dramatic", label: "Dramatic",
         contrastScale: 1.2, contrastBias: 20,
         vibranceScale: 0.9, vibranceBias: -3, saturationBias: -5,
-        whitesBias: 7, blacksBias: -18, wbStrengthScale: 0.8,
-        curveScale: 1.45, matteToe: 0
+        whitesBias: 7, blacksBias: -20, wbStrengthScale: 0.7,
+        curveScale: 1.5, matteToe: 0
     )
 
     /// The candidate set, in display order (faithful first).
