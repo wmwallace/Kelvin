@@ -20,7 +20,10 @@ let package = Package(
     products: [
         .library(name: "KelvinPerceptionMLX", targets: ["KelvinPerceptionMLX"]),
         // A tiny driver that proves the on-device loop: perceive a photo → engine → render.
-        .executable(name: "kelvin-perceive", targets: ["kelvin-perceive"])
+        .executable(name: "kelvin-perceive", targets: ["kelvin-perceive"]),
+        // The SwiftUI app. It lives here (not the root package) so it can use the real VLM
+        // backend; the root package stays MLX-free.
+        .executable(name: "kelvin-app", targets: ["KelvinApp"])
     ],
     dependencies: [
         .package(name: "Kelvin", path: "../.."),
@@ -47,6 +50,13 @@ let package = Package(
         ),
         .executableTarget(
             name: "kelvin-perceive",
+            dependencies: [
+                "KelvinPerceptionMLX",
+                .product(name: "KelvinCore", package: "Kelvin")
+            ]
+        ),
+        .executableTarget(
+            name: "KelvinApp",
             dependencies: [
                 "KelvinPerceptionMLX",
                 .product(name: "KelvinCore", package: "Kelvin")

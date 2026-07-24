@@ -11,8 +11,7 @@ let package = Package(
     ],
     products: [
         .library(name: "KelvinCore", targets: ["KelvinCore"]),
-        .executable(name: "kelvin-cli", targets: ["KelvinCLI"]),
-        .executable(name: "kelvin-app", targets: ["KelvinApp"])
+        .executable(name: "kelvin-cli", targets: ["KelvinCLI"])
     ],
     targets: [
         // Core/ — pure, no UI, no model. Decode + Recipe + Render (masks/curves land later).
@@ -24,11 +23,8 @@ let package = Package(
             name: "KelvinCLI",
             dependencies: ["KelvinCore"]
         ),
-        // App/ — SwiftUI Mac application shell.
-        .executableTarget(
-            name: "KelvinApp",
-            dependencies: ["KelvinCore"]
-        ),
+        // The SwiftUI app lives in Integrations/KelvinPerceptionMLX so it can depend on the
+        // real VLM backend. The root package stays MLX-free (core + CLI + tests only).
         .testTarget(
             name: "KelvinCoreTests",
             dependencies: ["KelvinCore"]

@@ -3,6 +3,7 @@ import CoreImage
 import CryptoKit
 import UniformTypeIdentifiers
 import KelvinCore
+import KelvinPerceptionMLX
 
 // MARK: - Design system: "an instrument for light"
 //
@@ -107,6 +108,16 @@ final class AppState: ObservableObject {
 
     private let store: PreferenceStore
     private let context = CIContext()
+    // The real on-device VLM. An actor, so the model loads once and is reused across photos.
+    private let perceptionProvider = MLXPerceptionProvider()
+
+    /// Used when the model can't run (not yet downloaded, offline). Low confidence keeps the
+    /// engine on its conservative, measurement-only path rather than committing to a scene.
+    private static let conservativeRead = Perception(
+        scene: .other,
+        subject: Perception.Subject(present: false, type: .none, count: .none, placement: .center),
+        lighting: Perception.Lighting(condition: .indoorDaylight, direction: .diffuse, contrastRange: .normal),
+        problems: [], intent: .natural, confidence: 0.3)
 
     init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -144,15 +155,16 @@ final class AppState: ObservableObject {
             self.proxyCI = proxy
 
             statusMessage = "Reading the scene…"
-            let defaultPerception = Perception(
-                scene: .landscape,
-                subject: Perception.Subject(present: false, type: .none, count: .none, placement: .center),
-                lighting: Perception.Lighting(condition: .harshSun, direction: .front, contrastRange: .high),
-                problems: [.underexposedSubject],
-                intent: .natural,
-                confidence: 0.85)
-            let provider = StaticPerceptionProvider(defaultPerception)
-            let perceptionRead = try await provider.perceive(proxy)
+            // Real perception: Qwen2.5-VL reads the proxy. First call loads the model (a few
+            // seconds once cached); if it can't run, fall back to a conservative read so the
+            // app still produces candidates from the measured statistics.
+            let perceptionRead: Perception
+            do {
+                perceptionRead = try await perceptionProvider.perceive(proxy)
+            } catch {
+                perceptionRead = Self.conservativeRead
+                statusMessage = "Model unavailable — conservative read"
+            }
             self.perception = perceptionRead
 
             statusMessage = "Measuring…"
