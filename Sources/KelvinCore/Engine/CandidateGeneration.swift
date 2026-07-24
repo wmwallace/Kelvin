@@ -71,6 +71,10 @@ public extension RecipeEngine {
         g.whites = points.whites
         g.blacks = points.blacks
 
+        // The S-curve carries each style's contrast character: Vivid/Dramatic push it, Soft eases
+        // it and lifts a matte toe (film look).
+        let curve = toneCurve(p, s, strength: curveStrength(p, s) * style.curveScale, toe: style.matteToe)
+
         return Recipe(
             schemaVersion: Recipe.currentSchemaVersion,
             id: style.id,
@@ -82,7 +86,7 @@ public extension RecipeEngine {
                 generatedAt: generatedAt
             ),
             global: g,
-            curve: nil,
+            curve: curve,
             hsl: nil,
             // Subject lift + sky treatment are corrective — shared across every style.
             masks: localMasks(p, s, subjectLuma: subjectLuma, skyLuma: skyLuma),
@@ -143,13 +147,18 @@ public struct CandidateStyle: Sendable, Equatable {
     let blacksBias: Double
     /// Multiplies white-balance correction strength. < 1 keeps some of the cast (warmer/moodier).
     let wbStrengthScale: Double
+    /// Scales the S-curve depth — the style's contrast character.
+    let curveScale: Double
+    /// Lifts the black end of the curve (0…255) for a matte / film toe.
+    let matteToe: Double
 
     /// Faithful baseline — the corrective look with gentle, scene-appropriate styling.
     public static let natural = CandidateStyle(
         id: "natural", label: "Natural",
         contrastScale: 1.0, contrastBias: 0,
         vibranceScale: 1.0, vibranceBias: 0, saturationBias: 0,
-        whitesBias: 0, blacksBias: 0, wbStrengthScale: 1.0
+        whitesBias: 0, blacksBias: 0, wbStrengthScale: 1.0,
+        curveScale: 1.0, matteToe: 0
     )
 
     /// Colourful and clean — a touch more contrast and vibrance, slightly brighter whites and
@@ -158,7 +167,8 @@ public struct CandidateStyle: Sendable, Equatable {
         id: "vivid", label: "Vivid",
         contrastScale: 1.15, contrastBias: 12,
         vibranceScale: 1.3, vibranceBias: 10, saturationBias: 3,
-        whitesBias: 6, blacksBias: -8, wbStrengthScale: 1.0
+        whitesBias: 6, blacksBias: -8, wbStrengthScale: 1.0,
+        curveScale: 1.3, matteToe: 0
     )
 
     /// Muted and airy — softer contrast, restrained colour, gently lifted (matte) blacks. A
@@ -167,7 +177,8 @@ public struct CandidateStyle: Sendable, Equatable {
         id: "soft", label: "Soft",
         contrastScale: 0.6, contrastBias: -14,
         vibranceScale: 0.65, vibranceBias: -8, saturationBias: -9,
-        whitesBias: -5, blacksBias: 13, wbStrengthScale: 1.0
+        whitesBias: -5, blacksBias: 13, wbStrengthScale: 1.0,
+        curveScale: 0.55, matteToe: 14
     )
 
     /// Moody and filmic — deeper contrast and shadows, restrained colour, and a hint of the
@@ -176,7 +187,8 @@ public struct CandidateStyle: Sendable, Equatable {
         id: "dramatic", label: "Dramatic",
         contrastScale: 1.2, contrastBias: 20,
         vibranceScale: 0.9, vibranceBias: -3, saturationBias: -5,
-        whitesBias: 7, blacksBias: -18, wbStrengthScale: 0.8
+        whitesBias: 7, blacksBias: -18, wbStrengthScale: 0.8,
+        curveScale: 1.45, matteToe: 0
     )
 
     /// The candidate set, in display order (faithful first).

@@ -48,6 +48,7 @@ public enum RecipeEngine {
         g.temperatureK = wb.temperatureK
         g.tint = wb.tint
 
+        var curve: Curve? = nil
         if confident {
             g.contrast = contrast(p, s)
             let (whites, blacks) = pointPlacement(p, s)
@@ -55,6 +56,9 @@ public enum RecipeEngine {
             g.blacks = blacks
             g.vibrance = vibrance(p, s)
             g.saturation = saturation(p)
+            // The S-curve carries the punch (anchored midtones); it's the "rebuild" after the
+            // highlight/shadow recovery flattens the ends.
+            curve = toneCurve(p, s, strength: curveStrength(p, s))
         } else {
             // Corrective-only. Vibrance is allowed a token amount so a flat frame is not left
             // visibly lifeless, but nothing scene-specific.
@@ -74,7 +78,7 @@ public enum RecipeEngine {
                 generatedAt: generatedAt
             ),
             global: g,
-            curve: nil,
+            curve: curve,
             hsl: nil,
             masks: localMasks(p, s, subjectLuma: subjectLuma, skyLuma: skyLuma),
             detail: detail(p, iso: iso),
@@ -208,24 +212,38 @@ public enum RecipeEngine {
     /// Negative highlights pull back clipping. Driven by the *measured* clip fraction; the
     /// perception label only lowers the trigger threshold and adds a small floor.
     static func highlightRecovery(_ p: Perception, _ s: ImageStatistics) -> Double {
+        // Faithful intents recover only genuine clipping; everything else gets the pro treatment.
+        if p.intent == .archival || p.intent == .productAccurate {
+            return s.highlightClip > 0.02 ? -roundedClamp(min(60, s.highlightClip * 400), to: 0...80, step: 1) : 0
+        }
         let flagged = p.problems.contains(.blownHighlights) || p.problems.contains(.overexposed)
-        guard flagged || s.highlightClip > 0.02 else { return 0 }
-
-        let fromClip = min(70, s.highlightClip * 400)      // 0.175 clip → full 70
-        let floor = flagged ? 22.0 : 0
-        return -roundedClamp(max(fromClip, floor), to: 0...80, step: 1)
+        // Recover highlights where there are actually bright highlights to recover — clipping, or a
+        // genuinely bright top end (skies, skin speculars). This reveals texture and gives the
+        // S-curve room to lift the highlights back with control. A full-range-but-not-bright frame
+        // gets nothing here; its punch comes from the endpoints + S-curve instead.
+        let fromClip = min(66, s.highlightClip * 400)
+        let fromBright = max(0, (s.highlightLevel - 0.90) * 200)   // only a bright top end → recover
+        let amount = max(fromClip, fromBright) + (flagged ? 22 : 0)
+        return -roundedClamp(amount, to: 0...85, step: 1)
     }
 
     /// Positive shadows lift crushed darks. Measured shadow clip sets the magnitude; two
     /// judgments (crushed shadows, underexposed subject) add floors.
     static func shadowLift(_ p: Perception, _ s: ImageStatistics) -> Double {
+        if p.intent == .archival || p.intent == .productAccurate {
+            let crushed = p.problems.contains(.crushedShadows)
+            guard crushed || s.shadowClip > 0.02 else { return 0 }
+            return roundedClamp(min(45, s.shadowClip * 300) + (crushed ? 28 : 0), to: 0...70, step: 1)
+        }
         let crushed = p.problems.contains(.crushedShadows)
         let darkSubject = p.problems.contains(.underexposedSubject)
-        guard crushed || darkSubject || s.shadowClip > 0.02 else { return 0 }
-
+        // Open shadows where there's genuine darkness to open — clipping, or a deep low end. The
+        // S-curve puts midtone contrast back so this reveals detail WITHOUT greying the image out.
+        // A frame with healthy shadows gets nothing here.
         let fromClip = min(45, s.shadowClip * 300)
-        let floor = (crushed ? 28.0 : 0) + (darkSubject ? 18.0 : 0)
-        return roundedClamp(max(fromClip, floor), to: 0...70, step: 1)
+        let fromDark = max(0, (0.055 - s.shadowLevel) * 260)      // only a deep low end → lift
+        let amount = max(fromClip, fromDark) + (crushed ? 24 : 0) + (darkSubject ? 14 : 0)
+        return roundedClamp(amount, to: 0...78, step: 1)
     }
 
     /// Dehaze amount from measured veiling. Fog/haze lifts the black point (nothing is truly
@@ -255,15 +273,10 @@ public enum RecipeEngine {
     static func contrast(_ p: Perception, _ s: ImageStatistics) -> Double {
         var c = sceneContrastBias(p.scene)
 
-        // "Flatness" arrives as up to three correlated signals — the `flat`/`low-contrast`
-        // label, a `low` contrast-range judgment, and a measured narrow dynamic range. They
-        // describe the same thing, so take the strongest rather than stacking them (stacking
-        // ran a genuinely flat frame straight to the +40 ceiling).
-        var flatness = 0.0
-        if p.problems.contains(.flat) || p.problems.contains(.lowContrast) { flatness = max(flatness, 16) }
-        if p.lighting.contrastRange == .low { flatness = max(flatness, 10) }
-        if s.dynamicRange < 0.45 { flatness = max(flatness, 12) }
-        c += flatness
+        // Flatness is now handled by the S-curve (see curveStrength) — the pro way to add contrast
+        // to a low-contrast frame is the curve, not the flat contrast slider, which double-counted
+        // here and overshot. The global contrast keeps only a small scene bias + the extreme-range
+        // pullback below.
 
         // A frame called extreme/high already spans its range and wants contrast pulled back.
         switch p.lighting.contrastRange {
@@ -298,11 +311,60 @@ public enum RecipeEngine {
     static func pointPlacement(_ p: Perception, _ s: ImageStatistics) -> (whites: Double, blacks: Double) {
         guard p.intent != .archival, p.intent != .productAccurate else { return (0, 0) }
 
+        // Set clean endpoints: drive the whites toward true white and the blacks toward true black
+        // by however far the measured points fall short. This expands the tonal range and is where
+        // most of the "pop" comes from — a photo that reaches a real black and a clean white reads
+        // as finished. Don't push into a channel that's already clipping.
+        //
+        // Gate on the image ALREADY having a range: endpoint-setting assumes real highlights and
+        // shadows that fall a little short, not a dim/flat patch with no range (stretching that to
+        // full white+black would just explode it — that's an exposure/contrast job, not endpoints).
+        let rangeGate = clamp((s.dynamicRange - 0.15) / 0.35, to: 0...1)   // 0 below DR .15, full by .50
         var whites = 0.0, blacks = 0.0
-        if s.whitePoint < 0.92 && s.highlightClip < 0.01 { whites = 8 }
-        if s.blackPoint > 0.06 && s.shadowClip < 0.01 { blacks = -8 }
-        if p.problems.contains(.flat) { whites += 4; blacks -= 4 }
-        return (roundedClamp(whites, to: 0...25, step: 1), roundedClamp(blacks, to: -25...0, step: 1))
+        if s.highlightClip < 0.02 && s.whitePoint > 0.55 {
+            whites = min(28, max(0, (0.965 - s.whitePoint) * 210)) * rangeGate   // whitePoint 0.84 → ~26
+        }
+        if s.shadowClip < 0.02 {
+            blacks = -min(24, max(0, (s.blackPoint - 0.02) * 240)) * rangeGate   // blackPoint 0.12 → ~-24
+        }
+        if p.problems.contains(.flat) { whites += 6 * rangeGate; blacks -= 6 * rangeGate }
+        return (roundedClamp(whites, to: 0...30, step: 1), roundedClamp(blacks, to: -30...0, step: 1))
+    }
+
+    /// A measurement-scaled **S-curve** — the professional way to build contrast (anchored
+    /// midtones, lifted highlights, dropped shadows) rather than a flat contrast slider that
+    /// clips. This is the "rebuild" half of flatten-then-rebuild: after highlight-recovery and
+    /// shadow-lift flatten the ends, the S-curve puts punch back into the midtones under control.
+    /// `strength` (0…1) scales the depth of the S; a matte `toe` lifts the black end for a film look.
+    static func toneCurve(_ p: Perception, _ s: ImageStatistics, strength: Double, toe: Double = 0) -> Curve? {
+        guard p.intent != .archival, p.intent != .productAccurate else { return nil }
+        let amt = strength * 15.0                       // 0…~15 luma units at the quarter points
+        guard amt >= 1 || toe >= 1 else { return nil }
+        let lo = 64.0, hi = 192.0
+        let luma: [[Double]] = [
+            [0, toe],                                   // matte toe lifts the black end (film look)
+            [lo, lo - amt],                             // deepen shadows
+            [128, 128],                                 // anchor midtones (no exposure shift)
+            [hi, hi + amt],                             // lift highlights
+            [255, 255]
+        ]
+        return Curve(luma: luma, red: nil, green: nil, blue: nil)
+    }
+
+    /// How much S-curve punch the frame wants, 0…~1.2. Flat frames get more, already-contrasty
+    /// or extreme-range frames get less (they'd only clip).
+    static func curveStrength(_ p: Perception, _ s: ImageStatistics) -> Double {
+        var st = 0.7
+        if s.dynamicRange < 0.5 { st += 0.3 }
+        if s.dynamicRange > 0.85 { st -= 0.25 }
+        if p.problems.contains(.flat) || p.problems.contains(.lowContrast) { st += 0.2 }
+        switch p.lighting.contrastRange {
+        case .extreme: st -= 0.3
+        case .high:    st -= 0.15
+        case .low:     st += 0.15
+        default: break
+        }
+        return clamp(st, to: 0.2...1.2)
     }
 
     // MARK: - White balance (corrective; runs on both paths)
