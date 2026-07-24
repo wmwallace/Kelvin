@@ -2058,15 +2058,15 @@ struct ContentView: View {
                 // what gets touched on essentially every photograph.
                 CollapsibleSection("Light", defaultOpen: true) {
                 VStack(spacing: 14) {
-                    ToneSlider(label: "Temp", value: appState.temperatureBinding, range: 2500...9500, step: 10, unit: " K", onChange: ch)
-                    ToneSlider(label: "Tint", value: $appState.edit.tint, range: -100...100, step: 1, unit: "", onChange: ch)
+                    ToneSlider(label: "Temp", value: appState.temperatureBinding, range: 2500...9500, step: 10, unit: " K", onChange: ch, identity: .temperature)
+                    ToneSlider(label: "Tint", value: $appState.edit.tint, range: -100...100, step: 1, unit: "", onChange: ch, identity: .tint)
                     Divider().overlay(Theme.hairline).padding(.vertical, 2)
-                    ToneSlider(label: "Exposure", value: $appState.edit.exposureEV, range: -5...5, step: 0.05, unit: " EV", onChange: ch)
-                    ToneSlider(label: "Contrast", value: $appState.edit.contrast, range: -100...100, step: 1, unit: "", onChange: ch)
-                    ToneSlider(label: "Highlights", value: $appState.edit.highlights, range: -100...100, step: 1, unit: "", onChange: ch)
-                    ToneSlider(label: "Shadows", value: $appState.edit.shadows, range: -100...100, step: 1, unit: "", onChange: ch)
-                    ToneSlider(label: "Whites", value: $appState.edit.whites, range: -100...100, step: 1, unit: "", onChange: ch)
-                    ToneSlider(label: "Blacks", value: $appState.edit.blacks, range: -100...100, step: 1, unit: "", onChange: ch)
+                    ToneSlider(label: "Exposure", value: $appState.edit.exposureEV, range: -5...5, step: 0.05, unit: " EV", onChange: ch, identity: .exposure)
+                    ToneSlider(label: "Contrast", value: $appState.edit.contrast, range: -100...100, step: 1, unit: "", onChange: ch, identity: .contrast)
+                    ToneSlider(label: "Highlights", value: $appState.edit.highlights, range: -100...100, step: 1, unit: "", onChange: ch, identity: .highlights)
+                    ToneSlider(label: "Shadows", value: $appState.edit.shadows, range: -100...100, step: 1, unit: "", onChange: ch, identity: .shadows)
+                    ToneSlider(label: "Whites", value: $appState.edit.whites, range: -100...100, step: 1, unit: "", onChange: ch, identity: .highlights)
+                    ToneSlider(label: "Blacks", value: $appState.edit.blacks, range: -100...100, step: 1, unit: "", onChange: ch, identity: .shadows)
                 }
                 }
 
@@ -2074,10 +2074,12 @@ struct ContentView: View {
                 Group {
                 CollapsibleSection("Presence") {
                 VStack(spacing: 14) {
-                    ToneSlider(label: "Texture", value: $appState.edit.texture, range: -100...100, step: 1, unit: "", onChange: ch)
-                    ToneSlider(label: "Clarity", value: $appState.edit.clarity, range: -100...100, step: 1, unit: "", onChange: ch)
-                    ToneSlider(label: "Dehaze", value: $appState.edit.dehaze, range: 0...100, step: 1, unit: "", onChange: ch)
-                    ToneSlider(label: "Fusion", value: $appState.edit.fusion, range: 0...100, step: 1, unit: "", onChange: ch)
+                    ToneSlider(label: "Texture", value: $appState.edit.texture, range: -100...100, step: 1, unit: "", onChange: ch, identity: .presence)
+                    ToneSlider(label: "Clarity", value: $appState.edit.clarity, range: -100...100, step: 1, unit: "", onChange: ch, identity: .presence)
+                    ToneSlider(label: "Dehaze", value: $appState.edit.dehaze, range: 0...100, step: 1, unit: "", onChange: ch, identity: .presence)
+                    // Fusion lives in Presence but is not one: it opens the shadows and holds the
+                    // highlights, so it wears the shadow rail rather than the haze one.
+                    ToneSlider(label: "Fusion", value: $appState.edit.fusion, range: 0...100, step: 1, unit: "", onChange: ch, identity: .shadows)
                 }
                 }
 
@@ -2085,8 +2087,8 @@ struct ContentView: View {
                 // levels of detail, so they live together rather than as two headings.
                 CollapsibleSection("Colour") {
                 VStack(spacing: 14) {
-                    ToneSlider(label: "Vibrance", value: $appState.edit.vibrance, range: -100...100, step: 1, unit: "", onChange: ch)
-                    ToneSlider(label: "Saturation", value: $appState.edit.saturation, range: -100...100, step: 1, unit: "", onChange: ch)
+                    ToneSlider(label: "Vibrance", value: $appState.edit.vibrance, range: -100...100, step: 1, unit: "", onChange: ch, identity: .saturation(hue: nil))
+                    ToneSlider(label: "Saturation", value: $appState.edit.saturation, range: -100...100, step: 1, unit: "", onChange: ch, identity: .saturation(hue: nil))
                 }
                 VStack(spacing: 12) {
                     Divider().overlay(Theme.hairline).padding(.vertical, 2)
@@ -2100,9 +2102,13 @@ struct ContentView: View {
                                 .onTapGesture { appState.hslBand = band }
                         }
                     }
-                    ToneSlider(label: "Hue", value: appState.hslBinding(\.h), range: -100...100, step: 1, unit: "", onChange: ch)
-                    ToneSlider(label: "Saturation", value: appState.hslBinding(\.s), range: -100...100, step: 1, unit: "", onChange: ch)
-                    ToneSlider(label: "Luminance", value: appState.hslBinding(\.l), range: -100...100, step: 1, unit: "", onChange: ch)
+                    // The mixer's rails follow the selected band, so the panel shows which colour is
+                    // under the knife — the swatch row above says which band, not what it does.
+                    ToneSlider(label: "Hue", value: appState.hslBinding(\.h), range: -100...100, step: 1, unit: "", onChange: ch,
+                               identity: .hueShift(center: ToneIdentity.bandHue(appState.hslBand)))
+                    ToneSlider(label: "Saturation", value: appState.hslBinding(\.s), range: -100...100, step: 1, unit: "", onChange: ch,
+                               identity: .saturation(hue: ToneIdentity.bandHue(appState.hslBand)))
+                    ToneSlider(label: "Luminance", value: appState.hslBinding(\.l), range: -100...100, step: 1, unit: "", onChange: ch, identity: .exposure)
                 }
                 }
 
@@ -2406,6 +2412,181 @@ struct HistogramView: View {
 
 // MARK: - Tone slider (instrument readout)
 
+/// What a control *does*, said in colour and light. Every slider used to be the same orange track,
+/// so Temp and Contrast were the same object with different words on top; the rail under the knob
+/// makes the action legible before the label is read.
+///
+/// The identity describes the ACTION, never the value — the value stays in the knob position and
+/// the monospaced readout, so nothing here is the only way to read the control.
+enum ToneIdentity {
+    /// Geometry, softness, feather: no honest reading in light. Left exactly as it was — a rail
+    /// that says nothing is decoration, and decoration in a darkroom panel costs attention the
+    /// photograph should be getting.
+    case plain
+    case temperature
+    case tint
+    case exposure
+    case contrast
+    /// Highlights and Shadows both brighten to the right, as the knob does. What separates them is
+    /// which end of the scale they work in, so that — not direction — is what the rails show.
+    case highlights
+    case shadows
+    /// Chroma rising left to right. `hue` nil means every hue at once, i.e. the global pair.
+    case saturation(hue: Double?)
+    /// The mixer rotating one band: the rail is that band and the neighbours it can reach.
+    case hueShift(center: Double)
+    /// The whole hue circle as a selection axis (the colour-range mask picks a point on it).
+    case spectrum
+    /// Haze → definition. The quietest of the family on purpose: clarity and texture are small
+    /// effects, and a loud rail would oversell them.
+    case presence
+
+    /// Hue angles for the mixer's eight bands. Deliberately not derived from `bandColor` — that
+    /// vends system colours for the swatches, and a rail has to interpolate toward a band's
+    /// neighbours, which needs an angle rather than a swatch.
+    static func bandHue(_ band: String) -> Double {
+        switch band {
+        case "red":    return 0
+        case "orange": return 30
+        case "yellow": return 55
+        case "green":  return 120
+        case "aqua":   return 185
+        case "blue":   return 225
+        case "purple": return 280
+        default:       return 320   // magenta
+        }
+    }
+
+    /// The mask panel builds its sliders from `maskAdjustmentSpecs`, so it identifies them by key
+    /// rather than at the call site.
+    static func adjustment(_ key: String) -> ToneIdentity {
+        switch key {
+        case "exposure_ev":            return .exposure
+        case "highlights":             return .highlights
+        case "shadows":                return .shadows
+        case "contrast":               return .contrast
+        case "saturation", "vibrance": return .saturation(hue: nil)
+        default:                       return .plain
+        }
+    }
+}
+
+/// The axis a slider's knob travels along, drawn as light.
+///
+/// It sits below the native track rather than behind it, for two reasons: the knob keeps its own
+/// contrast against the system track no matter how dark the rail gets, and the gradient reads as a
+/// scale the knob moves along instead of as a second value indicator. Everything is muted to
+/// roughly the temperature rail's weight — the sidebar sits next to a photograph and must not
+/// compete with it.
+struct ToneRail: View {
+    let identity: ToneIdentity
+
+    private static let thickness: CGFloat = 4
+
+    // A quiet, slightly desaturated palette: full-strength hues next to a near-black panel read as
+    // toy UI, and the greys need more alpha than the colours to register at all.
+    private static let greenTint   = Color(hex: 0x6FB98A)
+    private static let neutralTint = Color(hex: 0xB6BCC5)
+    private static let magentaTint = Color(hex: 0xC182B4)
+    private static let ashDark     = Color(hex: 0x1C1F26)
+    private static let ashMid      = Color(hex: 0x707783)
+    private static let ashLight    = Color(hex: 0xE6E9EE)
+    private static let flatGrey    = Color(hex: 0x7A8089)
+
+    var body: some View {
+        switch identity {
+        case .plain:
+            EmptyView()
+
+        // The app's own Kelvin scale, oriented as the signature rail orients it: low K (amber) at
+        // the left, high K (blue) at the right. Reusing it keeps one colour-temperature ramp in
+        // the product rather than two that drift apart.
+        case .temperature:
+            bar(KelvinScale.gradient, opacity: 0.55)
+
+        case .tint:
+            bar(gradient([Self.greenTint, Self.neutralTint, Self.magentaTint]), opacity: 0.5)
+
+        case .exposure:
+            bar(gradient([Self.ashDark, Self.ashMid, Self.ashLight]), opacity: 0.7)
+
+        // Contrast is the one control whose action is a *spread*, so the rail splits: flat and
+        // identical at the left, opening toward black and white as the knob moves right.
+        case .contrast:
+            VStack(spacing: 1) {
+                halfBar([Self.flatGrey, Color(hex: 0xA8AFB9), Color(hex: 0xF3F5F8)])
+                halfBar([Self.flatGrey, Color(hex: 0x555B65), Color(hex: 0x0E1014)])
+            }
+            .accessibilityHidden(true)
+
+        case .highlights:
+            bar(gradient([Color(hex: 0x5C626C), Color(hex: 0xA9B0BA), Color(hex: 0xF1F3F6)]), opacity: 0.7)
+
+        case .shadows:
+            bar(gradient([Color(hex: 0x171A20), Color(hex: 0x4A5058), Color(hex: 0x9AA1AB)]), opacity: 0.7)
+
+        // Constant brightness, rising chroma: grey at the left, colour at the right, which is the
+        // whole of what the control does. Brightness is held flat on purpose so it cannot be
+        // mistaken for one of the tonal rails.
+        case .saturation(let hue):
+            bar(Self.chromaRamp(hue: hue), opacity: 0.6)
+
+        case .hueShift(let center):
+            bar(gradient([Self.muted(center - 55), Self.muted(center), Self.muted(center + 55)]), opacity: 0.5)
+
+        case .spectrum:
+            bar(Self.spectrum, opacity: 0.45)
+
+        // Stops bunched to the right: flat and hazy across most of the travel, separating only as
+        // the effect starts to bite. Cool and stopping short of white, so it reads as atmosphere
+        // clearing rather than as one more brightness ramp.
+        case .presence:
+            bar(LinearGradient(stops: [
+                .init(color: Color(hex: 0x36404E), location: 0),
+                .init(color: Color(hex: 0x414C5B), location: 0.55),
+                .init(color: Color(hex: 0xA3B2C4), location: 1)
+            ], startPoint: .leading, endPoint: .trailing), opacity: 0.6)
+        }
+    }
+
+    private func bar(_ fill: some ShapeStyle, opacity: Double) -> some View {
+        Capsule().fill(fill)
+            .frame(height: Self.thickness)
+            .opacity(opacity)
+            .accessibilityHidden(true)
+    }
+
+    private func halfBar(_ colors: [Color]) -> some View {
+        Capsule().fill(gradient(colors))
+            .frame(height: (Self.thickness - 1) / 2)
+            .opacity(0.85)
+    }
+
+    private func gradient(_ colors: [Color]) -> LinearGradient {
+        LinearGradient(colors: colors, startPoint: .leading, endPoint: .trailing)
+    }
+
+    /// A hue at instrument strength rather than screen-primary strength.
+    private static func muted(_ degrees: Double) -> Color {
+        let wrapped = degrees.truncatingRemainder(dividingBy: 360)
+        return Color(hue: (wrapped < 0 ? wrapped + 360 : wrapped) / 360, saturation: 0.58, brightness: 0.88)
+    }
+
+    private static let spectrum = LinearGradient(
+        colors: stride(from: 0.0, through: 360.0, by: 60.0).map { muted($0) },
+        startPoint: .leading, endPoint: .trailing)
+
+    /// Grey → colour at a fixed brightness. `hue` nil walks the whole circle, which is what the
+    /// global pair actually touches; a single hue is the mixer working on one band.
+    private static func chromaRamp(hue: Double?) -> LinearGradient {
+        let stops = (0...8).map { i -> Color in
+            let t = Double(i) / 8
+            return Color(hue: hue.map { $0 / 360 } ?? t, saturation: 0.62 * t, brightness: 0.74)
+        }
+        return LinearGradient(colors: stops, startPoint: .leading, endPoint: .trailing)
+    }
+}
+
 struct ToneSlider: View {
     let label: String
     @Binding var value: Double
@@ -2413,6 +2594,8 @@ struct ToneSlider: View {
     let step: Double
     let unit: String
     let onChange: () -> Void
+    /// Defaults to `.plain` so a control only claims a meaning when someone decided it has one.
+    var identity: ToneIdentity = .plain
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -2423,11 +2606,17 @@ struct ToneSlider: View {
                     .font(Theme.mono(11, value == 0 ? .regular : .semibold))
                     .foregroundColor(value == 0 ? Theme.inkFaint : Theme.glow)
             }
-            Slider(value: $value, in: range, step: step)
-                .tint(Theme.glow)
-                .controlSize(.small)
-                // Live: re-render on every value change during the drag, not just on release.
-                .onChange(of: value) { _ in onChange() }
+            VStack(spacing: 3) {
+                Slider(value: $value, in: range, step: step)
+                    // The accent stays the same on every slider: it is the language of "where the
+                    // value is", and the rail below is the language of "what this does". Making
+                    // both vary at once would leave neither reliable.
+                    .tint(Theme.glow)
+                    .controlSize(.small)
+                    // Live: re-render on every value change during the drag, not just on release.
+                    .onChange(of: value) { _ in onChange() }
+                ToneRail(identity: identity)
+            }
         }
         // Double-click the row to reset this control to its neutral value.
         .contentShape(Rectangle())
@@ -2581,11 +2770,11 @@ struct UserMaskEditor: View {
                 ToneSlider(label: "Softness", value: $mask.softness, range: 0...1, step: 0.01, unit: "", onChange: onChange)
             case .colorRange:
                 // Hue picker (0…1 → the colour wheel) + how wide a band + edge softness.
-                ToneSlider(label: "Hue", value: $mask.selCenter, range: 0...1, step: 0.005, unit: "", onChange: onChange)
+                ToneSlider(label: "Hue", value: $mask.selCenter, range: 0...1, step: 0.005, unit: "", onChange: onChange, identity: .spectrum)
                 ToneSlider(label: "Range", value: $mask.selRange, range: 0.01...0.5, step: 0.005, unit: "", onChange: onChange)
                 ToneSlider(label: "Softness", value: $mask.selSoftness, range: 0...0.3, step: 0.005, unit: "", onChange: onChange)
             case .luminance:
-                ToneSlider(label: "Brightness", value: $mask.selCenter, range: 0...1, step: 0.01, unit: "", onChange: onChange)
+                ToneSlider(label: "Brightness", value: $mask.selCenter, range: 0...1, step: 0.01, unit: "", onChange: onChange, identity: .exposure)
                 ToneSlider(label: "Range", value: $mask.selRange, range: 0.01...0.5, step: 0.005, unit: "", onChange: onChange)
                 ToneSlider(label: "Softness", value: $mask.selSoftness, range: 0...0.3, step: 0.005, unit: "", onChange: onChange)
             case .skin:
@@ -2601,9 +2790,9 @@ struct UserMaskEditor: View {
             }
 
             Rectangle().fill(Theme.hairline).frame(height: 1)
-            ToneSlider(label: "Exposure", value: $mask.exposure, range: -3...3, step: 0.05, unit: " EV", onChange: onChange)
-            ToneSlider(label: "Contrast", value: $mask.contrast, range: -100...100, step: 1, unit: "", onChange: onChange)
-            ToneSlider(label: "Saturation", value: $mask.saturation, range: -100...100, step: 1, unit: "", onChange: onChange)
+            ToneSlider(label: "Exposure", value: $mask.exposure, range: -3...3, step: 0.05, unit: " EV", onChange: onChange, identity: .exposure)
+            ToneSlider(label: "Contrast", value: $mask.contrast, range: -100...100, step: 1, unit: "", onChange: onChange, identity: .contrast)
+            ToneSlider(label: "Saturation", value: $mask.saturation, range: -100...100, step: 1, unit: "", onChange: onChange, identity: .saturation(hue: nil))
         }
         .padding(11)
         .background(
@@ -2681,7 +2870,8 @@ struct MaskControl: View {
                                            range: spec.range,
                                            step: spec.key == "exposure_ev" ? 0.05 : 1,
                                            unit: spec.unit,
-                                           onChange: onChange)
+                                           onChange: onChange,
+                                           identity: ToneIdentity.adjustment(spec.key))
                             }
                             if let feather {
                                 ToneSlider(label: "Feather", value: feather, range: 0...100,
