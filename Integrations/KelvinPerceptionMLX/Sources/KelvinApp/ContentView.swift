@@ -220,7 +220,7 @@ final class AppState: ObservableObject {
 
     /// Which frames the strip is showing.
     enum StripFilter: String, CaseIterable {
-        case all = "All", keepers = "Keepers", undecided = "Undecided", soft = "Soft"
+        case all = "All", keepers = "Keepers", undecided = "Undecided", soft = "Focus"
     }
     @Published var stripFilter: StripFilter = .all
 
