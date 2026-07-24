@@ -72,6 +72,8 @@ struct FilmstripView: View {
     let editedURLs: Set<URL>
     let thumbnail: (URL) -> NSImage?
     let onSelect: (URL) -> Void
+    var onDismiss: (URL) -> Void = { _ in }
+    @State private var hovered: URL?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -114,16 +116,28 @@ struct FilmstripView: View {
                                 lineWidth: isCurrent ? 2 : 1)
                 )
                 // A dot marks frames you've already worked on, so a pass through a shoot is legible.
-                if editedURLs.contains(url) {
+                if editedURLs.contains(url) && hovered != url {
                     Circle().fill(Theme.glow)
                         .frame(width: 7, height: 7)
                         .overlay(Circle().stroke(Theme.base, lineWidth: 1))
                         .padding(4)
                 }
+                // Hovering reveals a way to drop the frame from the working set.
+                if hovered == url {
+                    Button(action: { onDismiss(url) }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.white, Color.black.opacity(0.65))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(3)
+                    .help("Remove from this session")
+                }
             }
             .opacity(isCurrent ? 1 : 0.72)
         }
         .buttonStyle(.plain)
+        .onHover { hovered = $0 ? url : (hovered == url ? nil : hovered) }
         .help(url.lastPathComponent)
     }
 }

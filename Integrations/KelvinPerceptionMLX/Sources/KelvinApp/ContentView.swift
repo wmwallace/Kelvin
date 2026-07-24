@@ -304,6 +304,39 @@ final class AppState: ObservableObject {
         isProcessing = false
     }
 
+    /// Close the current photo and go back to the empty state. The edit is saved first — closing
+    /// is not discarding — and the session cache is kept, so reopening from the strip is instant.
+    func closeCurrentPhoto() {
+        stashCurrentSession()
+        imageURL = nil
+        fullResCI = nil; proxyCI = nil
+        candidates = []; selectedCandidateId = nil
+        activeRecipe = nil; activePreviewImage = nil; originalPreviewImage = nil
+        lastRenderedCI = nil; activeCraftIssues = []
+        userMasks = []; paintingMaskId = nil; selectedUserMaskId = nil
+        brushCache = [:]
+        proxyMaskBitmaps = [:]; healSpots = []; detectedSpotCount = 0
+        zoom = 1; pan = .zero; showingOriginal = false
+        statusMessage = "Drop a photo to read the light."
+    }
+
+    /// Remove a photo from the strip for this session, and forget any edit it had. The file itself
+    /// is never touched — this is about clearing the working set, not deleting someone's work.
+    func dismiss(_ url: URL) {
+        EditStore.remove(for: url)
+        editedURLs.remove(url)
+        sessions.removeValue(forKey: url)
+        sessionOrder.removeAll { $0 == url }
+        folderPhotos.removeAll { $0 == url }
+        if url == imageURL {
+            if let next = folderPhotos.first {
+                Task { await openPhoto(next) }
+            } else {
+                closeCurrentPhoto()
+            }
+        }
+    }
+
     /// Switch photos from the filmstrip: stash what you were doing, then restore or load fresh.
     func openPhoto(_ url: URL) async {
         guard url != imageURL else { return }
@@ -384,18 +417,32 @@ final class AppState: ObservableObject {
                                                   subjectLuma: self.subjectLuma, skyLuma: self.skyLuma,
                                                   iso: ExifReader.iso(url: url))
 
-            var models: [CandidateViewModel] = []
+            // Render every style, score each on the craft floors, then CURATE. The engine offers
+            // eight looks and several will be wrong for any given photo — Dramatic silhouettes a
+            // backlit sunset, Vivid pushes skin past plausible. Showing those beside the good ones
+            // makes the photographer do the culling and implies Kelvin rates them equally. It
+            // doesn't, and the evaluator already knows which is which.
+            var scored: [CandidateCurator.Scored] = []
+            var previews: [String: NSImage] = [:]
             for recipe in recipes {
                 let renderedCI = Renderer.render(proxy, with: recipe, maskBitmaps: proxyMasks)
-                if let nsImage = ciToNSImage(renderedCI) {
-                    models.append(CandidateViewModel(
-                        id: recipe.id ?? UUID().uuidString,
-                        label: recipe.label ?? recipe.id ?? "Candidate",
-                        baseRecipe: recipe,
-                        previewImage: nsImage))
-                }
+                guard let nsImage = ciToNSImage(renderedCI),
+                      let score = AestheticEvaluator.score(rendered: renderedCI) else { continue }
+                let key = recipe.id ?? UUID().uuidString
+                previews[key] = nsImage
+                scored.append(.init(recipe: recipe, score: score))
             }
-            self.candidates = models
+            let curated = CandidateCurator.select(from: scored, count: 4)
+            self.candidates = curated.compactMap { item in
+                let key = item.recipe.id ?? ""
+                guard let image = previews[key] else { return nil }
+                return CandidateViewModel(
+                    id: key,
+                    label: item.recipe.label ?? key,
+                    baseRecipe: item.recipe,
+                    previewImage: image)
+            }
+            let models = self.candidates
             if let first = models.first { selectCandidate(id: first.id) }
 
             // If this photo was edited in an earlier session, put that work back rather than
@@ -444,9 +491,35 @@ final class AppState: ObservableObject {
 
     func onEdit() { updateActiveRecipe(); scheduleCommit() }
 
-    /// Apply a targeted correction for a flagged craft issue — the "Fix" the warning offers. Nudges
-    /// the manual controls; the debounced craft check then re-evaluates and clears the flag if solved.
+    /// The fix currently being worked on, and how many nudges it has taken.
+    private var fixInProgress: AestheticEvaluator.Issue?
+    private var fixAttempts = 0
+    private static let maxFixAttempts = 5
+
+    /// Apply a targeted correction for a flagged craft issue — the "Fix" the warning offers.
+    ///
+    /// One nudge often isn't enough: a badly over-saturated frame needs more than −16 saturation,
+    /// so the flag would still be there afterwards and you'd have to keep clicking. Now a single
+    /// click keeps nudging until the evaluator stops complaining (or gives up after a few rounds,
+    /// rather than fighting a photo that can't be fixed this way).
     func applyFix(_ issue: AestheticEvaluator.Issue) {
+        fixInProgress = issue
+        fixAttempts = 0
+        nudge(for: issue)
+    }
+
+    /// Called once the craft check has re-run: if the issue survived, go again.
+    private func continueFixIfNeeded() {
+        guard let issue = fixInProgress else { return }
+        guard activeCraftIssues.contains(issue), fixAttempts < Self.maxFixAttempts else {
+            fixInProgress = nil
+            return
+        }
+        fixAttempts += 1
+        nudge(for: issue)
+    }
+
+    private func nudge(for issue: AestheticEvaluator.Issue) {
         func c(_ v: Double, _ r: ClosedRange<Double>) -> Double { min(r.upperBound, max(r.lowerBound, v)) }
         switch issue {
         case .skinOverSaturated:
@@ -545,6 +618,7 @@ final class AppState: ObservableObject {
                 if touched { self.editedURLs.insert(url) } else { self.editedURLs.remove(url) }
                 self.persistEdit(for: url)
             }
+            self.continueFixIfNeeded()
         }
     }
     private func refreshUndoState() { canUndo = !undoStack.isEmpty; canRedo = !redoStack.isEmpty }
@@ -1176,7 +1250,8 @@ struct ContentView: View {
                                   current: appState.imageURL,
                                   editedURLs: appState.editedURLs,
                                   thumbnail: appState.thumbnail(for:),
-                                  onSelect: { url in Task { await appState.openPhoto(url) } })
+                                  onSelect: { url in Task { await appState.openPhoto(url) } },
+                                  onDismiss: { appState.dismiss($0) })
                 }
             }
             .frame(minWidth: 460)
@@ -1295,6 +1370,9 @@ struct ContentView: View {
                 }
             }
             HStack(spacing: 10) {
+                Button(action: appState.closeCurrentPhoto) { toolbarLabel("Close", filled: false) }
+                    .buttonStyle(.plain)
+                    .help("Close this photo — your edit is saved")
                 Button(action: openBatchPanel) { toolbarLabel("Batch apply", filled: false) }
                     .buttonStyle(.plain)
                 // Press and hold to see the untouched original. DragGesture(minimumDistance:0) is

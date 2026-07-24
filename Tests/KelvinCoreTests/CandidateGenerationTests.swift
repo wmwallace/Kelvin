@@ -33,14 +33,18 @@ final class CandidateGenerationTests: XCTestCase {
 
     // MARK: - Candidate Count & Profiles
 
-    func testProducesFourDistinctCandidates() {
+    /// The engine now offers a WIDER set than the app shows: it generates every style and the
+    /// curator picks which are worth presenting (see CandidateCurator). So the guarantee here is
+    /// one recipe per style with stable ids — not a fixed count of four.
+    func testProducesOneCandidatePerStyle() {
         let p = makePerception()
         let s = makeStats()
         let candidates = RecipeEngine.candidates(perception: p, statistics: s)
 
-        XCTAssertEqual(candidates.count, 4)
-        let ids = candidates.compactMap { $0.id }
-        XCTAssertEqual(ids, ["natural", "vivid", "soft", "dramatic"])
+        XCTAssertEqual(candidates.count, CandidateStyle.all.count)
+        XCTAssertEqual(candidates.compactMap { $0.id }, CandidateStyle.all.map { $0.id })
+        XCTAssertEqual(Set(candidates.compactMap { $0.id }).count, candidates.count,
+                       "style ids must be unique — they key preference picks and saved edits")
     }
 
     // MARK: - Corrective Base Sharing
@@ -98,29 +102,34 @@ final class CandidateGenerationTests: XCTestCase {
 
     // MARK: - Pairwise Render Divergence
 
-    func testPairwiseRenderDivergence() throws {
+    /// Divergence is a property of what the photographer is SHOWN, not of the raw style list.
+    /// Across eight styles some pairs are naturally close (Natural and Warm differ mainly in white
+    /// balance) — that's fine, because the curator's job is to avoid presenting near-duplicates.
+    /// So this asserts the curated set is perceptually distinct, which is the guarantee that
+    /// actually matters (docs/EVALUATION.md's candidate-divergence criterion).
+    func testCuratedCandidatesArePerceptuallyDistinct() throws {
         let p = makePerception(person: false)
         let s = makeStats()
-        let candidates = RecipeEngine.candidates(perception: p, statistics: s)
-
         let image = TestSupport.makeGradientImage(width: 64, height: 64)
-        let samples = try candidates.map { recipe in
-            try ImageMetrics.sample(try Renderer.render(image, with: recipe))
-        }
 
-        // Compute pairwise ΔE2000 between rendered candidates
-        var minPairwiseDeltaE: Double = .infinity
+        let scored = try RecipeEngine.candidates(perception: p, statistics: s).map { recipe -> CandidateCurator.Scored in
+            let rendered = try Renderer.render(image, with: recipe)
+            let stats = try ImageStatistics.compute(rendered)
+            return .init(recipe: recipe, score: AestheticEvaluator.score(stats: stats))
+        }
+        let curated = CandidateCurator.select(from: scored, count: 4)
+        XCTAssertGreaterThanOrEqual(curated.count, 2, "curation should still offer a real choice")
+
+        let samples = try curated.map { try ImageMetrics.sample(try Renderer.render(image, with: $0.recipe)) }
+        var minPairwiseDeltaE = Double.infinity
         for i in 0..<samples.count {
             for j in (i + 1)..<samples.count {
-                let deltaE = ImageMetrics.meanDeltaE2000(samples[i], samples[j])
-                if deltaE < minPairwiseDeltaE {
-                    minPairwiseDeltaE = deltaE
-                }
+                minPairwiseDeltaE = min(minPairwiseDeltaE,
+                                        ImageMetrics.meanDeltaE2000(samples[i], samples[j]))
             }
         }
-
-        // Candidates must be perceptually distinct (mean ΔE > 1.0)
-        XCTAssertGreaterThan(minPairwiseDeltaE, 1.0, "Candidates are not perceptually distinct enough")
+        XCTAssertGreaterThan(minPairwiseDeltaE, 1.0,
+                             "the candidates actually shown must be perceptually distinct")
     }
 }
 

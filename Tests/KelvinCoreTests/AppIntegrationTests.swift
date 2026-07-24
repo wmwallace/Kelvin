@@ -33,7 +33,7 @@ final class AppIntegrationTests: XCTestCase {
         )
 
         let baselineCandidates = RecipeEngine.candidates(perception: perception, statistics: stats, profile: profile)
-        XCTAssertEqual(baselineCandidates.count, 4)
+        XCTAssertEqual(baselineCandidates.count, CandidateStyle.all.count)
         XCTAssertEqual(baselineCandidates[0].id, "natural")
 
         // 2. Add 5 picks consistently choosing "dramatic" with a positive exposure edit (+0.5 EV)
@@ -56,7 +56,7 @@ final class AppIntegrationTests: XCTestCase {
 
         // 4. Generate candidates with learned profile -> "dramatic" should lead and exposure should be nudged
         let learnedCandidates = RecipeEngine.candidates(perception: perception, statistics: stats, profile: profile)
-        XCTAssertEqual(learnedCandidates.count, 4)
+        XCTAssertEqual(learnedCandidates.count, CandidateStyle.all.count)
         XCTAssertEqual(learnedCandidates[0].id, "dramatic", "Learned profile should reorder favorite candidate style to first position")
     }
 }

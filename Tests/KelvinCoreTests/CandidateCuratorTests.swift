@@ -1,0 +1,71 @@
+import XCTest
+@testable import KelvinCore
+
+final class CandidateCuratorTests: XCTestCase {
+
+    private func scored(_ id: String, _ overall: Double, contrast: Double = 0,
+                        vibrance: Double = 0, exposure: Double = 0) -> CandidateCurator.Scored {
+        var g = GlobalAdjustments.neutral
+        g.contrast = contrast; g.vibrance = vibrance; g.exposureEV = exposure
+        let r = Recipe(schemaVersion: 1, id: id, label: id, provenance: nil, global: g,
+                       curve: nil, hsl: nil, masks: nil, detail: nil, geometry: nil)
+        return .init(recipe: r, score: AestheticEvaluator.Score(
+            overall: overall, tonalRange: 1, clipping: 1, skin: 1, colorCast: 1, issues: []))
+    }
+
+    /// The whole point: a candidate with a real defect must not be offered.
+    func testDropsDefectiveCandidates() {
+        let picked = CandidateCurator.select(from: [
+            scored("good", 0.95, contrast: 0),
+            scored("bad", 0.31, contrast: 40),        // the crushed-shadows case
+            scored("ok", 0.80, contrast: 20),
+            scored("awful", 0.20, contrast: -40)
+        ], count: 4)
+        let ids = picked.map { $0.recipe.id }
+        XCTAssertFalse(ids.contains("bad"), "a 0.31 candidate should never be shown")
+        XCTAssertFalse(ids.contains("awful"))
+        XCTAssertTrue(ids.contains("good"))
+    }
+
+    func testBestFirst() {
+        let picked = CandidateCurator.select(from: [
+            scored("mid", 0.75, contrast: 30), scored("best", 0.98, contrast: 0),
+            scored("low", 0.60, contrast: 60)
+        ], count: 3)
+        XCTAssertEqual(picked.first?.recipe.id, "best")
+    }
+
+    /// Ranking on score alone returns four shades of the same look, which defeats offering a choice.
+    func testPrefersVarietyOverNearDuplicates() {
+        let picked = CandidateCurator.select(from: [
+            scored("a", 0.96, contrast: 10),
+            scored("a2", 0.95, contrast: 11),      // essentially the same look
+            scored("a3", 0.94, contrast: 12),      // and again
+            scored("different", 0.85, contrast: 10, vibrance: 40, exposure: 0.5)
+        ], count: 2)
+        XCTAssertEqual(picked.count, 2)
+        XCTAssertTrue(picked.map { $0.recipe.id }.contains("different"),
+                      "a genuinely different look should beat a near-duplicate of the leader")
+    }
+
+    /// A hard photo must still offer something rather than an empty picker.
+    func testAlwaysReturnsSomething() {
+        let picked = CandidateCurator.select(from: [
+            scored("bad1", 0.30), scored("bad2", 0.25)
+        ], count: 4)
+        XCTAssertEqual(picked.count, 1, "offer the least-bad option, not nothing")
+        XCTAssertEqual(picked.first?.recipe.id, "bad1")
+    }
+
+    func testEmptyInputIsEmptyOutput() {
+        XCTAssertTrue(CandidateCurator.select(from: [], count: 4).isEmpty)
+    }
+
+    func testFillsUpToCountWhenVarietyIsScarce() {
+        let picked = CandidateCurator.select(from: [
+            scored("a", 0.96, contrast: 10), scored("b", 0.95, contrast: 11),
+            scored("c", 0.94, contrast: 12)
+        ], count: 3)
+        XCTAssertEqual(picked.count, 3, "four near-identical options still beat two")
+    }
+}

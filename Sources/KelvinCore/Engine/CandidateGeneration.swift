@@ -199,6 +199,49 @@ public struct CandidateStyle: Sendable, Equatable {
         curveScale: 1.5, matteToe: 0
     )
 
-    /// The candidate set, in display order (faithful first).
-    public static let all: [CandidateStyle] = [.natural, .vivid, .soft, .dramatic]
+    /// Bright and open — lifted shadows, gentle contrast, air in the frame. The high-key answer,
+    /// and often the right one for overcast light that would otherwise read heavy.
+    public static let airy = CandidateStyle(
+        id: "airy", label: "Airy",
+        contrastScale: 0.75, contrastBias: -6,
+        vibranceScale: 0.9, vibranceBias: -2, saturationBias: -3,
+        whitesBias: 10, blacksBias: 8, wbStrengthScale: 1.0,
+        curveScale: 0.7, matteToe: 8
+    )
+
+    /// Deep and saturated without crushing — where Dramatic goes moody by taking light away, this
+    /// goes rich by deepening what's there.
+    public static let rich = CandidateStyle(
+        id: "rich", label: "Rich",
+        contrastScale: 1.1, contrastBias: 8,
+        vibranceScale: 1.15, vibranceBias: 6, saturationBias: 2,
+        whitesBias: 2, blacksBias: -6, wbStrengthScale: 0.9,
+        curveScale: 1.1, matteToe: 0
+    )
+
+    /// Warm and flattering — keeps some of the light's own colour rather than neutralising it.
+    /// Golden hour, tungsten interiors, skin.
+    public static let warm = CandidateStyle(
+        id: "warm", label: "Warm",
+        contrastScale: 0.95, contrastBias: 2,
+        vibranceScale: 1.0, vibranceBias: 2, saturationBias: 0,
+        whitesBias: 3, blacksBias: -3, wbStrengthScale: 0.45,
+        curveScale: 0.95, matteToe: 4
+    )
+
+    /// Cool and clean — corrects the cast fully and holds colour back. Blue hour, snow, architecture.
+    public static let cool = CandidateStyle(
+        id: "cool", label: "Cool",
+        contrastScale: 1.05, contrastBias: 4,
+        vibranceScale: 0.85, vibranceBias: -4, saturationBias: -4,
+        whitesBias: 5, blacksBias: -5, wbStrengthScale: 1.15,
+        curveScale: 1.0, matteToe: 0
+    )
+
+    /// Everything the engine can offer. The app generates all of these and then *curates* — showing
+    /// eight looks, several of which are wrong for the photo, is a worse experience than showing
+    /// four that survived scrutiny. See `CandidateCurator`.
+    public static let all: [CandidateStyle] = [
+        .natural, .soft, .vivid, .dramatic, .airy, .rich, .warm, .cool
+    ]
 }
