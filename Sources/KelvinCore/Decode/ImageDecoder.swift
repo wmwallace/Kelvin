@@ -23,7 +23,7 @@ public enum ImageDecoder {
     /// Extensions we route through CIRAWFilter. Core Image supports far more than this;
     /// unknown extensions fall through to the generic decoder, which also handles many
     /// RAW types, so this list only needs the common cases.
-    static let rawExtensions: Set<String> = [
+    public static let rawExtensions: Set<String> = [
         "cr2", "cr3", "crw",           // Canon
         "nef", "nrw",                  // Nikon
         "arw", "srf", "sr2",           // Sony

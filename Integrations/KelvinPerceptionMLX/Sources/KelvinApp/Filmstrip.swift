@@ -17,10 +17,14 @@ enum PhotoBrowser {
 
     /// A small thumbnail for the strip. Decoding a 60 MP RAW per thumbnail would be absurd, so this
     /// asks ImageIO for an embedded/downsampled one — fast, and it never touches the edit pipeline.
+    /// - Important: `…FromImageIfAbsent`, never `…FromImageAlways`. `Always` makes ImageIO ignore
+    ///   the preview every camera embeds and decode the full frame instead — on a 60 MP ARW that is
+    ///   roughly a second of work *per thumbnail*, for a 160 px image. `IfAbsent` takes the embedded
+    ///   preview when there is one (there almost always is) and only decodes as a fallback.
     static func thumbnail(for url: URL, maxPixel: Int = 160) -> NSImage? {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         let opts: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: maxPixel
         ]

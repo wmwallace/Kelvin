@@ -28,10 +28,13 @@ public enum BatchApply {
 
     /// Extensions we attempt to decode. Core Image handles the RAW and HEIF cases; anything
     /// else is skipped by `imageFiles(in:)` so a folder's sidecars and notes are ignored.
-    public static let imageExtensions: Set<String> = [
-        "jpg", "jpeg", "png", "heic", "heif", "tif", "tiff",
-        "dng", "cr2", "cr3", "nef", "arw", "rw2", "orf", "raf"
-    ]
+    ///
+    /// Derived from `ImageDecoder.rawExtensions` rather than repeating it: the two lists had
+    /// drifted, so a folder of Leica/Pentax/Hasselblad frames browsed as EMPTY even though the
+    /// decoder opens them all. This list governs what the filmstrip and batch can see, so a
+    /// format the decoder gained but this list missed was effectively unopenable.
+    public static let imageExtensions: Set<String> =
+        ImageDecoder.rawExtensions.union(["jpg", "jpeg", "png", "heic", "heif", "tif", "tiff"])
 
     /// Decodable image files directly inside `directory` (non-recursive), in stable path order.
     public static func imageFiles(in directory: URL) throws -> [URL] {

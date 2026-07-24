@@ -107,3 +107,32 @@ final class BatchApplyTests: XCTestCase {
                        ["a.png", "b.png", "c.png"])
     }
 }
+
+/// What Kelvin can *browse* must match what it can *decode*.
+///
+/// These were two hand-maintained lists, and they had drifted: the decoder routes Leica, Pentax,
+/// Hasselblad, Phase One and several others through `CIRAWFilter`, but none of them appeared in
+/// the browse list. A folder of those frames listed as empty — the filmstrip showed nothing and
+/// batch skipped every file — so a format the app fully supports was unreachable through the UI.
+final class BrowsableFormatsTests: XCTestCase {
+
+    func testEveryDecodableRawFormatIsAlsoBrowsable() {
+        let missing = ImageDecoder.rawExtensions.subtracting(BatchApply.imageExtensions)
+        XCTAssertTrue(missing.isEmpty,
+                      "decoder opens these but the browser hides them: \(missing.sorted())")
+    }
+
+    func testCommonNonRawFormatsAreBrowsable() {
+        for ext in ["jpg", "jpeg", "png", "heic", "heif", "tif", "tiff"] {
+            XCTAssertTrue(BatchApply.imageExtensions.contains(ext), "\(ext) should be browsable")
+        }
+    }
+
+    /// Case comes off the filesystem however the camera wrote it — `.ARW`, `.CR3`, `.JPG`.
+    /// `imageFiles(in:)` lowercases before matching, so the set itself must be lowercase.
+    func testExtensionSetIsLowercased() {
+        for ext in BatchApply.imageExtensions {
+            XCTAssertEqual(ext, ext.lowercased(), "\(ext) must be stored lowercased to match")
+        }
+    }
+}

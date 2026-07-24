@@ -211,13 +211,32 @@ final class AppState: ObservableObject {
     private var sessions: [URL: PhotoSession] = [:]
     private var sessionOrder: [URL] = []
     private static let maxSessions = 8
-    private var thumbnails: [URL: NSImage] = [:]
+    @Published private var thumbnails: [URL: NSImage] = [:]
+    /// URLs whose thumbnail is being fetched, so a redrawn strip doesn't queue the same work twice.
+    private var thumbnailsInFlight: Set<URL> = []
 
+    /// A filmstrip thumbnail, **never decoded on the calling thread**.
+    ///
+    /// This used to decode inline. Called from `FilmstripView.cell` during view-body evaluation,
+    /// that put a full image decode on the main thread once per visible cell — and for a folder of
+    /// 60 MP RAWs it meant dozens of full RAW decodes before SwiftUI could finish a single layout
+    /// pass. The window could not draw at all, which read as "the app won't open my photos".
+    ///
+    /// Now: return whatever is cached, start a background fetch for anything missing, and publish
+    /// it when it arrives. A cell with no thumbnail yet simply shows its placeholder.
     func thumbnail(for url: URL) -> NSImage? {
         if let hit = thumbnails[url] { return hit }
-        let t = PhotoBrowser.thumbnail(for: url)
-        if let t { thumbnails[url] = t }
-        return t
+        guard !thumbnailsInFlight.contains(url) else { return nil }
+        thumbnailsInFlight.insert(url)
+        Task { [weak self] in
+            let image = await Task.detached(priority: .utility) {
+                PhotoBrowser.thumbnail(for: url)
+            }.value
+            guard let self else { return }
+            self.thumbnailsInFlight.remove(url)
+            if let image { self.thumbnails[url] = image }
+        }
+        return nil
     }
 
     /// The filename Kelvin suggests for an export — built from what it understood about the
@@ -353,7 +372,9 @@ final class AppState: ObservableObject {
 
     /// Switch photos from the filmstrip: stash what you were doing, then restore or load fresh.
     func openPhoto(_ url: URL) async {
-        guard url != imageURL else { return }
+        // `|| proxyCI == nil` so a photo whose load failed can be retried. Without it, a transient
+        // failure left `imageURL` set and this guard then refused every attempt at the same file.
+        guard url != imageURL || proxyCI == nil else { return }
         stashCurrentSession()
         if let cached = sessions[url] {
             restore(cached)
@@ -361,6 +382,66 @@ final class AppState: ObservableObject {
             return
         }
         await loadPhoto(from: url)
+    }
+
+    /// The single way a photo gets into Kelvin, whatever the source — the Open panel, ⌘O, a drop,
+    /// or the filmstrip. Everything funnels here so opening behaves identically in every case:
+    /// a folder opens its first frame, an already-open photo's edit is stashed rather than lost,
+    /// and anything unreadable says so instead of failing silently.
+    func open(_ url: URL) async {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+            statusMessage = "That file isn't there any more."
+            return
+        }
+        if isDirectory.boolValue {
+            // Dragging a shoot folder in is a natural thing to try; open the first frame and let
+            // the filmstrip carry the rest.
+            guard let first = (try? BatchApply.imageFiles(in: url))?
+                .sorted(by: { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending })
+                .first else {
+                statusMessage = "No photos Kelvin can read in \(url.lastPathComponent)."
+                return
+            }
+            await openPhoto(first)
+            return
+        }
+        guard BatchApply.imageExtensions.contains(url.pathExtension.lowercased()) else {
+            statusMessage = "Kelvin can't read .\(url.pathExtension) files."
+            return
+        }
+        await openPhoto(url)
+    }
+
+    /// Resolve a drag-and-drop payload to a file and open it. Takes the first item that resolves,
+    /// so dragging a selection of several frames opens one rather than doing nothing.
+    func openDropped(_ providers: [NSItemProvider]) async {
+        for provider in providers {
+            guard provider.canLoadObject(ofClass: URL.self) else { continue }
+            let url: URL? = await withCheckedContinuation { continuation in
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    continuation.resume(returning: url)
+                }
+            }
+            if let url {
+                await open(url)
+                return
+            }
+        }
+        statusMessage = "Couldn't read what was dropped."
+    }
+
+    /// The Open panel, behind both File ▸ Open… (⌘O) and the empty state's button.
+    func chooseAndOpen() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image, .rawImage]
+        panel.allowsMultipleSelection = false
+        // Choosing a folder opens the shoot — the same thing dropping one does.
+        panel.canChooseDirectories = true
+        panel.prompt = "Open"
+        if panel.runModal() == .OK, let url = panel.url {
+            Task { await open(url) }
+        }
     }
 
     func loadPhoto(from url: URL) async {
@@ -376,29 +457,41 @@ final class AppState: ObservableObject {
         userMasks = []; paintingMaskId = nil; selectedUserMaskId = nil   // hand-drawn masks are per-photo
         zoom = 1; pan = .zero
         do {
-            let fullRes = try ImageDecoder.decode(url: url)
-            self.fullResCI = fullRes
+            // DECODE OFF THE MAIN THREAD. Decoding a 60 MP RAW, materialising the proxy and
+            // SHA-256-ing a 60 MB file together take many seconds; run on the main thread they
+            // block every frame, so the window could not paint and the app looked dead on exactly
+            // the files it exists to edit.
+            let decoded = try await Task.detached(priority: .userInitiated) { () throws -> DecodedPhoto in
+                let fullRes = try ImageDecoder.decode(url: url)
 
-            let fileData = try Data(contentsOf: url)
-            let hash = SHA256.hash(data: fileData)
-            self.imageId = "sha256:" + hash.compactMap { String(format: "%02x", $0) }.joined()
+                let fileData = try Data(contentsOf: url)
+                let hash = SHA256.hash(data: fileData)
+                let id = "sha256:" + hash.compactMap { String(format: "%02x", $0) }.joined()
 
-            statusMessage = "Building proxy…"
-            // The model wants a small 768px proxy (non-negotiable #4); the EDIT proxy is a bit
-            // larger so zooming shows more detail, but not so large that live rendering slows down
-            // (1200px balances zoom detail against snappy sliders). Masks build from it, so they
-            // stay aligned when zoomed.
-            let perceptionProxy = PerceptionProxy.downsample(fullRes)
-            // MATERIALISE the edit proxy. `downsample` returns a *lazy* CIImage — a filter graph
-            // over the full-resolution original — so every later measurement (mask coverage,
-            // subject luma, dust scan, histogram) silently re-renders all 60 megapixels again.
-            // Several of those run per photo, and on a large RAW it pushed loading from seconds
-            // into minutes with the window never appearing. Rendering once here means everything
-            // downstream works on real 1200 px pixels.
-            let proxy = materialise(PerceptionProxy.downsample(fullRes, maxEdge: 1200))
-            self.proxyCI = proxy
+                // The model wants a small 768px proxy (non-negotiable #4); the EDIT proxy is a bit
+                // larger so zooming shows more detail, but not so large that live rendering slows
+                // down (1200px balances zoom detail against snappy sliders). Masks build from it,
+                // so they stay aligned when zoomed.
+                let perceptionProxy = PerceptionProxy.downsample(fullRes)
+                // MATERIALISE the edit proxy. `downsample` returns a *lazy* CIImage — a filter
+                // graph over the full-resolution original — so every later measurement (mask
+                // coverage, subject luma, dust scan, histogram) silently re-renders all 60
+                // megapixels again. Rendering once here means everything downstream works on real
+                // 1200 px pixels.
+                let proxy = Self.materialiseShared(PerceptionProxy.downsample(fullRes, maxEdge: 1200))
+                return DecodedPhoto(fullRes: fullRes, perceptionProxy: perceptionProxy,
+                                    proxy: proxy, originalPreview: Self.ciToNSImageShared(proxy),
+                                    imageId: id)
+            }.value
+            guard imageURL == url else { return }
+
+            self.fullResCI = decoded.fullRes
+            self.imageId = decoded.imageId
+            self.proxyCI = decoded.proxy
             // The untouched original, for the before/after compare.
-            self.originalPreviewImage = ciToNSImage(proxy)
+            self.originalPreviewImage = decoded.originalPreview
+            let perceptionProxy = decoded.perceptionProxy
+            let proxy = decoded.proxy
 
             statusMessage = "Reading the scene…"
             // Real perception: Qwen2.5-VL reads the 768px proxy. First call loads the model (a few
@@ -415,20 +508,29 @@ final class AppState: ObservableObject {
             self.perception = perceptionRead
 
             statusMessage = "Measuring…"
-            let sampleBytes = try ImageMetrics.sample(proxy)
-            let stats = ImageStatistics.compute(from: sampleBytes)
+            // Also off the main thread: the statistics pass, Vision's person/sky segmentation and
+            // the dust scan each render the proxy, and together they were the second-biggest block
+            // on the main thread after decode.
+            let measurement = try await Task.detached(priority: .userInitiated) { () throws -> MeasuredPhoto in
+                let sampleBytes = try ImageMetrics.sample(proxy)
+                let stats = ImageStatistics.compute(from: sampleBytes)
+                // Subject + sky masks (for local edits). Generated on the proxy for fast previews;
+                // the measured region brightness tells the engine whether to lift the subject or
+                // defog the sky.
+                let measured = LocalMasks.measure(in: proxy)
+                // Scan for sensor dust once (normalised coords reused everywhere). Conservative —
+                // a clean frame yields none. Off until the user opts in.
+                return MeasuredPhoto(stats: stats, masks: measured, dust: DustDetector.detect(in: proxy))
+            }.value
+            guard imageURL == url else { return }
 
-            // Subject + sky masks (for local edits). Generated on the proxy for fast previews; the
-            // measured region brightness tells the engine whether to lift the subject or defog the sky.
-            let measured = LocalMasks.measure(in: proxy)
-            self.proxyMaskBitmaps = measured.bitmaps
-            self.subjectLuma = measured.subjectLuma
-            self.skyLuma = measured.skyLuma
-            let proxyMasks = measured.bitmaps
+            let stats = measurement.stats
+            self.proxyMaskBitmaps = measurement.masks.bitmaps
+            self.subjectLuma = measurement.masks.subjectLuma
+            self.skyLuma = measurement.masks.skyLuma
+            let proxyMasks = measurement.masks.bitmaps
 
-            // Scan for sensor dust once (normalised coords reused everywhere). Conservative — a
-            // clean frame yields none. Off until the user opts in.
-            self.healSpots = DustDetector.detect(in: proxy)
+            self.healSpots = measurement.dust
             self.detectedSpotCount = self.healSpots.count
             self.removeDust = false
 
@@ -1119,6 +1221,25 @@ final class AppState: ObservableObject {
         let previews: [String: NSImage]
     }
 
+    /// Everything the decode stage produces. Bundled so the whole of it can be computed on a
+    /// background thread and handed back in one hop — decoding a 60 MP RAW, materialising the
+    /// proxy and hashing the file are all far too slow to sit on the main thread.
+    private struct DecodedPhoto: @unchecked Sendable {
+        let fullRes: CIImage
+        let perceptionProxy: CIImage
+        let proxy: CIImage
+        let originalPreview: NSImage?
+        let imageId: String
+    }
+
+    /// What measuring the proxy yields: histogram statistics, the local mask stack, and the dust
+    /// scan. Vision segmentation and the statistics pass are both heavy enough to freeze the UI.
+    private struct MeasuredPhoto: @unchecked Sendable {
+        let stats: ImageStatistics
+        let masks: LocalMasks.Measured
+        let dust: [HealSpot]
+    }
+
     /// Shared with the background candidate build — a CIContext is thread-safe and expensive to
     /// create, so one instance serves both.
     nonisolated(unsafe) static let sharedContext: CIContext = {
@@ -1129,13 +1250,20 @@ final class AppState: ObservableObject {
 
     /// Render a lazy CIImage into a concrete bitmap-backed one, so downstream passes sample real
     /// pixels instead of re-evaluating the whole graph each time.
-    private func materialise(_ image: CIImage) -> CIImage {
-        guard let cg = context.createCGImage(image, from: image.extent) else { return image }
+    private func materialise(_ image: CIImage) -> CIImage { Self.materialiseShared(image) }
+
+    private func ciToNSImage(_ ciImage: CIImage) -> NSImage? { Self.ciToNSImageShared(ciImage) }
+
+    // Static twins of the two above, for use inside `Task.detached` during load. `CIContext` is
+    // documented as thread-safe and `sharedContext` is already used this way by the candidate
+    // build, so both stages can share the one GPU context rather than each making its own.
+    nonisolated static func materialiseShared(_ image: CIImage) -> CIImage {
+        guard let cg = sharedContext.createCGImage(image, from: image.extent) else { return image }
         return CIImage(cgImage: cg)
     }
 
-    private func ciToNSImage(_ ciImage: CIImage) -> NSImage? {
-        guard let cg = context.createCGImage(ciImage, from: ciImage.extent) else { return nil }
+    nonisolated static func ciToNSImageShared(_ ciImage: CIImage) -> NSImage? {
+        guard let cg = sharedContext.createCGImage(ciImage, from: ciImage.extent) else { return nil }
         return NSImage(cgImage: cg, size: NSZeroSize)
     }
 }
@@ -1172,7 +1300,9 @@ struct TemperatureRail: View {
 // MARK: - Root
 
 struct ContentView: View {
-    @StateObject private var appState = AppState()
+    /// Owned by `KelvinApp` rather than created here, so the File menu can drive the same state
+    /// the window shows — a menu command with no route to the app's state is a dead menu.
+    @ObservedObject var appState: AppState
     @State private var isTargeted = false
     @State private var panStart = CGSize.zero
     @State private var zoomStart = 1.0
@@ -1192,6 +1322,30 @@ struct ContentView: View {
         }
         .background(Theme.base)
         .preferredColorScheme(.dark)
+        // The drop target is the WHOLE WINDOW, not just the empty state. It used to live only on
+        // the empty state, which meant that once you had a photo open there was no way at all to
+        // bring another one in — dragging did nothing, and there was no Open command either. The
+        // filmstrip only ever shows the folder you came from, so a second shoot was unreachable.
+        .onDrop(of: [.fileURL], isTargeted: $isTargeted) { providers in
+            Task { @MainActor in await appState.openDropped(providers) }
+            return true
+        }
+        // A drop hint over the workspace too — without it, dragging onto an open photo gives no
+        // sign the window will take it.
+        .overlay {
+            if isTargeted && appState.proxyCI != nil {
+                RoundedRectangle(cornerRadius: 16)
+                    .strokeBorder(Theme.glow.opacity(0.7), style: StrokeStyle(lineWidth: 2, dash: [7, 6]))
+                    .background(Theme.base.opacity(0.35))
+                    .overlay(
+                        Text("Drop to open")
+                            .font(Theme.ui(15, .semibold))
+                            .foregroundColor(Theme.ink)
+                    )
+                    .padding(18)
+                    .allowsHitTesting(false)
+            }
+        }
         .task { await appState.loadDemoIfRequested() }
         .sheet(isPresented: $appState.showBatchSheet) { batchSheet }
     }
@@ -1260,7 +1414,7 @@ struct ContentView: View {
                     .frame(width: 440)
                 }
 
-                Button(action: openFileImporter) {
+                Button(action: appState.chooseAndOpen) {
                     Text("Choose a photo")
                         .font(Theme.ui(13, .semibold))
                         .foregroundColor(Theme.base)
@@ -1286,13 +1440,6 @@ struct ContentView: View {
                     .strokeBorder(Theme.glow.opacity(0.6), style: StrokeStyle(lineWidth: 1.5, dash: [7, 6]))
                     .padding(24)
             }
-        }
-        .onDrop(of: [.fileURL], isTargeted: $isTargeted) { providers in
-            guard let provider = providers.first else { return false }
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                if let url = url { Task { @MainActor in await appState.loadPhoto(from: url) } }
-            }
-            return true
         }
     }
 
@@ -1468,6 +1615,12 @@ struct ContentView: View {
                 }
             }
             HStack(spacing: 10) {
+                // Discoverable way to bring in a photo from a different folder. The filmstrip only
+                // ever shows the folder you arrived from, so without this the only routes out were
+                // ⌘O or a drag — neither of them visible.
+                Button(action: appState.chooseAndOpen) { toolbarLabel("Open", filled: false) }
+                    .buttonStyle(.plain)
+                    .help("Open another photo or folder (⌘O)")
                 Button(action: appState.closeCurrentPhoto) { toolbarLabel("Close", filled: false) }
                     .buttonStyle(.plain)
                     .help("Close this photo — your edit is saved")
@@ -1827,16 +1980,6 @@ struct ContentView: View {
     }
 
     // MARK: File panels
-
-    private func openFileImporter() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.image, .rawImage]
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        if panel.runModal() == .OK, let url = panel.url {
-            Task { await appState.loadPhoto(from: url) }
-        }
-    }
 
     private func openExportPanel() {
         let panel = NSSavePanel()

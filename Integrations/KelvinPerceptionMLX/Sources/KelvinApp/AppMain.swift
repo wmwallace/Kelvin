@@ -4,6 +4,9 @@ import KelvinCore
 
 @main
 struct KelvinApp: App {
+    /// Held at App level so both the window and the File menu act on one state.
+    @StateObject private var appState = AppState()
+
     init() {
         // Become a regular foreground app even when launched unbundled (`swift run`): otherwise
         // the process runs as a background/accessory role — its window never shows, and macOS
@@ -17,11 +20,25 @@ struct KelvinApp: App {
 
     var body: some SwiftUI.Scene {
         WindowGroup {
-            ContentView()
+            ContentView(appState: appState)
                 .frame(minWidth: 940, minHeight: 660)
                 .onAppear { NSApplication.shared.activate(ignoringOtherApps: true) }
         }
         // Hidden title bar so the darkroom UI runs edge to edge — the window is the instrument.
         .windowStyle(.hiddenTitleBar)
+        .commands {
+            // There was no File ▸ Open and no ⌘O at all — the only way in was the empty state's
+            // button, so with a photo already open Kelvin could not be given another one. ⌘O is
+            // the first thing anyone reaches for.
+            CommandGroup(replacing: .newItem) {
+                Button("Open Photo or Folder…") { appState.chooseAndOpen() }
+                    .keyboardShortcut("o", modifiers: .command)
+            }
+            CommandGroup(after: .newItem) {
+                Button("Close Photo") { appState.closeCurrentPhoto() }
+                    .keyboardShortcut("w", modifiers: [.command, .shift])
+                    .disabled(appState.imageURL == nil)
+            }
+        }
     }
 }
