@@ -527,7 +527,11 @@ final class AppState: ObservableObject {
             let dx = last.x - nx, dy = last.y - ny
             if (dx * dx + dy * dy).squareRoot() < minStep { return }
         }
-        userMasks[idx].stamps.append(BrushStamp(x: nx, y: ny, radius: brushRadius, hardness: 0.6))
+        // Round to 4 decimals: sub-pixel even on a 9504 px export, and it keeps the sidecar (and
+        // every undo snapshot) compact — stamps are the one recipe field that grows with use.
+        func r4(_ v: Double) -> Double { (v * 10_000).rounded() / 10_000 }
+        userMasks[idx].stamps.append(
+            BrushStamp(x: r4(nx), y: r4(ny), radius: r4(brushRadius), hardness: 0.6))
         onEdit()
     }
 

@@ -105,6 +105,9 @@ Fully numeric. Renderer-agnostic. Serializes to the sidecar.
   "hsl": {
     "orange": { "h": -2, "s": 6, "l": 4 }
   },
+  "heal": [
+    { "x": 0.42, "y": 0.13, "radius": 0.004, "dx": 0.02, "dy": 0.0, "feather": 50 }
+  ],
   "masks": [
     {
       "id": "m1",
@@ -147,11 +150,39 @@ These are tests, not suggestions.
 4. **Recipes are composable.** Applying recipe B on top of recipe A must be
    well-defined. Additive for adjustments, last-wins for curves and masks.
 5. **Order of operations is fixed and documented in code**, not implied by JSON key
-   order. Write it down: geometry → white balance → exposure/tone → curve → HSL →
-   masks → detail.
+   order. As implemented in `Renderer.render`:
+
+   heal → white balance → exposure → highlight/shadow → whites/blacks →
+   contrast/saturation → dehaze → clarity → vibrance → luma curve → RGB curves →
+   HSL → masks → detail → **geometry**.
+
+   Note geometry runs *last*, not first as an earlier draft of this doc said. Framing is
+   layered on top of the edit, which buys a useful property: **mask coordinates are in
+   source space, so re-cropping never moves your masks.** The cost is that a UI placing a
+   mask on a straightened preview must map the click back through the crop —
+   `Renderer.sourceNormalized` / `framedNormalized` are that exact inverse pair, and are
+   round-trip tested against the renderer.
 6. **Masks are references, not bitmaps.** The recipe stores mask *type and parameters*;
    the actual mask is regenerated or cached separately. A sidecar must stay small enough
-   to sit in git.
+   to sit in git. This holds for every mask kind — see below.
+
+### Mask kinds
+
+All are parametric, so nothing stores pixels. A mask carries at most one of these; the
+renderer generates the coverage from it (or, for segmentation kinds, from a bitmap the
+caller supplies for that `id`/`type`).
+
+| Kind | Field | How coverage is produced |
+|---|---|---|
+| `subject`, `sky` | *(none)* | Caller supplies a segmentation bitmap (Vision person seg / sky detection). `"invert": true` on a subject mask gives **background**. |
+| `skin` | `selection` | Skin *hue* ∩ the person segmentation. Requires the segmentation — without it the mask does nothing rather than degrading into a hue selection that would grab skin-toned scenery. Keys on hue, never brightness, so it's fair across complexions. |
+| `radial`, `linear` | `shape` | `{kind, cx, cy, radius, angle, softness}` — a soft ellipse or a graduated edge. Normalised, top-left origin. |
+| `brush` | `stamps` | `[{x, y, radius, hardness}]` — the union of soft circular dabs along a stroke. A caller may supply a pre-baked stroke under the mask's `id` to avoid recompositing every frame; it must render identically. |
+| `color`, `luminance` | `selection` | `{kind, center, range, softness}` baked into a cube that keys hue or luma → white-where-selected. Near-grey pixels are excluded from a colour selection. |
+
+`heal` sits outside `masks`: a list of `{x, y, radius, dx, dy, feather}` spots, each patched
+from `(dx, dy)` away. Non-generative and applied first, so downstream tone treats the
+repaired area like any other pixels.
 
 ### Ranges
 
