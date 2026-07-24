@@ -204,10 +204,12 @@ final class AppState: ObservableObject {
             self.imageId = "sha256:" + hash.compactMap { String(format: "%02x", $0) }.joined()
 
             statusMessage = "Building proxy…"
-            // The model wants a small 768px proxy (non-negotiable #4); the EDIT proxy is larger so
-            // zooming in shows real detail, and the masks (built from it) stay aligned.
+            // The model wants a small 768px proxy (non-negotiable #4); the EDIT proxy is a bit
+            // larger so zooming shows more detail, but not so large that live rendering slows down
+            // (1200px balances zoom detail against snappy sliders). Masks build from it, so they
+            // stay aligned when zoomed.
             let perceptionProxy = PerceptionProxy.downsample(fullRes)
-            let proxy = PerceptionProxy.downsample(fullRes, maxEdge: 1600)
+            let proxy = PerceptionProxy.downsample(fullRes, maxEdge: 1200)
             self.proxyCI = proxy
             // The untouched original, for the before/after compare.
             self.originalPreviewImage = ciToNSImage(proxy)
