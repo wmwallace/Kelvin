@@ -256,20 +256,60 @@ final class AppState: ObservableObject {
         isProcessing = false
     }
 
+    /// Apply the chosen *look* across a folder with per-photo intelligence: the style is held
+    /// constant, but every photo is re-perceived and re-measured so its own corrective baseline
+    /// (exposure / white balance / tone) is derived fresh. A shoot's frames differ in exposure
+    /// and scene — copying identical slider values would wreck half of them. The manual tweaks
+    /// you made on the reference photo ride along on top of each adapted recipe.
     func runBatchApply(inputDir: URL, outputDir: URL) async {
-        guard let recipe = activeRecipe else { return }
+        guard let styleId = selectedCandidateId,
+              let style = CandidateStyle.all.first(where: { $0.id == styleId }) else { return }
+        let tweaks = manualTweaks()
         isProcessing = true
-        statusMessage = "Applying the look across the folder…"
         do {
             let files = try BatchApply.imageFiles(in: inputDir)
-            let outcome = try BatchApply.run(inputs: files, recipe: recipe, outputDir: outputDir)
-            self.batchOutcome = outcome
+            try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
+            var written: [URL] = []
+            var failures: [BatchApply.Failure] = []
+            for (i, file) in files.enumerated() {
+                statusMessage = "Adapting \(style.label) to photo \(i + 1) of \(files.count)…"
+                do {
+                    let image = try ImageDecoder.decode(url: file)
+                    let proxy = PerceptionProxy.downsample(image)
+                    let perception = try await perceptionProvider.perceive(proxy)
+                    let stats = try ImageStatistics.compute(proxy)
+                    var recipe = RecipeEngine.candidate(perception: perception, statistics: stats, style: style)
+                    applyTweaks(tweaks, to: &recipe.global)
+                    let out = outputDir.appendingPathComponent(file.deletingPathExtension().lastPathComponent)
+                        .appendingPathExtension("jpg")
+                    try ImageWriter.write(Renderer.render(image, with: recipe), to: out, format: .jpeg(quality: 0.92))
+                    written.append(out)
+                } catch {
+                    failures.append(BatchApply.Failure(source: file, message: "\(error)"))
+                }
+            }
+            self.batchOutcome = BatchApply.Outcome(written: written, failures: failures)
             self.showBatchSheet = true
-            statusMessage = "Batch done · \(outcome.succeeded) applied, \(outcome.failed) skipped"
+            statusMessage = "Batch done · \(written.count) edited as \(style.label), \(failures.count) skipped"
         } catch {
             statusMessage = "Batch failed — \(error.localizedDescription)"
         }
         isProcessing = false
+    }
+
+    /// The reference photo's manual slider tweaks, to carry onto every batch photo.
+    private func manualTweaks() -> [String: Double] {
+        ["exposure_ev": deltaExposure, "contrast": deltaContrast, "highlights": deltaHighlights,
+         "shadows": deltaShadows, "vibrance": deltaVibrance, "saturation": deltaSaturation]
+    }
+
+    private func applyTweaks(_ t: [String: Double], to g: inout GlobalAdjustments) {
+        g.exposureEV = clampStep(g.exposureEV + (t["exposure_ev"] ?? 0), -5...5, 0.05)
+        g.contrast = clampStep(g.contrast + (t["contrast"] ?? 0), -100...100, 1)
+        g.highlights = clampStep(g.highlights + (t["highlights"] ?? 0), -100...100, 1)
+        g.shadows = clampStep(g.shadows + (t["shadows"] ?? 0), -100...100, 1)
+        g.vibrance = clampStep(g.vibrance + (t["vibrance"] ?? 0), -100...100, 1)
+        g.saturation = clampStep(g.saturation + (t["saturation"] ?? 0), -100...100, 1)
     }
 
     // Active look's white balance for the rail (nil = as-shot).

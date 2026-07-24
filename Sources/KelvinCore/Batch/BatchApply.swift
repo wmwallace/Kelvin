@@ -15,6 +15,7 @@ public enum BatchApply {
     public struct Failure: Sendable, Equatable {
         public var source: URL
         public var message: String
+        public init(source: URL, message: String) { self.source = source; self.message = message }
     }
 
     public struct Outcome: Sendable {
@@ -22,6 +23,7 @@ public enum BatchApply {
         public var failures: [Failure]
         public var succeeded: Int { written.count }
         public var failed: Int { failures.count }
+        public init(written: [URL], failures: [Failure]) { self.written = written; self.failures = failures }
     }
 
     /// Extensions we attempt to decode. Core Image handles the RAW and HEIF cases; anything
