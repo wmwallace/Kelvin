@@ -129,6 +129,17 @@ struct SubjectHighlight: View {
                 // Above the box, unless that would put it off the top of the photo.
                 .offset(x: rect.minX, y: max(imageFrame.minY, rect.minY - 16))
         }
+        // THIS LINE IS LOAD-BEARING, and leaving it out is why the box appeared in the wrong
+        // place. `.offset` does not participate in layout, so without a frame the ZStack sizes
+        // itself to its largest child — the outline — and `.overlay` then CENTRES that in the
+        // canvas. The offsets, which are absolute positions in the canvas, were therefore applied
+        // starting from a centred origin rather than the top-left.
+        //
+        // The displacement was not even constant: the ZStack's size depends on the subject's box,
+        // so every subject was wrong by a different amount, which is what made it look like boxes
+        // appearing at random. Filling the container makes `.topLeading` mean the canvas's
+        // top-left, which is the coordinate space `rect` was computed in.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .allowsHitTesting(false)
     }
 }
