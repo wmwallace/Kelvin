@@ -40,6 +40,18 @@ public struct ImageStatistics: Equatable, Sendable {
     /// shadows. Not a defect on its own; it says how much there is to lose, so the engine can
     /// ease off deepening the blacks when a large part of the subject sits down there.
     public var shadowRegion: Double
+    /// Fraction of the frame whose colour has run out of headroom: bright pixels (value > 0.20)
+    /// at HSV saturation above 0.85, where one channel has collapsed toward zero and the hue has
+    /// no gradation left.
+    ///
+    /// This is the chroma analogue of `highlightClip`. Tone has two "lost detail" measures and
+    /// colour had none, which is how an automatic correction could drive a pale pink object to a
+    /// screaming flat orange while every existing statistic said the edit had *improved*.
+    ///
+    /// It is deliberately NOT scored as a defect on its own — a red car or a sunset legitimately
+    /// clips colour, and that is a photograph, not a mistake. It is used as a *delta*: an
+    /// automatic step that adds colour clipping which was not there before has broken something.
+    public var saturationClip: Double
     /// Mean CIELAB a (green ↔ magenta). Positive = magenta cast.
     public var chromaA: Double
     /// Mean CIELAB b (blue ↔ yellow). Positive = yellow/warm cast.
@@ -52,10 +64,11 @@ public struct ImageStatistics: Equatable, Sendable {
         meanLuma: Double, medianLuma: Double, blackPoint: Double, shadowLevel: Double,
         highlightLevel: Double, whitePoint: Double, highlightClip: Double, shadowClip: Double,
         chromaA: Double, chromaB: Double,
-        shadowMass: Double = 0, shadowRegion: Double = 0
+        shadowMass: Double = 0, shadowRegion: Double = 0, saturationClip: Double = 0
     ) {
         self.shadowMass = shadowMass
         self.shadowRegion = shadowRegion
+        self.saturationClip = saturationClip
         self.meanLuma = meanLuma
         self.medianLuma = medianLuma
         self.blackPoint = blackPoint
@@ -85,7 +98,7 @@ public struct ImageStatistics: Equatable, Sendable {
         var lumaSum = 0.0
         var sa = 0.0, sb = 0.0
         var hi = 0, lo = 0
-        var unreadable = 0, inShadow = 0
+        var unreadable = 0, inShadow = 0, colourClipped = 0
 
         data.withUnsafeBytes { dp in
             let p = dp.bindMemory(to: UInt8.self)
@@ -109,6 +122,12 @@ public struct ImageStatistics: Equatable, Sendable {
                 if r8 <= 1 && g8 <= 1 && b8 <= 1 { lo += 1 }
                 if y < 0.08 { unreadable += 1 }
                 if y < 0.20 { inShadow += 1 }
+
+                // Colour with no headroom left: bright enough to read, but one channel has
+                // collapsed so far that the hue is a flat poster colour. Dark pixels are excluded
+                // — deep shadows are noisy and chroma there means nothing.
+                let mx = max(r, g, b)
+                if mx > 0.20, (mx - min(r, g, b)) / mx > 0.85 { colourClipped += 1 }
             }
         }
 
@@ -131,7 +150,8 @@ public struct ImageStatistics: Equatable, Sendable {
             chromaA: sa / n,
             chromaB: sb / n,
             shadowMass: Double(unreadable) / n,
-            shadowRegion: Double(inShadow) / n
+            shadowRegion: Double(inShadow) / n,
+            saturationClip: Double(colourClipped) / n
         )
     }
 
