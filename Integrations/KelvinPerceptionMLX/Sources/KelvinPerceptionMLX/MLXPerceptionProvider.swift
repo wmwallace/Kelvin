@@ -51,7 +51,11 @@ public actor MLXPerceptionProvider: PerceptionProvider {
     }
 
     /// Which model this provider is actually running — worth surfacing when comparing two.
-    public var activeModelID: String { modelID }
+    ///
+    /// `nonisolated` because it is the immutable id the actor was built with, not state: a caller
+    /// wanting to *report* which model is loading should not have to await the actor that is busy
+    /// loading it.
+    public nonisolated var activeModelID: String { modelID }
 
     public func perceive(_ image: CIImage) async throws -> Perception {
         let container = try await loadedContainer()

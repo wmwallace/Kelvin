@@ -49,7 +49,7 @@ if first == "label" {
         let images = try BatchApply.imageFiles(in: inURL)
         guard !images.isEmpty else { die("no images in \(inDir)") }
         try FileManager.default.createDirectory(at: outURL, withIntermediateDirectories: true)
-        note("Labelling \(images.count) image(s) with Qwen2.5-VL (first run downloads ~2.9 GB)…")
+        note("Labelling \(images.count) image(s) with \(provider.activeModelID) (first run downloads the weights)…")
 
         var done = 0, skipped = 0, failed = 0
         for (i, image) in images.enumerated() {
@@ -79,7 +79,10 @@ if first == "label" {
         let imageURL = URL(fileURLWithPath: first)
         let image = try ImageDecoder.decode(url: imageURL)
         note("Image: \(imageURL.lastPathComponent)  \(Int(image.extent.width))×\(Int(image.extent.height))")
-        note("Loading Qwen2.5-VL-3B-Instruct-4bit (first run downloads ~2.9 GB)…")
+        // The model actually in use, not the default. This said "Qwen2.5-VL-3B-Instruct-4bit"
+        // unconditionally, so `KELVIN_MODEL=…` — which exists precisely so two models can be
+        // compared on real photos — reported the wrong one the whole time it was being A/B'd.
+        note("Loading \(provider.activeModelID) (first run downloads the weights)…")
 
         let started = Date()
         let perception = try await provider.perceive(image)
