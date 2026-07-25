@@ -164,9 +164,7 @@ agreement (D8). `LICENSE`, `CLA.md`, `CONTRIBUTING.md`, `SECURITY.md` and CI now
 and are current — earlier revisions of this file said not to add them, which was true
 while the licence was undecided and is not any more.
 
-`docs/an internal working note` is the remaining checklist. The items that must happen **before**
-the first public clone (history is rewritable now and not afterwards) are in its first
-section.
+How to build and ship a release is in `docs/RELEASING.md`.
 
 ---
 

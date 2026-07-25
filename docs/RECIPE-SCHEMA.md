@@ -235,7 +235,7 @@ Store these locally. They never leave the machine.
 
 ---
 
-## Why this beats the incumbent approach
+## Why the cold start matters
 
 Commercial tools that learn your style (Imagen, Aftershoot) need on the order of
 2,500–3,000 previously edited photos to build a profile. That is a brutal cold start and

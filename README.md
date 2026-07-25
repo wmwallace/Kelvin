@@ -30,15 +30,18 @@ it will invent one, confidently, and you will never know which answers were gues
 ## Status: pre-alpha
 
 **Works:** the editor, with the full adjustment set, colour mixer, geometry and a mask kit (subject,
-sky, radial, graduated, brush, colour range, luminance, skin, per-person). On-device scene reading.
-Candidate generation. Culling with keep/reject. A scan that measures sharpness, exposure extremes and
-near-duplicates. Batch apply across a folder. Non-destructive editing — your originals are never
-written to.
+sky, radial, graduated, brush, colour range, luminance, skin, per-person). On-device scene reading,
+shown in the panel so you can see what it made of the photograph. Candidate generation. Culling with
+keep/reject, and a filmstrip that groups a shoot by burst, day, place or near-duplicate. A scan that
+measures sharpness, exposure extremes and near-duplicates, and marks the sharpest frame of each
+burst. Batch apply across a folder, and exporting every photo you edited in one go — JPEG, HEIC, PNG
+or 16-bit TIFF, at full size or a chosen long edge, in sRGB, Display P3 or Adobe RGB. Non-destructive
+throughout: your originals are never written to.
 
 **Not yet:** no public release build. Preference learning exists in the engine but isn't wired into a
-loop. Nothing generative, on purpose.
+loop. Auto-masks can be refined and inverted but not brushed by hand. Nothing generative, on purpose.
 
-465 tests. CI runs on every pull request.
+467 tests — 378 over the core, 89 over the app. CI runs on every pull request.
 
 ## Running it
 

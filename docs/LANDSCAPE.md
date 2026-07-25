@@ -33,8 +33,9 @@ competitive with commercial tools on image quality. Its acknowledged weakness is
 does not hold your hand: it starts with almost no editing applied, so you must learn it
 to get good results.
 
-That gap is exactly the one this project addresses. Do not try to out-engineer darktable
-on color science; out-engineer it on knowing what the photo needs.
+That gap is exactly the one this project addresses. darktable's colour science is decades of
+specialist work and not worth re-treading; the contribution here is knowing what a
+particular photograph needs.
 
 **Safelight** (anthonyreimche) — open-source RAW editor built like an IDE, announced
 June 2026 on pixls.us. Modular, GPL, privacy-focused, GPU pipeline. Newer and smaller
@@ -51,7 +52,7 @@ named professional photographers.
 **Aftershoot** — local, offline. Culling plus editing. Learns your style from your own
 past catalogues, minimum around 2,500 images recommended.
 
-**Both share the same weakness and it is our opening: a catastrophic cold start.** They
+**Both share the same constraint: a cold start.** They
 require you to already be a working professional with a large back catalogue of
 finished edits. Everyone else gets nothing.
 
