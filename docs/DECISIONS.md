@@ -83,14 +83,26 @@ The differentiator is recipe quality. Until that works, there is no story, and l
 a half-working editor into a space where RapidRAW has 8.6k stars means launching from
 behind.
 
-## D8 — License choice · Deferred
+## D8 — License choice · ~~Deferred~~ **SUPERSEDED — see "D8 — Licence: AGPL-3.0 plus a contributor agreement" below**
+
+> **This entry is history.** It is kept because the file is append-only, but its instruction
+> ("do not add a LICENSE file") is no longer operative: the licence was decided on
+> 25 July 2026 as AGPL-3.0-only plus a CLA. Read the later D8 entry instead.
 
 Deliberately open. Interacts with D1 and with whether a hosted or paid tier is ever
 wanted. Do not add a LICENSE file until the owner decides.
 
-Note that the decision is effectively one-way once contributors exist.
+Note that the decision is effectively one-way once contributors exist. *(This turned out
+to be the load-bearing sentence — see the later entry on why a CLA was needed.)*
 
-## D9 — Naming · Deferred
+## D9 — Naming · ~~Deferred~~ **RESOLVED 25 July 2026 — Kelvin, with the collision risk accepted**
+
+> **This entry is history and one of its claims was WRONG.** "Kalo" is recorded below as
+> "clear as far as checked"; it is not — plain `Kalo` is already an App Store app name, and
+> Apple's names are unique store-wide. The naming collision is also understated in the entry
+> below. The owner read the fuller research and chose to keep
+> Kelvin anyway. See D11 for the domain that followed, and `Branding.swift` for the rename
+> insurance that decision made necessary.
 
 Current folder name is a placeholder.
 
@@ -132,7 +144,7 @@ where the entire point is parametric, reversible, sidecar-stored adjustment.
    identical to the candidate-previews feature. Confirm licensing suits the intended use.
 3. Target user for v1: working photographer with a shoot to process, or casual user with
    one photo? The answer changes the first UI substantially.
-4. Naming (D9) and license (D8), before external release.
+4. ~~Naming (D9) and license (D8), before external release.~~ **Both resolved 25 July 2026** — Kelvin (risk accepted), AGPL-3.0-only + CLA.
 
 ---
 

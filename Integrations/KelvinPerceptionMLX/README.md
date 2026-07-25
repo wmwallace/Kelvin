@@ -57,7 +57,8 @@ but do **not** declare those packages themselves, so they are listed here direct
 - **Live inference verified end-to-end.** `swift run kelvin-perceive <image> [out-dir]` loads
   the model, perceives a real photo, and the model emits valid closed-vocabulary perception
   JSON (categorical only — no numbers), which parses cleanly and drives the engine + renderer.
-  First run downloads ~2.9 GB to `~/.cache/huggingface`; after that, inference is seconds.
+  First run downloads ~1.6 GB to `~/.cache/huggingface`; after that, inference is seconds.
+  `make stage-model` + `KELVIN_MODEL_PATH` skips the download and is the path a release build takes.
 
 ### Metal Toolchain prerequisite
 

@@ -3,7 +3,7 @@ import CoreImage
 @testable import KelvinCore
 
 /// The milestone-1 gating invariant (docs/RECIPE-SCHEMA.md invariant #1): a neutral recipe
-/// renders output byte-identical to the unedited decode. Written first, per FIRST-SESSION.
+/// renders output byte-identical to the unedited decode. Written first, before anything else.
 final class NeutralNoOpTests: XCTestCase {
 
     func testNeutralRecipeIsByteIdenticalNoOp() throws {

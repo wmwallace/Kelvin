@@ -38,9 +38,9 @@ render: build
 clean:
 	rm -rf "$(BUILD_PATH)" .build
 
-# Launch the editor. This is the command to use for a real shoot — it runs the app straight
-# from the build, which is the path that reliably loads the perception model (a hand-assembled
-# .app bundle still trips a launch issue; see docs).
+# Launch the editor from the build. Fastest path for development — no bundle assembly.
+# `scripts/package-app.sh` produces a working double-clickable Kelvin.app as well; the launch
+# failure that used to make bundles unusable was MLX not finding default.metallib and is fixed.
 app:
 	cd Integrations/KelvinPerceptionMLX && $(SWIFT) run kelvin-app
 

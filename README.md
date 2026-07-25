@@ -42,9 +42,10 @@ colour-range, luminance, skin, per-instance subjects); culling with keep/reject 
 that measures sharpness, exposure extremes and near-duplicates; batch apply across a folder;
 non-destructive sidecar persistence.
 
-**Not working yet** — there is no released binary. A hand-assembled `.app` currently fails on its
-first model load, so the only supported way to run it is from source. Preference learning exists in
-the engine but is not a live loop.
+**Not working yet** — there is no *released* binary. `scripts/package-app.sh` produces a working
+double-clickable app, but nothing is signed or notarised yet, so macOS will refuse to open it on
+anyone else's machine; building from source is the supported route for now. Preference learning
+exists in the engine but is not a live loop.
 
 **Not built** — anything generative. See `docs/DECISIONS.md` D10.
 

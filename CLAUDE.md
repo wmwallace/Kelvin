@@ -134,21 +134,39 @@ is worthless. Find that out in week three, not month nine.
 
 ## Naming
 
-The current folder name is a **placeholder**. The owner is leaning toward "Kelvin" but
-has not committed, and another product in this category uses the name. See `docs/DECISIONS.md` for the full naming analysis.
+**Settled: Kelvin** (D9, 25 July 2026). The owner chose it knowing that another Mac
+photography app of the same name exists in the same category, and accepted that risk
+rather than eliminating it.
 
-The rename deadline is **before the first external user**, not before the first commit —
-because the expensive part is the bundle identifier and the sidecar file extension, not
-the repo name.
+That makes the naming discipline **more** important, not less. Every user-facing
+occurrence goes through `Sources/KelvinCore/Branding.swift` so that a forced rename
+stays a day's work rather than a week's. Eight strings used to bypass it, including the
+default export filename; they no longer do. Keep it that way.
 
-Keep the rename cheap: one display-name constant, one bundle ID, one file extension
-constant. Do not scatter the name.
+Two things are now frozen and must never change, because macOS keys a user's
+preferences, sandbox container and sidecars off them:
+
+- `bundleIdentifier` = `app.usekelvin.kelvin` (reverse-DNS of the project's domain, D11)
+- `sidecarExtension` = `kelvin`
+
+Do not change either even if the product is renamed. A bundle identifier is an identity,
+not a label; a stale-looking string costs nothing, and changing it silently destroys
+every user's settings and edits.
+
+Note that "Kelvin" is also the SI unit, used legitimately in about forty places in the
+colour-temperature code. A find-and-replace rename would corrupt all of them. The
+product name lives in `Branding`; the unit is physics.
 
 ## Repository status
 
-Private until there is something working. Do not add public-facing README badges,
-CI status shields, or a license file yet — the license choice interacts with decisions
-recorded in `docs/DECISIONS.md` and is deliberately deferred.
+**Private, preparing to go public** under **AGPL-3.0-only** with a contributor licence
+agreement (D8). `LICENSE`, `CLA.md`, `CONTRIBUTING.md`, `SECURITY.md` and CI now exist
+and are current — earlier revisions of this file said not to add them, which was true
+while the licence was undecided and is not any more.
+
+`docs/an internal working note` is the remaining checklist. The items that must happen **before**
+the first public clone (history is rewritable now and not afterwards) are in its first
+section.
 
 ---
 
@@ -158,8 +176,14 @@ Ask. Do not guess at the following, ever:
 
 - Which perception categories to add or remove (this is product design, not code)
 - Whether an edit "looks good" (use the eval harness, not judgment)
-- License choice
 - Anything that changes the recipe schema after data exists
+- Anything frozen by a shipped build: the bundle identifier, the sidecar extension, or
+  the Sparkle appcast URL once one exists
+
+The licence question is **closed** — AGPL-3.0-only plus a CLA (D8). Do not reopen it, and
+do not add a differently-licensed dependency without checking compatibility first: every
+current dependency is MIT or Apache-2.0, and Apache-2.0 is compatible with GPLv3 but
+**not** GPLv2.
 
 Read `docs/ARCHITECTURE.md` for the pipeline, `docs/RECIPE-SCHEMA.md` for the data
 model, `docs/LANDSCAPE.md` for what already exists and why we are not copying it.

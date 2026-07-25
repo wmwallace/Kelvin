@@ -10,7 +10,10 @@ struct KelvinApp: App {
     init() {
         // Become a regular foreground app even when launched unbundled (`swift run`): otherwise
         // the process runs as a background/accessory role — its window never shows, and macOS
-        // grants it tight (jetsam-prone) memory limits that the 2.9 GB model load can trip.
+        // grants it a background/accessory role rather than a foreground one, so no window shows.
+        // (An earlier version of this comment blamed jetsam memory limits for the bundled app's
+        // death on first model load. That was wrong — it was MLX failing to locate
+        // default.metallib; see scripts/package-app.sh.)
         NSApplication.shared.setActivationPolicy(.regular)
         // Dock icon from embedded bytes (works under `swift run` too; no Bundle.module).
         if let data = Data(base64Encoded: AppIconData.base64), let icon = NSImage(data: data) {

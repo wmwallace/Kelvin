@@ -14,7 +14,8 @@ import KelvinPerceptionMLX
 //       labelling step that feeds `kelvin-cli eval`. Resumable (skips already-labelled),
 //       and the model loads once (the provider is an actor that caches it).
 //
-// First run downloads ~2.9 GB (the 4-bit model) from Hugging Face; then inference is seconds.
+// First run downloads ~1.6 GB (the 4-bit model) from Hugging Face; then inference is seconds.
+// Measured, not estimated — and avoidable entirely with `make stage-model` plus KELVIN_MODEL_PATH.
 
 func die(_ message: String) -> Never {
     FileHandle.standardError.write(Data(("error: " + message + "\n").utf8))
