@@ -38,6 +38,25 @@ enum Theme {
     }
 }
 
+/// Motion in a darkroom: enough to say that something changed, never enough to look at.
+///
+/// Two durations and one curve, so nothing in the app can ease differently from anything else,
+/// and so no amount of later editing can turn this into a place where things bounce. Ease-out
+/// only — a movement that decelerates into place reads as the UI settling, where anything that
+/// overshoots reads as the UI performing.
+///
+/// Everything goes through `gated`. Reduce Motion is a photographer asking for stillness, and
+/// `nil` is what both `withAnimation` and `.animation(_:value:)` take to mean "make the change
+/// now, without moving".
+enum Motion {
+    static let quick    = Animation.easeOut(duration: 0.14)
+    static let standard = Animation.easeOut(duration: 0.20)
+
+    static func gated(_ animation: Animation, _ reduced: Bool) -> Animation? {
+        reduced ? nil : animation
+    }
+}
+
 extension Color {
     init(hex: UInt, alpha: Double = 1) {
         self.init(.sRGB,
@@ -804,21 +823,64 @@ final class AppState: ObservableObject {
 
     func onEdit() { updateActiveRecipe(); scheduleCommit() }
 
-    /// The fix currently being worked on, and how many nudges it has taken.
-    private var fixInProgress: AestheticEvaluator.Issue?
-    private var fixAttempts = 0
-    private static let maxFixAttempts = 5
+    /// True while a Fix click is still working, so a second click can't start a parallel loop.
+    @Published private(set) var fixInProgress = false
 
     /// Apply a targeted correction for a flagged craft issue — the "Fix" the warning offers.
     ///
-    /// One nudge often isn't enough: a badly over-saturated frame needs more than −16 saturation,
-    /// so the flag would still be there afterwards and you'd have to keep clicking. Now a single
-    /// click keeps nudging until the evaluator stops complaining (or gives up after a few rounds,
-    /// rather than fighting a photo that can't be fixed this way).
+    /// One nudge often isn't enough — a badly over-saturated frame needs more than −16 saturation —
+    /// so a click nudges more than once. But the nudges are RELATIVE, and an earlier version simply
+    /// repeated them while the flag was up, which compounds: on a cat beside a pale pink toy, one
+    /// click drove `highlights` to −100 and turned the toy vividly orange. The convergence rules —
+    /// an excursion budget, evidence that the nudge is working, and a refusal to clip colour on
+    /// the way — live in `CraftFix` in Core, where they are tested against the real renderer.
+    ///
+    /// The loop runs off the main thread: it renders and measures the proxy once per pass, and
+    /// only the settled result comes back. It used to be driven from `scheduleCommit`, which fires
+    /// after *any* edit — so a slider the user dragged afterwards could trigger another nudge.
     func applyFix(_ issue: AestheticEvaluator.Issue) {
-        fixInProgress = issue
-        fixAttempts = 0
-        nudge(for: issue)
+        // Subject problems are fixed ON THE SUBJECT, not globally, and their masks already carry
+        // their own ceilings — one bounded step per click, no loop.
+        switch issue {
+        case .subjectTooDark:
+            adjustSubjectMask { $0.exposure = min(2.0, $0.exposure + 0.35) }
+            onEdit(); return
+        case .subjectFlat:
+            // Modelling comes back from contrast within the face, not from global contrast.
+            adjustSubjectMask { $0.contrast = min(60, $0.contrast + 14) }
+            onEdit(); return
+        case .subjectBlown:
+            adjustSubjectMask { $0.exposure = max(-2.0, $0.exposure - 0.3) }
+            onEdit(); return
+        default: break
+        }
+
+        guard !fixInProgress, let proxy = proxyCI, let recipe = activeRecipe else { return }
+        fixInProgress = true
+        let start = edit
+        let input = RenderInput(
+            recipe: recipe, proxy: proxy,
+            bitmaps: proxyMaskBitmaps.merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked })
+        Task.detached(priority: .userInitiated) {
+            // Vision's face-rectangle detector fires on animals — it reports a face on a cat — so
+            // every skin rule would otherwise be applied to fur. The semantic person segmentation
+            // answers honestly, and its cost is one click's worth, not one render's.
+            let isPerson = SubjectMask.person(in: input.proxy) != nil
+            let settled = try? CraftFix.converge(issue: issue, from: start,
+                                                 subjectIsPerson: isPerson) { g in
+                var recipe = input.recipe
+                recipe.global = g
+                let rendered = Renderer.render(input.proxy, with: recipe, maskBitmaps: input.bitmaps)
+                return CraftFix.Reading(stats: try ImageStatistics.compute(rendered),
+                                        face: FaceSkin.read(in: rendered))
+            }.global
+            await MainActor.run {
+                self.fixInProgress = false
+                guard let settled, settled != self.edit else { return }
+                self.edit = settled
+                self.onEdit()
+            }
+        }
     }
 
     /// Find the subject mask, creating one if this is the first subject fix, and adjust it.
@@ -833,79 +895,6 @@ final class AppState: ObservableObject {
             change(&m)
             userMasks.append(m)
         }
-    }
-
-    /// Called once the craft check has re-run: if the issue survived, go again.
-    private func continueFixIfNeeded() {
-        guard let issue = fixInProgress else { return }
-        guard activeCraftIssues.contains(issue), fixAttempts < Self.maxFixAttempts else {
-            fixInProgress = nil
-            return
-        }
-        fixAttempts += 1
-        nudge(for: issue)
-    }
-
-    private func nudge(for issue: AestheticEvaluator.Issue) {
-        func c(_ v: Double, _ r: ClosedRange<Double>) -> Double { min(r.upperBound, max(r.lowerBound, v)) }
-        switch issue {
-        case .skinOverSaturated:
-            edit.saturation = c(edit.saturation - 16, -100...100)
-            edit.vibrance = c(edit.vibrance - 12, -100...100)
-        case .skinAshy:
-            edit.vibrance = c(edit.vibrance + 12, -100...100)
-        case .skinHue:
-            edit.saturation = c(edit.saturation - 10, -100...100)  // ease the push that skewed the hue
-            edit.tint = c(edit.tint - 4, -100...100)
-        case .crushedShadows:
-            edit.shadows = c(edit.shadows + 22, -100...100)
-            edit.blacks = c(edit.blacks + 10, -100...100)
-            edit.contrast = c(edit.contrast - 8, -100...100)
-        case .blownHighlights:
-            edit.highlights = c(edit.highlights - 26, -100...100)
-            edit.whites = c(edit.whites - 8, -100...100)
-        case .flat:
-            edit.contrast = c(edit.contrast + 16, -100...100)
-            edit.whites = c(edit.whites + 6, -100...100)
-            edit.blacks = c(edit.blacks - 6, -100...100)
-        case .colorCast:
-            // Derive the correction from what is actually on screen. This used to be a hardcoded
-            // `temperatureK = 5500`, commented "neutralise white balance" — but the renderer's
-            // neutral is 6500 and LOWER Kelvin is warmer, so it applied a 1000 K warm shift. It
-            // added orange, re-detected the cast it had just made, and offered to fix it again.
-            //
-            // Applied as a DELTA on top of what is already set, not as an absolute. The measured
-            // image is the *rendered* one, so it already carries the current white balance; taking
-            // the neutralising value as an absolute would discard that and over-correct on the
-            // second pass. Adding the remaining correction each time is what converges.
-            if let rendered = lastRenderedCI, let stats = try? ImageStatistics.compute(rendered) {
-                let wb = RecipeEngine.neutralisingWhiteBalance(for: stats)
-                edit.temperatureK = c((edit.temperatureK ?? 6500) + (wb.temperatureK - 6500),
-                                      2500...9500)
-                edit.tint = c(edit.tint + wb.tint, -100...100)
-            } else {
-                edit.temperatureK = 6500; edit.tint = 0        // the renderer's true no-op
-            }
-        case .shadowDetailLost:
-            // A large part of the picture has gone to featureless black — not merely clipped, but
-            // too dark to read. Lift the shadow end and ease the contrast that drove it there;
-            // `.crushedShadows` is the same family, so the moves match, weighted toward the lift.
-            edit.shadows = c(edit.shadows + 20, -100...100)
-            edit.blacks = c(edit.blacks + 12, -100...100)
-            edit.contrast = c(edit.contrast - 6, -100...100)
-
-        // Subject problems are fixed ON THE SUBJECT. Brightening the whole frame to rescue a
-        // backlit face washes out the sky that made the picture worth taking — the correction has
-        // to be local, which is exactly what an editor would reach for by hand.
-        case .subjectTooDark:
-            adjustSubjectMask { $0.exposure = min(2.0, $0.exposure + 0.35) }
-        case .subjectFlat:
-            // Modelling comes back from contrast within the face, not from global contrast.
-            adjustSubjectMask { $0.contrast = min(60, $0.contrast + 14) }
-        case .subjectBlown:
-            adjustSubjectMask { $0.exposure = max(-2.0, $0.exposure - 0.3) }
-        }
-        onEdit()
     }
 
     /// Apply a creative look on top of the current candidate — or clear it with nil. Looks are
@@ -979,7 +968,6 @@ final class AppState: ObservableObject {
                 if touched { self.editedURLs.insert(url) } else { self.editedURLs.remove(url) }
                 self.persistEdit(for: url)
             }
-            self.continueFixIfNeeded()
         }
     }
     private func refreshUndoState() { canUndo = !undoStack.isEmpty; canRedo = !redoStack.isEmpty }
@@ -1510,6 +1498,7 @@ struct ContentView: View {
     @State private var isTargeted = false
     @State private var panStart = CGSize.zero
     @State private var zoomStart = 1.0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1684,8 +1673,19 @@ struct ContentView: View {
                                 .padding(24)
                                 .scaleEffect(appState.zoom, anchor: .center)
                                 .offset(appState.pan)
+                                // Identity is the PHOTOGRAPH, not the rendered image. `shown` is
+                                // replaced on every slider move, so keying the transition on it
+                                // would crossfade the live edit and destroy the one thing this
+                                // preview exists for. Keyed on the URL, only a genuinely new frame
+                                // arriving gets the fade.
+                                .id(appState.imageURL)
+                                .transition(.opacity)
                         }
                     }
+                    // Photos come in from the filmstrip, a drop, or the arrow keys. A hard cut
+                    // between two frames of the same shoot reads as a flicker; a short fade makes
+                    // it obvious that the frame changed rather than the edit.
+                    .animation(Motion.gated(Motion.standard, reduceMotion), value: appState.imageURL)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
                     .overlay(alignment: .topLeading) {
@@ -1831,11 +1831,18 @@ struct ContentView: View {
             }
             TemperatureRail(marks: temp.map { [($0, true)] } ?? [])
             // Craft self-check: each flagged problem gets a one-click Fix.
+            //
+            // Deliberately NOT animated. These flags appear and disappear as the craft check
+            // re-runs behind a drag, so a transition here would be a row of warnings fading in and
+            // out under the photograph the whole time a slider is moving.
             if !appState.activeCraftIssues.isEmpty {
                 VStack(alignment: .leading, spacing: 5) {
                     ForEach(appState.activeCraftIssues, id: \.self) { issue in
                         HStack(spacing: 8) {
-                            Text("⚠").font(Theme.ui(10))
+                            // Theme.warn, not red: a craft flag is a question for the photographer,
+                            // and it wears the same colour as the soft-focus marker in the strip.
+                            Image(systemName: "exclamationmark.triangle")
+                                .font(.system(size: 10)).foregroundColor(Theme.warn)
                             Text(issue.message).font(Theme.mono(10)).foregroundColor(Theme.inkDim)
                             Spacer(minLength: 4)
                             Button(action: { appState.applyFix(issue) }) {
@@ -1877,6 +1884,12 @@ struct ContentView: View {
         .overlay(alignment: .top) { Rectangle().fill(Theme.hairline).frame(height: 1) }
     }
 
+    /// Deliberately still text-only, unlike every other button in this pass.
+    ///
+    /// Measured, these five pills already come to 557 pt and the preview pane is only 580 pt wide
+    /// when the window is at its 940 pt minimum — and less than that once the splitter is dragged.
+    /// A glyph each costs ~20 pt, which buys truncated labels at the app's own default size. An
+    /// icon that pushes the word it is helping off the end of the button is not helping.
     private func toolbarLabel(_ text: String, filled: Bool) -> some View {
         Text(text)
             .font(Theme.ui(12, .semibold))
@@ -1967,28 +1980,42 @@ struct ContentView: View {
                 )
         }
         .buttonStyle(.plain)
+        // The chip settling into "on" is the same class of feedback as a candidate becoming
+        // selected, and wears the same 0.14s.
+        .animation(Motion.gated(Motion.quick, reduceMotion), value: on)
         .help(look.blurb)
     }
 
-    private func editToolLabel(_ text: String, enabled: Bool) -> some View {
-        Text(text)
-            .font(Theme.ui(11, .semibold))
-            .foregroundColor(enabled ? Theme.ink : Theme.inkFaint)
-            .padding(.horizontal, 12).padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 7).fill(Theme.surface2.opacity(enabled ? 1 : 0.4))
-                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.hairline, lineWidth: 1))
-            )
+    private func editToolLabel(_ text: String, enabled: Bool, icon: String) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon).font(.system(size: 10))
+            Text(text).font(Theme.ui(11, .semibold))
+        }
+        .foregroundColor(enabled ? Theme.ink : Theme.inkFaint)
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 7).fill(Theme.surface2.opacity(enabled ? 1 : 0.4))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.hairline, lineWidth: 1))
+        )
     }
 
-    private func addMaskLabel(_ text: String) -> some View {
-        Text(text)
-            .font(Theme.ui(11, .semibold)).foregroundColor(Theme.ink)
-            .frame(maxWidth: .infinity).padding(.vertical, 8)
-            .background(
-                RoundedRectangle(cornerRadius: 8).fill(Theme.surface2)
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.hairline, lineWidth: 1))
-            )
+    /// The mask buttons are a 3×3 grid of near-identical capsules, and "+ Luma" next to "+ Skin"
+    /// next to "+ Colour" is a paragraph to be read rather than a palette to be reached into. The
+    /// glyph says what kind of selection you are about to make; the word stays because a picture
+    /// of a mask type is not a name for one.
+    private func addMaskLabel(_ text: String, icon: String) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon)
+                .font(.system(size: 10))
+                .foregroundColor(Theme.inkDim)
+            Text(text)
+                .font(Theme.ui(11, .semibold)).foregroundColor(Theme.ink)
+        }
+        .frame(maxWidth: .infinity).padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8).fill(Theme.surface2)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.hairline, lineWidth: 1))
+        )
     }
 
     private var sidebar: some View {
@@ -1998,19 +2025,19 @@ struct ContentView: View {
                 HistogramView(image: appState.lastRenderedCI)
 
                 HStack(spacing: 8) {
-                    Button(action: appState.undo) { editToolLabel("Undo", enabled: appState.canUndo) }
+                    Button(action: appState.undo) { editToolLabel("Undo", enabled: appState.canUndo, icon: "arrow.uturn.backward") }
                         .buttonStyle(.plain).disabled(!appState.canUndo)
                         .keyboardShortcut("z", modifiers: .command)
-                    Button(action: appState.redo) { editToolLabel("Redo", enabled: appState.canRedo) }
+                    Button(action: appState.redo) { editToolLabel("Redo", enabled: appState.canRedo, icon: "arrow.uturn.forward") }
                         .buttonStyle(.plain).disabled(!appState.canRedo)
                         .keyboardShortcut("z", modifiers: [.command, .shift])
                     Spacer()
-                    Button(action: appState.resetToCandidate) { editToolLabel("Reset all", enabled: true) }
+                    Button(action: appState.resetToCandidate) { editToolLabel("Reset all", enabled: true, icon: "arrow.counterclockwise") }
                         .buttonStyle(.plain)
                 }
 
                 Group {
-                CollapsibleSection("Candidates", defaultOpen: true) {
+                CollapsibleSection("Candidates", icon: "rectangle.stack", defaultOpen: true) {
                 if appState.candidates.isEmpty {
                     // Say what's happening instead of leaving a hole. The photo is already on
                     // screen, so this is the only part still pending.
@@ -2031,7 +2058,7 @@ struct ContentView: View {
                 }
                 }
 
-                CollapsibleSection("Looks", trailing: appState.activeLookId == nil ? nil : "On") {
+                CollapsibleSection("Looks", icon: "camera.filters", trailing: appState.activeLookId == nil ? nil : "On") {
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(LookPreset.Group.allCases, id: \.self) { group in
                         let looks = LookPreset.library.filter { $0.group == group }
@@ -2056,7 +2083,7 @@ struct ContentView: View {
                 // LIGHT — white balance and tone together. They are one decision: how the frame
                 // is exposed and coloured by its light source. Open by default because this is
                 // what gets touched on essentially every photograph.
-                CollapsibleSection("Light", defaultOpen: true) {
+                CollapsibleSection("Light", icon: "sun.max", defaultOpen: true) {
                 VStack(spacing: 14) {
                     ToneSlider(label: "Temp", value: appState.temperatureBinding, range: 2500...9500, step: 10, unit: " K", onChange: ch, identity: .temperature)
                     ToneSlider(label: "Tint", value: $appState.edit.tint, range: -100...100, step: 1, unit: "", onChange: ch, identity: .tint)
@@ -2072,7 +2099,7 @@ struct ContentView: View {
 
                 }
                 Group {
-                CollapsibleSection("Presence") {
+                CollapsibleSection("Presence", icon: "sun.haze") {
                 VStack(spacing: 14) {
                     ToneSlider(label: "Texture", value: $appState.edit.texture, range: -100...100, step: 1, unit: "", onChange: ch, identity: .presence)
                     ToneSlider(label: "Clarity", value: $appState.edit.clarity, range: -100...100, step: 1, unit: "", onChange: ch, identity: .presence)
@@ -2085,7 +2112,7 @@ struct ContentView: View {
 
                 // COLOUR — the global pair and the per-colour mixer are the same decision at two
                 // levels of detail, so they live together rather than as two headings.
-                CollapsibleSection("Colour") {
+                CollapsibleSection("Colour", icon: "paintpalette") {
                 VStack(spacing: 14) {
                     ToneSlider(label: "Vibrance", value: $appState.edit.vibrance, range: -100...100, step: 1, unit: "", onChange: ch, identity: .saturation(hue: nil))
                     ToneSlider(label: "Saturation", value: $appState.edit.saturation, range: -100...100, step: 1, unit: "", onChange: ch, identity: .saturation(hue: nil))
@@ -2112,15 +2139,15 @@ struct ContentView: View {
                 }
                 }
 
-                CollapsibleSection("Geometry") {
+                CollapsibleSection("Geometry", icon: "crop.rotate") {
                 VStack(spacing: 12) {
                     ToneSlider(label: "Straighten", value: $appState.straighten, range: -15...15, step: 0.1, unit: "°", onChange: ch)
-                    Button(action: appState.autoStraighten) { addMaskLabel("Auto-level horizon") }
+                    Button(action: appState.autoStraighten) { addMaskLabel("Auto-level horizon", icon: "level") }
                         .buttonStyle(.plain)
                 }
                 }
 
-                CollapsibleSection("Masks", trailing: appState.maskCountLabel) {
+                CollapsibleSection("Masks", icon: "circle.dashed", trailing: appState.maskCountLabel) {
                 VStack(spacing: 12) {
                     // Auto-detected masks (subject / sky): toggle + strength.
                     ForEach(appState.baseMaskIds, id: \.self) { mid in
@@ -2151,27 +2178,37 @@ struct ContentView: View {
                                                  set: { appState.brushRadius = $0 }),
                             hasPerson: appState.hasPerson)
                     }
-                    VStack(spacing: 6) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        // The "+" used to be repeated on all eight buttons. Said once over the
+                        // grid it costs a line and buys every button back the width its glyph
+                        // needs — and the row stops reading as a list of things called "+ Luma".
+                        Text("ADD A MASK")
+                            .font(Theme.mono(9)).tracking(1.4).foregroundColor(Theme.inkFaint)
                         HStack(spacing: 6) {
-                            Button(action: { appState.addUserMask(.radial) }) { addMaskLabel("+ Radial") }.buttonStyle(.plain)
-                            Button(action: { appState.addUserMask(.linear) }) { addMaskLabel("+ Grad") }.buttonStyle(.plain)
-                            Button(action: { appState.addUserMask(.brush) }) { addMaskLabel("+ Brush") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.radial) }) { addMaskLabel("Radial", icon: "circle.circle") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.linear) }) { addMaskLabel("Grad", icon: "rectangle.tophalf.filled") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.brush) }) { addMaskLabel("Brush", icon: "paintbrush") }.buttonStyle(.plain)
                         }
                         HStack(spacing: 6) {
-                            Button(action: { appState.addUserMask(.colorRange) }) { addMaskLabel("+ Colour") }.buttonStyle(.plain)
-                            Button(action: { appState.addUserMask(.luminance) }) { addMaskLabel("+ Luma") }.buttonStyle(.plain)
-                            Button(action: { appState.addUserMask(.skin) }) { addMaskLabel("+ Skin") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.colorRange) }) { addMaskLabel("Colour", icon: "eyedropper") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.luminance) }) { addMaskLabel("Luma", icon: "circle.lefthalf.filled") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.skin) }) { addMaskLabel("Skin", icon: "face.smiling") }.buttonStyle(.plain)
                         }
                         HStack(spacing: 6) {
-                            Button(action: { appState.addUserMask(.subject) }) { addMaskLabel("+ Subject") }.buttonStyle(.plain)
-                            Button(action: { appState.addUserMask(.background) }) { addMaskLabel("+ Background") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.subject) }) { addMaskLabel("Subject", icon: "person.fill") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.background) }) { addMaskLabel("Background", icon: "photo") }.buttonStyle(.plain)
                             Color.clear.frame(maxWidth: .infinity)
                         }
                     }
                 }
+                // A new mask panel is tall, and it lands above the buttons you just clicked, which
+                // pushes them down the panel. Fading it in over the layout move is the difference
+                // between "where did the buttons go" and seeing what arrived. Keyed on the COUNT:
+                // adjusting a mask must never animate anything.
+                .animation(Motion.gated(Motion.quick, reduceMotion), value: appState.userMasks.count)
                 }
 
-                CollapsibleSection("Repair", trailing: appState.detectedSpotCount > 0 ? "\(appState.detectedSpotCount) spots" : nil) {
+                CollapsibleSection("Repair", icon: "bandage", trailing: appState.detectedSpotCount > 0 ? "\(appState.detectedSpotCount) spots" : nil) {
                 Toggle(isOn: $appState.removeDust) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Remove dust spots").font(Theme.ui(13, .medium)).foregroundColor(Theme.ink)
@@ -2187,7 +2224,7 @@ struct ContentView: View {
 
                 // Last: a record of the photograph, not a control reached for mid-edit.
                 if appState.capture.camera != nil || appState.capture.summaryText != nil {
-                    CollapsibleSection("Capture") { capturePanel }
+                    CollapsibleSection("Capture", icon: "camera") { capturePanel }
                 }
                 }
             }
@@ -2203,14 +2240,21 @@ struct ContentView: View {
     /// by default, the panel shows what you actually reach for and hides the rest until asked.
     private struct CollapsibleSection<Content: View>: View {
         let title: String
+        /// One SF Symbol per section. Folded, the panel is nine near-identical rows of tracked-out
+        /// capitals; a glyph gives each row a silhouette, so the section you want is found by shape
+        /// before the word is read. It is drawn faint and fixed-width on purpose — a label that has
+        /// to compete with its own icon has been made harder to read, not easier.
+        let icon: String
         var trailing: String?
         var accent: Bool = false
         @AppStorage private var isOpen: Bool
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
         @ViewBuilder let content: () -> Content
 
-        init(_ title: String, trailing: String? = nil, accent: Bool = false,
+        init(_ title: String, icon: String, trailing: String? = nil, accent: Bool = false,
              defaultOpen: Bool = false, @ViewBuilder content: @escaping () -> Content) {
             self.title = title
+            self.icon = icon
             self.trailing = trailing
             self.accent = accent
             // Keyed by title so a section keeps its state across launches. Sections a photographer
@@ -2222,13 +2266,19 @@ struct ContentView: View {
         var body: some View {
             VStack(alignment: .leading, spacing: 14) {
                 Button {
-                    withAnimation(.easeOut(duration: 0.16)) { isOpen.toggle() }
+                    withAnimation(Motion.gated(Motion.quick, reduceMotion)) { isOpen.toggle() }
                 } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 7) {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 9, weight: .bold))
                             .foregroundColor(Theme.inkFaint)
                             .rotationEffect(.degrees(isOpen ? 90 : 0))
+                        Image(systemName: icon)
+                            .font(.system(size: 10))
+                            .foregroundColor(isOpen ? Theme.inkDim : Theme.inkFaint)
+                            // Fixed width so every title starts on the same left edge whatever the
+                            // glyph is; the column of words has to stay a column.
+                            .frame(width: 13)
                         Text(title.uppercased())
                             .font(Theme.mono(10, .semibold)).tracking(2)
                             .foregroundColor(isOpen ? Theme.ink : Theme.inkDim)
@@ -2245,7 +2295,9 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
 
-                if isOpen { content() }
+                // Fade rather than slide: the section below is already moving to make room, and
+                // two things travelling at once for one click is one too many.
+                if isOpen { content().transition(.opacity) }
             }
         }
     }
@@ -2318,6 +2370,7 @@ struct CandidateRow: View {
     let candidate: CandidateViewModel
     let isSelected: Bool
     let onSelect: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var temp: Double? { candidate.baseRecipe.global.temperatureK }
     private var exposure: Double { candidate.baseRecipe.global.exposureEV }
@@ -2357,6 +2410,11 @@ struct CandidateRow: View {
             )
         }
         .buttonStyle(.plain)
+        // Picking a candidate is the one act this whole app is built around, and the selection
+        // moves between rows — so the border and fill hand over rather than cutting. Colour and
+        // stroke width only: no scale, no shadow, nothing that would make a row jump at the eye
+        // while it is being compared against the photograph.
+        .animation(Motion.gated(Motion.quick, reduceMotion), value: isSelected)
     }
 }
 
@@ -2596,6 +2654,15 @@ struct ToneSlider: View {
     let onChange: () -> Void
     /// Defaults to `.plain` so a control only claims a meaning when someone decided it has one.
     var identity: ToneIdentity = .plain
+    /// Bumped by the double-click reset, and the ONLY thing the readout animates on.
+    ///
+    /// The obvious move — animating `value` back to neutral — is not available: `value` is bound
+    /// straight to the render, so easing it would push a stream of intermediate recipes through
+    /// the pipeline and put intermediate states into the undo history. The number therefore snaps,
+    /// as does the knob, and only the readout's colour acknowledges the reset. Keying on a counter
+    /// rather than on `value` also guarantees this can never fire mid-drag.
+    @State private var resetTick = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -2605,6 +2672,7 @@ struct ToneSlider: View {
                 Text(readout)
                     .font(Theme.mono(11, value == 0 ? .regular : .semibold))
                     .foregroundColor(value == 0 ? Theme.inkFaint : Theme.glow)
+                    .animation(Motion.gated(Motion.quick, reduceMotion), value: resetTick)
             }
             VStack(spacing: 3) {
                 Slider(value: $value, in: range, step: step)
@@ -2621,7 +2689,7 @@ struct ToneSlider: View {
         // Double-click the row to reset this control to its neutral value.
         .contentShape(Rectangle())
         .onTapGesture(count: 2) {
-            if range.contains(0) { value = 0; onChange() }
+            if range.contains(0) { value = 0; onChange(); resetTick += 1 }
         }
     }
 
@@ -2734,9 +2802,15 @@ struct UserMaskEditor: View {
             }
 
             if needsPersonButHasNone {
-                Text("⚠ No person detected in this photo — this mask has nothing to act on.")
-                    .font(Theme.mono(9)).foregroundColor(Theme.inkDim)
-                    .fixedSize(horizontal: false, vertical: true)
+                // Same glyph and colour as the craft flags under the preview — one visual language
+                // for "look at this", wherever it turns up.
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 9)).foregroundColor(Theme.warn)
+                    Text("No person detected in this photo — this mask has nothing to act on.")
+                        .font(Theme.mono(9)).foregroundColor(Theme.inkDim)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             switch mask.kind {
@@ -2823,6 +2897,7 @@ struct MaskControl: View {
     /// Folded by default. A subject mask usually needs nothing beyond the strength Kelvin chose,
     /// and six sliders per mask unfolded would rebuild the wall of controls the sidebar just lost.
     @State private var showAdjustments = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -2843,7 +2918,7 @@ struct MaskControl: View {
 
                 if let adjustment {
                     Button {
-                        withAnimation(.easeOut(duration: 0.14)) { showAdjustments.toggle() }
+                        withAnimation(Motion.gated(Motion.quick, reduceMotion)) { showAdjustments.toggle() }
                     } label: {
                         HStack(spacing: 5) {
                             Image(systemName: "chevron.right")
@@ -2887,6 +2962,7 @@ struct MaskControl: View {
                             }
                         }
                         .padding(.top, 2)
+                        .transition(.opacity)
                     }
                 }
             }

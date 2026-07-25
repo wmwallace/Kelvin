@@ -88,6 +88,7 @@ struct FilmstripView: View {
     var scanProgress: Double? = nil
     var onScanFocus: () -> Void = {}
     @State private var hovered: URL?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Collapsed by default is wrong — you would not know the strip exists — but it must be
     /// possible to get the shoot off the screen entirely when working one photo.
     @AppStorage("filmstrip.expanded") private var expanded = true
@@ -105,7 +106,7 @@ struct FilmstripView: View {
     /// strip still reports where the cull has got to.
     private var header: some View {
         HStack(spacing: 10) {
-            Button { withAnimation(.easeOut(duration: 0.16)) { expanded.toggle() } } label: {
+            Button { withAnimation(Motion.gated(Motion.quick, reduceMotion)) { expanded.toggle() } } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 8, weight: .bold))
@@ -149,6 +150,9 @@ struct FilmstripView: View {
                 .buttonStyle(.plain)
                 .help("Review the frames that measured soft — check them, they are not always right")
             } else {
+                // No glyph here, unlike the sidebar. Measured, this header row already comes to
+                // 575 pt against a 580 pt pane at the window's minimum width, so an icon buys a
+                // truncated Picker rather than a faster read.
                 Button(action: onScanFocus) {
                     Text("Check focus").font(Theme.mono(9)).foregroundColor(Theme.inkDim)
                 }
@@ -190,7 +194,11 @@ struct FilmstripView: View {
                 }
                 .onChange(of: current) { url in
                     guard let url else { return }
-                    withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(url, anchor: .center) }
+                    // A travelled scroll rather than a jump: arrowing through a shoot, the strip
+                    // moving is how you keep your place in it.
+                    withAnimation(Motion.gated(Motion.standard, reduceMotion)) {
+                        proxy.scrollTo(url, anchor: .center)
+                    }
                 }
             }
         }
@@ -261,6 +269,12 @@ struct FilmstripView: View {
             .opacity(isCurrent ? 1 : 0.72)
         }
         .buttonStyle(.plain)
+        // Two separate keys on purpose. The selection border hands over between frames as you
+        // arrow through a shoot; the dismiss button fades up under the pointer instead of
+        // appearing on top of the edited-dot it replaces. Neither may be triggered by anything
+        // else in this cell — a thumbnail must never animate because a render finished.
+        .animation(Motion.gated(Motion.quick, reduceMotion), value: isCurrent)
+        .animation(Motion.gated(Motion.quick, reduceMotion), value: hovered == url)
         .onHover { hovered = $0 ? url : (hovered == url ? nil : hovered) }
         .help(url.lastPathComponent)
     }
