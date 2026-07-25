@@ -13,7 +13,15 @@ public enum Branding {
 
     /// Reverse-DNS bundle identifier. Treated as sacred once users exist (CLAUDE.md):
     /// changing it orphans preferences, keychain entries, and the sandbox container.
-    public static let bundleIdentifier = "com.kelvin.app"
+    ///
+    /// This said `com.kelvin.app` while `scripts/package-app.sh` shipped `dev.kelvin.app` in the
+    /// Info.plist, and nothing read this constant, so nothing caught it. macOS keys the
+    /// preferences domain, the sandbox container and LaunchServices off the *plist*, so the
+    /// packaged app's real identity was always the `dev.` one — this is the value that matches
+    /// what is installed, and the packaging script now reads it from here rather than repeating
+    /// it. Aligning in this direction rather than the other keeps every `@AppStorage` setting
+    /// already on disk attached to the app that wrote it.
+    public static let bundleIdentifier = "dev.kelvin.app"
 
     /// File extension for recipe sidecars (no leading dot). Expensive to change once
     /// sidecars exist in the wild, so it lives here from commit one.
