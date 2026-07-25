@@ -82,7 +82,7 @@ public extension EvalReport {
         }
 
         var out = ""
-        out += "Kelvin eval — engine \(engineVersion)\n"
+        out += "\(Branding.displayName) eval — engine \(engineVersion)\n"
         out += "images: \(imageCount)  scored (have refs): \(scoredImageCount)"
         out += "  sample: \(sampleEdge)px  \(String(format: "%.1fs", wallClockSeconds))\n"
         out += "no-op fidelity: \(noOpFidelityPassed)/\(noOpFidelityTotal) "

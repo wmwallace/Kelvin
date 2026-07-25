@@ -1,0 +1,100 @@
+# Continuous integration.
+#
+# The split below is not arbitrary — it mirrors the package split the project already made for a
+# different reason, and gets CI value out of it for free. The root package is deliberately MLX-free
+# (see Integrations/KelvinPerceptionMLX/Package.swift): its renderer and eval harness are headless,
+# have no fixture files, make no network calls, and fall back to software rendering when no GPU is
+# present. That makes them a fast, hermetic, always-required check. The app package pulls MLX, needs
+# macOS 14, and compiles Metal kernels, so it is minutes rather than seconds.
+#
+# Only first-party actions (actions/checkout, actions/cache) are used, pinned to a major version.
+# Third-party actions run arbitrary code with access to the workflow token, and a build system is a
+# supply chain — if one is ever added here, pin it to a full commit SHA rather than a tag.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege. This workflow only reads the repository; it publishes nothing and needs no
+# write scope. Tighten per-job if a future job needs more.
+permissions:
+  contents: read
+
+# A second push to the same PR supersedes the first. macOS runner minutes are the most expensive
+# GitHub offers, and there is no value in finishing a run for a commit nobody is looking at.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: Core — build and test
+    # Pinned rather than macos-latest: "latest" moves without warning and takes the Swift
+    # toolchain with it, which turns an unrelated morning into a toolchain investigation.
+    runs-on: macos-15
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record the toolchain
+        # Printed first and always. Nearly every "works on my machine" CI report is answered by
+        # these three lines, and they cost nothing.
+        run: |
+          swift --version
+          xcodebuild -version
+          echo "Xcodes available:"; ls /Applications | grep -i '^Xcode' || true
+
+      - name: Build
+        run: make build
+
+      - name: Test
+        # 369 tests, ~18s locally. No fixtures, no network, no GPU requirement.
+        run: make test
+
+  app:
+    name: App + perception (MLX)
+    runs-on: macos-15
+    timeout-minutes: 45
+    # NOT REQUIRED TO MERGE, and honestly labelled as such rather than quietly ignored.
+    #
+    # Xcode 16 moved the Metal compiler into a separately-downloadable component, and this project
+    # has already lost time to exactly that (`xcodebuild -downloadComponent MetalToolchain`, ~840 MB).
+    # Whether a GitHub runner image ships it is not something that can be verified from a laptop, so
+    # this job reports rather than blocks until someone has watched it pass. Once it is green
+    # consistently, drop this line and add it to the branch protection rules — an informational job
+    # that stays informational forever is a job nobody reads.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache SwiftPM dependencies
+        uses: actions/cache@v4
+        with:
+          # MLX is a large dependency graph with Metal kernels to compile. Keyed on the lockfile,
+          # which is committed for this package precisely so that this key means something.
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            Integrations/KelvinPerceptionMLX/.build
+          key: spm-${{ runner.os }}-${{ hashFiles('Integrations/KelvinPerceptionMLX/Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-
+
+      - name: Metal toolchain
+        # Best-effort: a no-op when the image already has it. Never fails the job on its own —
+        # if it is genuinely missing, the build step below will say so far more clearly.
+        run: xcodebuild -downloadComponent MetalToolchain || true
+
+      - name: Build
+        working-directory: Integrations/KelvinPerceptionMLX
+        run: swift build
+
+      - name: Test
+        working-directory: Integrations/KelvinPerceptionMLX
+        # The 85 app tests are headless: AppState's rules (strip filtering, grouping, mask
+        # defaults, zoom) need no window. They do NOT load the perception model — nothing in CI
+        # should download 1.6 GB of weights, and nothing here does.
+        run: swift test

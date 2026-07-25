@@ -1,0 +1,12 @@
+# No blank issues: the templates exist because the two questions that actually determine whether a
+# report is reproducible — file format and how it was run — are the two people leave out.
+blank_issues_enabled: false
+contact_links:
+  - name: Architectural proposal
+    url: https://github.com/wmwallace/Kelvin/blob/main/docs/DECISIONS.md
+    about: >
+      Read DECISIONS.md first. Most obvious ideas have already been considered and rejected there
+      with reasons — disagreeing is welcome, but start from what is recorded.
+  - name: Security vulnerability
+    url: https://github.com/wmwallace/Kelvin/security/advisories/new
+    about: Report privately. Never in a public issue.

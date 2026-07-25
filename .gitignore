@@ -11,7 +11,12 @@ DerivedData/
 *.xcworkspace/xcuserdata/
 xcuserdata/
 .swiftpm/xcode/
-Package.resolved
+# Package.resolved is deliberately NOT ignored. The convention is that libraries float and
+# applications pin, and this repo ships an application: `swift-transformers` and
+# `swift-huggingface` are declared `from:`, and Package.swift records that their versions were
+# chosen to satisfy a macro's expanded API surface. Without the lockfile a fresh clone can resolve
+# a newer minor release and fail to build for reasons a contributor cannot be expected to diagnose,
+# and CI has nothing stable to key its dependency cache on.
 
 # Build artifacts
 build/

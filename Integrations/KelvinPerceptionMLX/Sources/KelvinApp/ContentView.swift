@@ -1037,7 +1037,7 @@ final class AppState: ObservableObject {
     /// The filename Kelvin suggests for an export — built from what it understood about the
     /// photo, so a folder of exports is searchable instead of a wall of `kelvin-edit`.
     func suggestedExportName(ext: String = "jpg") -> String {
-        guard let url = imageURL else { return "kelvin-edit." + ext }
+        guard let url = imageURL else { return "\(Branding.exportStem)." + ext }
         let look = activeLookId.flatMap { LookPreset.named($0)?.name }
             ?? candidates.first { $0.id == selectedCandidateId }?.label
         return ExportNaming.filename(for: url, perception: perception, look: look, ext: ext)
@@ -1267,7 +1267,7 @@ final class AppState: ObservableObject {
             // the filmstrip carry the rest.
             guard let first = (try? BatchApply.imageFiles(in: url))
                 .map({ PhotoOrder.sorted($0, by: .filename) })?.first else {
-                statusMessage = "No photos Kelvin can read in \(url.lastPathComponent)."
+                statusMessage = "No photos \(Branding.displayName) can read in \(url.lastPathComponent)."
                 return
             }
             // Opening a folder is an explicit request for the shoot, so the strip starts open.
@@ -1279,7 +1279,7 @@ final class AppState: ObservableObject {
             return
         }
         guard BatchApply.imageExtensions.contains(url.pathExtension.lowercased()) else {
-            statusMessage = "Kelvin can't read .\(url.pathExtension) files."
+            statusMessage = "\(Branding.displayName) can't read .\(url.pathExtension) files."
             return
         }
         // One file was asked for, so one file is what takes over the screen. The rest of the folder
@@ -1722,7 +1722,7 @@ final class AppState: ObservableObject {
             // No segmentation, no mask, no control. `adjustSubjectMask` used to return silently
             // here, which is a button that does nothing and does not say why.
             exhaustedFixes.insert(issue)
-            statusMessage = "No subject Kelvin can isolate in this frame — that one needs a mask you draw"
+            statusMessage = "No subject \(Branding.displayName) can isolate in this frame — that one needs a mask you draw"
             return
         }
         // The subject mask the fixes accumulate on. Found (not created) up front, so the loop can
@@ -2916,7 +2916,7 @@ struct ContentView: View {
                     Text("Read the light.")
                         .font(Theme.ui(40, .medium))
                         .foregroundColor(Theme.ink)
-                    Text("Drop a photo. Kelvin reads the scene on-device and offers a few finished looks — pick one, tune it, then apply it across the shoot.")
+                    Text("Drop a photo. \(Branding.displayName) reads the scene on-device and offers a few finished looks — pick one, tune it, then apply it across the shoot.")
                         .textSelection(.enabled)
                         .font(Theme.ui(14))
                         .foregroundColor(Theme.inkDim)
@@ -3270,7 +3270,7 @@ struct ContentView: View {
                                 Text("no fix").font(Theme.mono(9)).foregroundColor(Theme.inkDim)
                                     .padding(.horizontal, 8).padding(.vertical, 3)
                                     .background(Capsule().stroke(Theme.inkDim.opacity(0.35), lineWidth: 1))
-                                    .help("Kelvin's automatic correction for this is already as far "
+                                    .help("\(Branding.displayName)'s automatic correction for this is already as far "
                                           + "as it goes — from here it's a manual adjustment")
                             }
                         }
@@ -3388,7 +3388,7 @@ struct ContentView: View {
                                 Text("Show in Maps").font(Theme.mono(9))
                             }.foregroundColor(Theme.glow)
                         }
-                        .help("Opens Maps with these coordinates. Kelvin does not fetch anything itself.")
+                        .help("Opens Maps with these coordinates. \(Branding.displayName) does not fetch anything itself.")
                     }
                 }
             }

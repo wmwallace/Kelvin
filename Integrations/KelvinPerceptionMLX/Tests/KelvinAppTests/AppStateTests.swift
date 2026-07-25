@@ -391,8 +391,11 @@ final class AppStateTests: XCTestCase {
     /// reached before one is loaded.
     func testTheSuggestedExportNameAlwaysHasAnExtension() {
         let s = AppState()
-        XCTAssertEqual(s.suggestedExportName(ext: "jpg"), "kelvin-edit.jpg")
-        XCTAssertEqual(s.suggestedExportName(ext: "tiff"), "kelvin-edit.tiff")
+        // Asserted against `Branding`, not against the literal. A test that hardcodes the product
+        // name is a test that fails the day the product is renamed — which turns the rename from a
+        // constant change into an archaeology exercise.
+        XCTAssertEqual(s.suggestedExportName(ext: "jpg"), "\(Branding.exportStem).jpg")
+        XCTAssertEqual(s.suggestedExportName(ext: "tiff"), "\(Branding.exportStem).tiff")
     }
 }
 

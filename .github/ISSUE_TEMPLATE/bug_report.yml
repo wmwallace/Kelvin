@@ -1,0 +1,76 @@
+name: Bug report
+description: Something behaves wrongly, crashes, or produces an edit that is plainly incorrect
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not report security issues here — see [SECURITY.md](../blob/main/SECURITY.md).
+
+        If the problem is that an edit looks *worse* rather than wrong, that is still worth filing:
+        say what you expected the photograph to look like and why.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: And what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a folder of …
+        2. Add a subject mask, pull exposure up …
+        3. Press the right arrow before it finishes …
+    validations:
+      required: true
+
+  - type: input
+    id: file-format
+    attributes:
+      label: File format and camera
+      description: >
+        RAW behaves differently from JPEG at several points in the pipeline, and per-camera colour
+        profiles come from Apple's decoder. "Sony .ARW from an A7 IV", "iPhone HEIC", "a scanned PNG".
+      placeholder: .ARW from a Sony A7 IV
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mac
+    attributes:
+      label: Mac
+      options:
+        - Apple Silicon
+        - Intel
+    validations:
+      required: true
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "15.1"
+    validations:
+      required: true
+
+  - type: input
+    id: build
+    attributes:
+      label: How you are running it
+      description: A release build, or `make app` from source at some commit.
+      placeholder: make app at 482d93a
+
+  - type: textarea
+    id: photograph
+    attributes:
+      label: The photograph, if it matters
+      description: >
+        Attach it only if you are happy to — a photograph you share here becomes public, along with
+        any location recorded in it. Describing the frame is usually enough to reproduce the problem
+        synthetically: backlit, high ISO, no clear subject, blown sky, night, a burst of near
+        duplicates.
