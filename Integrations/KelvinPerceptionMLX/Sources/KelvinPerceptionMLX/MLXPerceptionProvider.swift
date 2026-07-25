@@ -25,9 +25,24 @@ import Tokenizers
 /// per image keeps each photo's judgment independent (no conversation carryover).
 public actor MLXPerceptionProvider: PerceptionProvider {
 
-    /// Apache-2.0, 4-bit, pre-quantised for MLX. See docs discussion in the M4 notes: chosen
-    /// over Gemma 3 4B for its cleaner licence and stronger structured-JSON behaviour.
-    public static let defaultModelID = "mlx-community/Qwen2.5-VL-3B-Instruct-4bit"
+    /// Apache-2.0, 4-bit, pre-quantised for MLX.
+    ///
+    /// This was `Qwen2.5-VL-3B-Instruct`, and the comment here asserted it was Apache-2.0 and
+    /// "chosen over Gemma 3 4B for its cleaner licence". Both claims were wrong, in the most
+    /// awkward possible direction: that model is under `qwen-research` — *"FOR NON-COMMERCIAL
+    /// PURPOSES ONLY"*, with Non-Commercial defined as *"research or evaluation purposes only"*.
+    /// It is the ONLY size in its family with that licence; the 7B, the 32B and every Qwen2-VL
+    /// are Apache-2.0. Being written down as a fact is precisely why nobody re-checked it, so:
+    /// **when this line changes, re-read the licence rather than the previous comment.**
+    ///
+    /// Kelvin is a photo editor. Any real use of it — a hobbyist on family photos, a
+    /// photographer on a client's wedding — is neither research nor evaluation, so shipping that
+    /// default would have walked every user into a licence they were never shown (D-model-3).
+    ///
+    /// Qwen3.5-2B is Apache-2.0 with no custom terms, and measured on real photographs it is
+    /// also *faster* than what it replaces (4.5–4.7 s against 5.2–5.7 s) while reading correctly.
+    /// The licence-clean choice being the quick one was not the expected outcome.
+    public static let defaultModelID = "mlx-community/Qwen3.5-2B-MLX-4bit"
 
     private let modelID: String
     private let maxTokens: Int

@@ -4,7 +4,7 @@ import CoreImage
 /// The perception layer's backend boundary (ARCHITECTURE.md: "Perception/ proxy → perception
 /// JSON. Swappable model backend"). Everything downstream — the engine, candidate generation,
 /// the eval harness — depends only on this protocol, never on a specific model. The real VLM
-/// backend (MLX + Qwen2.5-VL) is one conformance; a stub is another; a file loader is another.
+/// backend (MLX + a small Qwen VLM) is one conformance; a stub is another; a file loader is another.
 ///
 /// Keeping this seam model-free is what lets build-order step 3 (the engine) be finished and
 /// tested before step 4 (the model) is wired at all.

@@ -247,9 +247,21 @@ including the 2B are Apache 2.0. The default was picked for size and capability 
 checked, and D-model-2's commercially-clean requirement is therefore not yet met. Nothing about this is urgent for a private repo and all of it is blocking before a
 first external user — the same deadline as the rename.
 
-**Recommendation: move to `Qwen2.5-VL-7B-Instruct` (Apache 2.0) unless the perception prompt can be
-made to work on `Qwen3.5-2B` (Apache 2.0), which would be both legal and faster.** Not swapped
-unilaterally: it costs ~1.8x perception time, and which trade to take is the owner's call.
+**RESOLVED — the default is now `mlx-community/Qwen3.5-2B-MLX-4bit` (Apache 2.0).**
+
+The prompt work succeeded, so the 7B's ~1.8x cost was not needed. Qwen3.5-2B initially answered
+"golden-hour" on an overcast frame; the cause was a prompt bug rather than the model — nothing
+stopped it inferring the LIGHT from the COLOUR of the image, and `wbStrength` halves for
+golden/blue hour, so a warm cast was suppressing the correction for warm casts. With the rule
+fenced to `lighting.condition` it reads correctly (see the commit "Stop the model reading a colour
+cast as golden hour" for the three placements tried and why two failed).
+
+Result: **4.5–4.7 s against the old default's 5.2–5.7 s**, correct reads on every frame tried, and
+Apache 2.0. The licence-clean option turned out to be the faster one, which is not how these
+usually go.
+
+Sample size is three photographs. Worth a broader run against the eval corpus before treating the
+quality comparison as settled; the *licence* conclusion does not depend on sample size.
 
 Perception costs **~6 s per photo** and is now the dominant cost of opening one — the rest of the
 load path is about 1.3 s. So the model is the biggest remaining performance lever, which is why

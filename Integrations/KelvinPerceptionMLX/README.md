@@ -1,8 +1,15 @@
 # KelvinPerceptionMLX
 
-The real perception backend for Kelvin: a small on-device VLM (**Qwen2.5-VL-3B-Instruct,
-4-bit**, Apache-2.0) that reads a photo and returns a `KelvinCore.Perception` — categorical
-judgments only, never numbers (CLAUDE.md non-negotiable #1).
+The real perception backend for Kelvin: a small on-device VLM (**Qwen3.5-2B, 4-bit**,
+Apache-2.0) that reads a photo and returns a `KelvinCore.Perception` — categorical judgments
+only, never numbers (CLAUDE.md non-negotiable #1).
+
+**Model weights are downloaded at runtime and are NOT redistributed by this repository.** The
+default is Apache-2.0 so that anyone can use Kelvin for anything. `KELVIN_MODEL=<hf-repo-id>`
+swaps it without a rebuild — if you point it somewhere else, the terms of that model become
+yours to honour. This matters more than it looks: the previous default was
+`Qwen2.5-VL-3B-Instruct`, which is licensed for *"research or evaluation purposes only"* and
+was documented here as Apache-2.0 for months. See `docs/DECISIONS.md` D-model-3.
 
 It is a **separate nested Swift package on purpose.** MLX pulls a large dependency graph,
 compiles Metal kernels, and requires macOS 14. The root `Kelvin` package must stay MLX-free so
@@ -17,7 +24,7 @@ cd Integrations/KelvinPerceptionMLX
 swift build          # first build compiles MLX's Metal kernels — several minutes
 ```
 
-The first *run* downloads the model (~2–3 GB) from Hugging Face and caches it.
+The first *run* downloads the model (~1.5 GB) from Hugging Face and caches it.
 
 ## Usage
 
