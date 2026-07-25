@@ -143,6 +143,8 @@ struct FilmstripView: View {
     /// True while the EXIF pass is still running, so the header can say the order is provisional
     /// rather than let the strip silently rearrange under the pointer.
     var sortPending: Bool = false
+    /// Called when the strip is unfolded, so the deferred per-folder read can happen then.
+    var onExpand: () -> Void = {}
     @State private var hovered: URL?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The fold. Which way it starts is set by how the photo was opened (see `FilmstripFold`);
@@ -167,6 +169,10 @@ struct FilmstripView: View {
                 // A click here is a decision. Record it, and the open-intent default stops
                 // overriding the fold from the next photo onwards.
                 FilmstripFold.recordUserChoice(expanded: expanded)
+                // Unfolding is the moment the rest of the shoot is actually wanted, so it is the
+                // moment its per-file detail gets read. Opening one photograph no longer pays for
+                // a folder that stays shut.
+                if expanded { onExpand() }
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "chevron.right")

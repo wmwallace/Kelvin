@@ -456,6 +456,36 @@ final class AppState: ObservableObject {
                                          reversed: photoSortReversed, captureDates: captureDates)
     }
 
+    /// The per-file work a filmstrip needs — capture times, which photos carry edits, which are
+    /// flagged — run only when the strip is actually on screen.
+    ///
+    /// Deferred rather than dropped: the strip still shows everything the moment you open it. What
+    /// changed is that opening a single photograph no longer pays for a shoot you did not ask to
+    /// see. Called again when the strip is unfolded, and idempotent, so the cost lands once.
+    func loadFolderDetailIfVisible(for folder: URL, photos: [URL]) {
+        guard UserDefaults.standard.bool(forKey: FilmstripFold.expandedKey) else {
+            pendingFolderDetail = (folder, photos)
+            return
+        }
+        pendingFolderDetail = nil
+        loadCaptureDates(for: folder, photos: photos)
+        editedURLs.formUnion(EditStore.edited(among: photos))
+        flags = FlagStore.flags(among: photos)
+    }
+
+    /// The folder whose detail has not been read yet, held so unfolding the strip can pay the cost
+    /// then instead of on open.
+    private var pendingFolderDetail: (folder: URL, photos: [URL])?
+
+    /// Called when the strip is unfolded. Pays the deferred cost, once.
+    func filmstripDidExpand() {
+        guard let pending = pendingFolderDetail else { return }
+        pendingFolderDetail = nil
+        loadCaptureDates(for: pending.folder, photos: pending.photos)
+        editedURLs.formUnion(EditStore.edited(among: pending.photos))
+        flags = FlagStore.flags(among: pending.photos)
+    }
+
     /// Read the capture times for a folder, **off the main thread**, and re-sort when they arrive.
     ///
     /// An EXIF read is a header read, not a decode, so it is cheap per file — but 437 files is 437
@@ -905,17 +935,21 @@ final class AppState: ObservableObject {
         if loadedURL != nil, loadedURL != url { stashCurrentSession() }
         imageURL = url
         let siblings = PhotoBrowser.siblings(of: url).filter { !dismissedURLs.contains($0) || $0 == url }
-        // Kick the EXIF pass off first: it clears the cache synchronously when the folder has
-        // changed, so the sort below can never use the previous folder's dates.
-        loadCaptureDates(for: url.deletingLastPathComponent(), photos: siblings)
-        // Sorted with whatever dates are already cached — none on the first open of a folder,
-        // which `PhotoOrder` resolves to filename order. The pass above fills them in and re-sorts;
-        // the strip is never blocked waiting for it.
         folderPhotos = PhotoOrder.sorted(siblings, by: photoSort,
                                          reversed: photoSortReversed, captureDates: captureDates)
-        // Photos edited in an earlier session already carry a dot.
-        editedURLs.formUnion(EditStore.edited(among: folderPhotos))
-        flags = FlagStore.flags(among: folderPhotos)
+        // THE REST OF THE FOLDER IS NOT READ UNTIL YOU ASK TO SEE IT.
+        //
+        // Reported as "it automatically opens every single photo in the folder", and that was
+        // fair. Listing the directory is one cheap readdir, but everything after it was per-file
+        // and ran unconditionally: an EXIF header read for every sibling, a sidecar existence
+        // check for every sibling, a flag lookup for every sibling. Open one frame in a
+        // 437-photo shoot and that is some thirteen hundred file operations nobody asked for,
+        // for a strip that is folded shut.
+        //
+        // So the enrichment waits for the strip. Folded, opening a photo touches that photo.
+        // Unfolded — which is what opening a FOLDER means — it runs immediately, because then
+        // the shoot is the thing you asked for.
+        loadFolderDetailIfVisible(for: url.deletingLastPathComponent(), photos: siblings)
         capture = CaptureInfoReader.read(url: url)
         userMasks = []; paintingMaskId = nil; selectedMask = nil   // hand-drawn masks are per-photo
         // The subjects belong to the photograph, so they go out with it. Left standing,
@@ -2396,7 +2430,8 @@ struct ContentView: View {
                                   onScanFocus: appState.scanFocus,
                                   sortKey: $appState.photoSort,
                                   sortReversed: $appState.photoSortReversed,
-                                  sortPending: appState.sortOrderPending)
+                                  sortPending: appState.sortOrderPending,
+                                  onExpand: appState.filmstripDidExpand)
                 }
             }
             .frame(minWidth: 460)
@@ -3007,7 +3042,10 @@ struct ContentView: View {
 
                 // Last: a record of the photograph, not a control reached for mid-edit.
                 if appState.capture.camera != nil || appState.capture.summaryText != nil {
-                    CollapsibleSection("Capture", icon: "camera") { capturePanel }
+                    // Open by default. This is the one section that is pure information rather
+                    // than a control — what the camera recorded, which you read to decide what to
+                    // do, not something you fold away once you have set it.
+                    CollapsibleSection("Capture", icon: "camera", defaultOpen: true) { capturePanel }
                 }
                 }
             }
