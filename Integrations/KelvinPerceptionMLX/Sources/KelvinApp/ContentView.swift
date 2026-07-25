@@ -119,12 +119,40 @@ final class AppState: ObservableObject {
     @Published var candidates: [CandidateViewModel] = []
     @Published var selectedCandidateId: String?
     @Published var activeRecipe: Recipe?
-    @Published var activePreviewImage: NSImage?
-    /// The untouched original (proxy), for the press-and-hold before/after compare.
-    @Published var originalPreviewImage: NSImage?
+    /// A preview image and THE PHOTO IT WAS MADE FROM. The pair is the unit here, never the image
+    /// on its own.
+    ///
+    /// Held separately, the two drift. `imageURL` is set at the top of `loadPhoto`, before the
+    /// decode has produced anything, so for the whole of a decode the app believed it was showing
+    /// the new photo while every pixel on screen still belonged to the old one — and press-and-hold
+    /// compared against the *previous* photograph's original. The same window opens on the cached
+    /// path: `restore` swaps the original in immediately and the rendered preview only catches up
+    /// when the background render lands. A failed decode left the mismatch in place permanently.
+    ///
+    /// Carrying the URL makes the mismatch unrepresentable rather than something each of those
+    /// paths has to remember to avoid: an image belonging to another photo simply reads as nil, and
+    /// the compare falls back to showing nothing rather than to showing the wrong photograph.
+    private struct TaggedPreview {
+        let url: URL
+        let image: NSImage
+    }
+    @Published private var active: TaggedPreview?
+    @Published private var original: TaggedPreview?
+
+    /// The current edit, rendered — nil until the first render for THIS photo has landed.
+    var activePreviewImage: NSImage? { active.flatMap { $0.url == imageURL ? $0.image : nil } }
+    /// The untouched original (proxy) of the photo now open, for the press-and-hold compare.
+    var originalPreviewImage: NSImage? { original.flatMap { $0.url == imageURL ? $0.image : nil } }
     @Published var showingOriginal = false
     /// Objective craft flags on the current edit (clipping, skin, cast) — empty when clean.
     @Published var activeCraftIssues: [AestheticEvaluator.Issue] = []
+    /// The measurement those flags came from, kept so a fix can be sized from what is on screen and
+    /// so the UI can ask whether a fix has anywhere left to go (see `canFix`).
+    @Published private var lastCraftReading: CraftFix.Reading?
+    /// Subject fixes that have been clicked and come back with nothing to give — the control is at
+    /// its ceiling, or it cannot move this photo's metric at all. Cleared whenever the base changes
+    /// (new photo, new candidate, reset), because then the question is open again.
+    @Published private var exhaustedFixes: Set<AestheticEvaluator.Issue> = []
 
     /// The full editable global adjustment set, held as ABSOLUTE values rather than deltas. Sliders bind
     /// straight to its fields; it starts from the chosen candidate and the user takes it from there.
@@ -550,12 +578,24 @@ final class AppState: ObservableObject {
         resetHistory()
     }
 
+    /// The photo whose decoded images are actually in memory right now.
+    ///
+    /// NOT the same thing as `imageURL`, and the difference is load-bearing. `imageURL` is what the
+    /// app is *showing you*, and `loadPhoto` sets it the moment you pick a photo — seconds before
+    /// the decode finishes. `loadedURL` is what is actually in `fullResCI`/`proxyCI`/`original`, and
+    /// it only moves when a decode lands. Everything that files the current state away has to key
+    /// on this one: keyed on `imageURL`, opening a third photo while the second was still decoding
+    /// filed the FIRST photo's images, edit and sidecar under the SECOND photo's URL, and reopening
+    /// that frame from the strip then showed someone else's picture.
+    private var loadedURL: URL?
+
     /// Capture the current photo's state before leaving it.
     private func stashCurrentSession() {
-        guard let url = imageURL, let full = fullResCI, let proxy = proxyCI else { return }
+        guard let url = loadedURL, let full = fullResCI, let proxy = proxyCI else { return }
         let session = PhotoSession(
             url: url, imageId: imageId, fullResCI: full, proxyCI: proxy,
-            originalPreviewImage: originalPreviewImage, perception: perception,
+            originalPreviewImage: original.flatMap { $0.url == url ? $0.image : nil },
+            perception: perception,
             candidates: candidates, proxyMaskBitmaps: proxyMaskBitmaps,
             subjectLuma: subjectLuma, skyLuma: skyLuma,
             healSpots: healSpots, detectedSpotCount: detectedSpotCount,
@@ -575,8 +615,9 @@ final class AppState: ObservableObject {
     /// Put a previously-edited photo back exactly as it was.
     private func restore(_ s: PhotoSession) {
         imageURL = s.url; imageId = s.imageId
+        loadedURL = s.url
         fullResCI = s.fullResCI; proxyCI = s.proxyCI
-        originalPreviewImage = s.originalPreviewImage
+        original = s.originalPreviewImage.map { TaggedPreview(url: s.url, image: $0) }
         perception = s.perception; candidates = s.candidates
         proxyMaskBitmaps = s.proxyMaskBitmaps
         subjectLuma = s.subjectLuma; skyLuma = s.skyLuma
@@ -597,11 +638,11 @@ final class AppState: ObservableObject {
     /// is not discarding — and the session cache is kept, so reopening from the strip is instant.
     func closeCurrentPhoto() {
         stashCurrentSession()
-        imageURL = nil
+        imageURL = nil; loadedURL = nil
         fullResCI = nil; proxyCI = nil
         candidates = []; selectedCandidateId = nil
-        activeRecipe = nil; activePreviewImage = nil; originalPreviewImage = nil
-        lastRenderedCI = nil; activeCraftIssues = []
+        activeRecipe = nil; active = nil; original = nil
+        lastRenderedCI = nil; activeCraftIssues = []; lastCraftReading = nil; exhaustedFixes = []
         userMasks = []; paintingMaskId = nil; selectedUserMaskId = nil
         brushCache = [:]
         proxyMaskBitmaps = [:]; healSpots = []; detectedSpotCount = 0
@@ -619,6 +660,10 @@ final class AppState: ObservableObject {
         sessionOrder.removeAll { $0 == url }
         folderPhotos.removeAll { $0 == url }
         if url == imageURL {
+            // Forget what is in memory BEFORE moving on, or the stash on the way to the next photo
+            // writes this frame's session and sidecar straight back after they were just removed.
+            loadedURL = nil
+            original = nil; active = nil
             if let next = folderPhotos.first {
                 Task { await openPhoto(next) }
             } else {
@@ -629,9 +674,11 @@ final class AppState: ObservableObject {
 
     /// Switch photos from the filmstrip: stash what you were doing, then restore or load fresh.
     func openPhoto(_ url: URL) async {
-        // `|| proxyCI == nil` so a photo whose load failed can be retried. Without it, a transient
+        // `|| loadedURL != url` so a photo whose load failed can be retried. Without it, a transient
         // failure left `imageURL` set and this guard then refused every attempt at the same file.
-        guard url != imageURL || proxyCI == nil else { return }
+        // It used to read `proxyCI == nil`, which stopped being true after the FIRST photo loaded:
+        // a failed decode leaves the previous photo's proxy in place, so the retry was refused.
+        guard url != imageURL || loadedURL != url else { return }
         stashCurrentSession()
         if let cached = sessions[url] {
             restore(cached)
@@ -712,7 +759,7 @@ final class AppState: ObservableObject {
         isProcessing = true
         statusMessage = "Decoding…"
         // Keep whatever you were working on before this photo takes over.
-        if imageURL != nil, imageURL != url { stashCurrentSession() }
+        if loadedURL != nil, loadedURL != url { stashCurrentSession() }
         imageURL = url
         let siblings = PhotoBrowser.siblings(of: url).filter { !dismissedURLs.contains($0) || $0 == url }
         // Kick the EXIF pass off first: it clears the cache synchronously when the folder has
@@ -758,11 +805,14 @@ final class AppState: ObservableObject {
             }.value
             guard imageURL == url else { return }
 
+            // The decode has landed, so these images now belong to `url` — and `loadedURL` moves
+            // with them, in the same breath, never before.
             self.fullResCI = decoded.fullRes
             self.imageId = decoded.imageId
             self.proxyCI = decoded.proxy
+            self.loadedURL = url
             // The untouched original, for the before/after compare.
-            self.originalPreviewImage = decoded.originalPreview
+            self.original = decoded.originalPreview.map { TaggedPreview(url: url, image: $0) }
             let perceptionProxy = decoded.perceptionProxy
             let proxy = decoded.proxy
 
@@ -923,19 +973,9 @@ final class AppState: ObservableObject {
     /// only the settled result comes back. It used to be driven from `scheduleCommit`, which fires
     /// after *any* edit — so a slider the user dragged afterwards could trigger another nudge.
     func applyFix(_ issue: AestheticEvaluator.Issue) {
-        // Subject problems are fixed ON THE SUBJECT, not globally — one bounded step per click, no
-        // loop. The amounts and their ceilings live in `CraftFix.subjectStep`, in Core, where they
-        // are measured against the real renderer: written out here they could not be tested, and
-        // one of them (contrast inside the mask) was crushing a dark subject to solid black while
-        // the metric it targets read as improved.
-        if let step = CraftFix.subjectStep(for: issue) {
-            adjustSubjectMask { mask in
-                let next = step.applied(exposureEV: mask.exposure, contrast: mask.contrast)
-                mask.exposure = next.exposureEV
-                mask.contrast = next.contrast
-            }
-            onEdit(); return
-        }
+        // Subject problems are fixed ON THE SUBJECT, not globally — the frame as a whole is not the
+        // problem, the person in it is.
+        if CraftFix.subjectStep(for: issue) != nil { applySubjectFix(issue); return }
 
         guard !fixInProgress, let proxy = proxyCI, let recipe = activeRecipe else { return }
         fixInProgress = true
@@ -1033,6 +1073,123 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// One click of a subject fix — `.subjectTooDark`, `.subjectBlown`, `.subjectFlat` — pressed to
+    /// the fixed point of the control that corrects it.
+    ///
+    /// THE BUG THIS EXISTS FOR. This used to apply one fixed nudge per click with nothing measuring
+    /// the result: +0.35 EV on the subject mask for `.subjectTooDark`, whatever the photo. On a
+    /// backlit portrait that is a sixth of the correction, so the reported behaviour followed
+    /// exactly — click, the picture changes, the warning stays; click, it changes again, the
+    /// warning stays; and from the seventh click the mask was pinned at its ±2 EV ceiling and the
+    /// button did nothing at all while still being offered. The mask itself was working perfectly:
+    /// measured, face luma went 0.217 → 0.409 over those six clicks. The nudge was simply the wrong
+    /// size and nobody was checking.
+    ///
+    /// Now the step is SIZED from what is measured (see `CraftFix.subjectStep`) and pressed by
+    /// `CraftFix.convergeSubject`, which re-renders and re-measures between passes and stops the
+    /// moment the flag clears, the control runs out, or a pass fails to earn its place. One click,
+    /// one answer. And when the answer is "this cannot be finished", `canFix` stops offering the
+    /// button rather than leaving the user to discover it by clicking.
+    ///
+    /// Off the main thread, like the global fix: it renders and measures the proxy once per pass.
+    private func applySubjectFix(_ issue: AestheticEvaluator.Issue) {
+        guard !fixInProgress, let proxy = proxyCI, let recipe = activeRecipe else { return }
+        guard hasPerson else {
+            // No segmentation, no mask, no control. `adjustSubjectMask` used to return silently
+            // here, which is a button that does nothing and does not say why.
+            exhaustedFixes.insert(issue)
+            statusMessage = "No subject Kelvin can isolate in this frame — that one needs a mask you draw"
+            return
+        }
+        // The subject mask the fixes accumulate on. Found (not created) up front, so the loop can
+        // measure trial values without mutating anything the user would see.
+        let existing = userMasks.first { $0.kind == .subject }
+        let maskId = existing?.id ?? UUID()
+        let saturation = existing?.saturation ?? 0
+        let start = CraftFix.SubjectState(exposureEV: existing?.exposure ?? 0,
+                                          contrast: existing?.contrast ?? 0)
+        let others = (recipe.masks ?? []).filter { $0.id != maskId.uuidString }
+        fixInProgress = true
+        let input = RenderInput(
+            recipe: recipe, proxy: proxy,
+            bitmaps: proxyMaskBitmaps.merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked })
+        Task.detached(priority: .userInitiated) {
+            let settled = try? CraftFix.convergeSubject(issue: issue, from: start) { state in
+                var trial = input.recipe
+                var vm = UserMaskVM(kind: .subject)
+                vm.id = maskId
+                vm.exposure = state.exposureEV
+                vm.contrast = state.contrast
+                vm.saturation = saturation
+                trial.masks = others + [vm.toMask()]
+                let rendered = Renderer.render(input.proxy, with: trial, maskBitmaps: input.bitmaps)
+                return CraftFix.Reading(stats: try ImageStatistics.compute(rendered),
+                                        face: FaceSkin.read(in: rendered))
+            }
+            await MainActor.run {
+                self.fixInProgress = false
+                guard let settled else {
+                    self.statusMessage = "Couldn't measure this photo — nothing changed"
+                    return
+                }
+                if settled.passes > 0 {
+                    self.adjustSubjectMask { mask in
+                        mask.exposure = settled.state.exposureEV
+                        mask.contrast = settled.state.contrast
+                    }
+                    self.onEdit()
+                }
+                switch settled.outcome {
+                case .resolved:
+                    self.statusMessage = "Fixed · \(issue.message)"
+                case .notFlagged:
+                    break
+                default:
+                    // The control has gone as far as it goes. Record it so the button stops being
+                    // offered: a fix that provably cannot finish must say so, not invite a
+                    // seventh click.
+                    self.exhaustedFixes.insert(issue)
+                    self.statusMessage = Self.subjectFixStatus(issue, settled)
+                }
+            }
+        }
+    }
+
+    /// What a subject click actually achieved, in the status line — never claiming more than it did.
+    private static func subjectFixStatus(_ issue: AestheticEvaluator.Issue,
+                                         _ result: CraftFix.SubjectResult) -> String {
+        switch result.outcome {
+        case .noProgress, .notApplicable:
+            return "No automatic fix for \(issue.message) on this frame — the subject controls "
+                + "can't move it"
+        case .wouldHarm:
+            return "Went as far as it could · any further and the subject starts losing detail"
+        default:
+            return result.passes > 0
+                ? "Eased \(issue.message) as far as the subject control goes — still flagged"
+                : "The subject control is already at its limit here"
+        }
+    }
+
+    /// Whether the Fix button should be offered for `issue` at all.
+    ///
+    /// Global fixes are always offerable — `CraftFix.converge` decides for itself whether a step is
+    /// worth taking and hands the photo back untouched if not. The subject family is different: its
+    /// controls have hard ceilings (±2 EV, ±30 contrast), and a mask already sitting on one has
+    /// nothing left to give however many times the button is pressed. Asked of the CURRENT
+    /// measurement rather than cached, so a user who pulls the subject exposure back down gets the
+    /// button back.
+    func canFix(_ issue: AestheticEvaluator.Issue) -> Bool {
+        guard CraftFix.subjectStep(for: issue) != nil else { return true }
+        guard hasPerson, !exhaustedFixes.contains(issue), let reading = lastCraftReading else {
+            return false
+        }
+        let mask = userMasks.first { $0.kind == .subject }
+        return CraftFix.subjectStep(for: issue, reading: reading,
+                                    exposureEV: mask?.exposure ?? 0,
+                                    contrast: mask?.contrast ?? 0) != nil
+    }
+
     /// Find the subject mask, creating one if this is the first subject fix, and adjust it.
     /// Repeated fixes accumulate on the same mask rather than stacking up duplicates.
     private func adjustSubjectMask(_ change: (inout UserMaskVM) -> Void) {
@@ -1094,7 +1251,12 @@ final class AppState: ObservableObject {
         updateActiveRecipe()
     }
     /// Reset the history to the current state — call when a fresh candidate/photo becomes the base.
-    func resetHistory() { undoStack = []; redoStack = []; committed = snapshot(); refreshUndoState() }
+    /// A new base also re-opens the question of which fixes are reachable, so anything a subject
+    /// fix gave up on is forgotten here rather than following the user to the next photograph.
+    func resetHistory() {
+        undoStack = []; redoStack = []; committed = snapshot(); exhaustedFixes = []
+        refreshUndoState()
+    }
 
     /// After an edit burst settles (~0.45 s of no further edits), record the prior stable state as
     /// one undo step — so dragging a slider is a single undo, not hundreds.
@@ -1353,13 +1515,19 @@ final class AppState: ObservableObject {
         let bitmaps = proxyMaskBitmaps.merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked }
         let input = RenderInput(recipe: finalRecipe, proxy: proxy, bitmaps: bitmaps)
         let ctx = context
+        // Which photo these pixels are of. A render started before a photo switch can still land
+        // after it; tagged, that frame is ignored instead of being shown under the new photo's name.
+        let renderedURL = loadedURL
         Task.detached(priority: .userInitiated) {
             let rendered = Renderer.render(input.proxy, with: input.recipe, maskBitmaps: input.bitmaps)
             let cg = ctx.createCGImage(rendered, from: rendered.extent)
             let out = RenderOutput(ci: rendered, cg: cg)
             await MainActor.run {
                 self.lastRenderedCI = out.ci
-                if let cg = out.cg { self.activePreviewImage = NSImage(cgImage: cg, size: .zero) }
+                if let cg = out.cg, let renderedURL {
+                    self.active = TaggedPreview(url: renderedURL,
+                                                image: NSImage(cgImage: cg, size: .zero))
+                }
                 self.renderInFlight = false
                 self.scheduleCraftCheck()
                 if self.renderDirty { self.renderDirty = false; self.updateActiveRecipe() }
@@ -1374,7 +1542,15 @@ final class AppState: ObservableObject {
         let token = craftToken
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
             guard let self, self.craftToken == token, let r = self.lastRenderedCI else { return }
-            self.activeCraftIssues = AestheticEvaluator.score(rendered: r)?.issues ?? []
+            // Statistics and face are kept, not just the flag list: a subject fix is sized from the
+            // same measurement the flags came from, so what the button does and what the warning
+            // says can never be reading different numbers.
+            guard let stats = try? ImageStatistics.compute(r) else {
+                self.lastCraftReading = nil; self.activeCraftIssues = []; return
+            }
+            let reading = CraftFix.Reading(stats: stats, face: FaceSkin.read(in: r))
+            self.lastCraftReading = reading
+            self.activeCraftIssues = reading.issues
         }
     }
 
@@ -2027,11 +2203,27 @@ struct ContentView: View {
                                 .font(.system(size: 10)).foregroundColor(Theme.warn)
                             Text(issue.message).font(Theme.mono(10)).foregroundColor(Theme.inkDim)
                             Spacer(minLength: 4)
-                            Button(action: { appState.applyFix(issue) }) {
-                                Text("Fix").font(Theme.ui(10, .semibold)).foregroundColor(Theme.base)
-                                    .padding(.horizontal, 10).padding(.vertical, 3)
-                                    .background(Capsule().fill(Theme.glow))
-                            }.buttonStyle(.plain)
+                            // A FIX BUTTON IS A PROMISE. The subject corrections run into hard
+                            // ceilings (±2 EV on the mask), and once one is spent, clicking again
+                            // cannot do anything — which is precisely how "I click fix, it applies
+                            // a change, I click again, and it never fixes" felt from the outside.
+                            // So the button is withdrawn and the row says why instead.
+                            if appState.canFix(issue) {
+                                Button(action: { appState.applyFix(issue) }) {
+                                    Text("Fix").font(Theme.ui(10, .semibold)).foregroundColor(Theme.base)
+                                        .padding(.horizontal, 10).padding(.vertical, 3)
+                                        .background(Capsule().fill(Theme.glow))
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(appState.fixInProgress)
+                                .opacity(appState.fixInProgress ? 0.45 : 1)
+                            } else {
+                                Text("no fix").font(Theme.mono(9)).foregroundColor(Theme.inkDim)
+                                    .padding(.horizontal, 8).padding(.vertical, 3)
+                                    .background(Capsule().stroke(Theme.inkDim.opacity(0.35), lineWidth: 1))
+                                    .help("Kelvin's automatic correction for this is already as far "
+                                          + "as it goes — from here it's a manual adjustment")
+                            }
                         }
                     }
                 }

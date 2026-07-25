@@ -370,16 +370,209 @@ public enum CraftFix {
         }
     }
 
-    /// nil for anything that is not a subject issue — those go through `step(for:)`.
-    public static func subjectStep(for issue: AestheticEvaluator.Issue) -> SubjectStep? {
+    /// Where the placement correction aims: a subject this far below the scene's own midtone. The
+    /// flag fires at a deficit of 0.252 (`AestheticEvaluator`'s placement term hits 0.6 there), so
+    /// aiming at 0.22 lands just INSIDE the flag rather than on its edge — the same reasoning as
+    /// the skin-hue step, and for the same reason: a correction that stops exactly on the threshold
+    /// re-flags on the next measurement and the user clicks again.
+    public static let subjectPlacementTarget = 0.22
+
+    /// The nudge for a subject issue, as a delta on the SUBJECT MASK's adjustments — the frame as a
+    /// whole is not the problem, the person in it is, so a global slider is the wrong instrument
+    /// (`step(for:)` returns nil for these three).
+    ///
+    /// nil means THERE IS NOTHING LEFT TO DO — either the issue is not a subject issue, or the
+    /// control that corrects it has no headroom left, or what is measured no longer needs it. A
+    /// caller must treat nil as "do not offer this fix", not as "try again".
+    ///
+    /// `reading` is what is currently on screen, and `exposureEV`/`contrast` are where the mask
+    /// already sits. Both are optional so the shape of the correction can still be asked for
+    /// without a measurement (the audit does exactly that); pass them and the step is SIZED.
+    ///
+    /// Sizing matters here in a way it did not look like it would. `.subjectTooDark` used to be a
+    /// flat +0.35 EV whatever the photo, and the app applies one step per click with no loop. On a
+    /// backlit portrait — face at luma 0.217, scene median 0.706, a deficit of 0.489 against a flag
+    /// that fires at 0.252 — that is six clicks to reach the ±2 EV ceiling, and measured, the flag
+    /// was STILL up at the ceiling (deficit 0.297). So every click changed the picture, the warning
+    /// never cleared, and the seventh click silently did nothing at all: exactly "I click fix, it
+    /// applies a change, I click again, and it never fixes it".
+    ///
+    /// A sized step asks for the whole correction at once, and returning nil when it cannot be
+    /// asked for is what lets the UI stop offering a button that provably cannot finish.
+    public static func subjectStep(for issue: AestheticEvaluator.Issue,
+                                   reading: Reading? = nil,
+                                   exposureEV: Double = 0,
+                                   contrast: Double = 0) -> SubjectStep? {
         var s = SubjectStep()
         switch issue {
-        case .subjectTooDark:   s.exposureEV = 0.35
-        case .subjectBlown:     s.exposureEV = -0.3
-        case .subjectFlat:      s.contrast = 14      // modelling comes from contrast IN the face
-        default:                return nil
+        case .subjectTooDark:
+            // Exposure only goes up to the ceiling, and a mask already at it has nothing to give.
+            let headroom = s.exposureLimit - exposureEV
+            guard headroom > 0.02 else { return nil }
+            guard let reading else { s.exposureEV = min(0.35, headroom); break }
+            guard let luma = reading.face.skinLuma else { return nil }
+            let target = reading.stats.medianLuma - subjectPlacementTarget
+            guard target > luma else { return nil }          // already where it should be
+            // EV is a doubling in scene-linear light; these lumas are display-referred, so the
+            // sRGB transfer function's ~2.2 exponent converts between them. Measured against the
+            // real renderer on a feathered subject mask: predicted 0.407 at +2 EV from 0.2168,
+            // actual 0.4092 — inside half a percent, on two complexions.
+            let need = 2.2 * log2(target / max(luma, 0.004))
+            guard need > 0.02 else { return nil }
+            s.exposureEV = min(need, headroom)
+        case .subjectBlown:
+            let headroom = s.exposureLimit + exposureEV     // pulling DOWN toward −2 EV
+            guard headroom > 0.02 else { return nil }
+            // Clipping is a count of pixels past a threshold, so there is no closed form to invert;
+            // this one stays a fixed nudge and `convergeSubject` presses it with a measurement
+            // between each pass.
+            if let reading, (reading.face.skinClipHigh ?? 0) <= 0.05 { return nil }
+            s.exposureEV = -min(0.3, headroom)
+        case .subjectFlat:
+            let headroom = s.contrastLimit - contrast
+            guard headroom > 0.5 else { return nil }
+            // The flag fires when the face's p95−p5 range falls under 0.108 (the evaluator's
+            // modelling term reaching 0.6). Same as clipping: a contrast amount that produces a
+            // given range depends on where the face's tones sit, so this is measured, not solved.
+            if let reading, (reading.face.skinRange ?? 1) >= subjectRangeFloor { return nil }
+            s.contrast = min(14, headroom)  // modelling comes from contrast IN the face
+        default:
+            return nil
         }
         return s
+    }
+
+    /// The face tonal range below which `AestheticEvaluator` calls the subject flat.
+    static let subjectRangeFloor = 0.108
+
+    /// Where the subject mask currently sits. The two controls the subject fixes own, together,
+    /// because a correction has to be judged against the state it starts from.
+    public struct SubjectState: Sendable, Equatable {
+        public var exposureEV: Double
+        public var contrast: Double
+        public init(exposureEV: Double = 0, contrast: Double = 0) {
+            self.exposureEV = exposureEV
+            self.contrast = contrast
+        }
+    }
+
+    public struct SubjectResult: Sendable {
+        public let state: SubjectState
+        public let passes: Int
+        public let outcome: Outcome
+    }
+
+    /// Passes one click of a subject fix may take. Four rather than `maxPasses`' three because a
+    /// sized step normally finishes in one and the extra passes only ever serve the two corrections
+    /// that have to be found by measurement (`.subjectBlown`, `.subjectFlat`).
+    public static let maxSubjectPasses = 4
+    /// How many times a refused pass may be halved and retried. A sized step aims at the whole
+    /// correction; if the whole correction would harm the subject, the largest safe share of it is
+    /// still worth having, and throwing the entire click away because the full amount was too much
+    /// is how a fix that could help ends up doing nothing.
+    public static let maxSubjectBacktracks = 2
+
+    /// How far past its floor a subject flag currently sits, in the units the evaluator measures.
+    /// Separate from `Reading.excess`, which deliberately returns nil for this family so that
+    /// `severity` counts an unmeasurable flag as one whole unit and `fixAll` can neither trade one
+    /// away nor silently acquire one. Thresholds mirror `AestheticEvaluator` exactly.
+    public static func subjectExcess(_ issue: AestheticEvaluator.Issue,
+                                     _ reading: Reading) -> Double? {
+        switch issue {
+        case .subjectTooDark:
+            guard let luma = reading.face.skinLuma else { return nil }
+            return max(0, (reading.stats.medianLuma - luma) - 0.252)
+        case .subjectBlown:
+            guard let hi = reading.face.skinClipHigh else { return nil }
+            return max(0, hi - 0.05)
+        case .subjectFlat:
+            guard let range = reading.face.skinRange else { return nil }
+            return max(0, subjectRangeFloor - range)
+        default:
+            return nil
+        }
+    }
+
+    /// Apply a subject issue's correction to a fixed point, re-measuring after every pass.
+    ///
+    /// The global fixes have had `converge` since the pale-pink-toy bug; this family deliberately
+    /// did not, on the grounds that pressing a correction on somebody's face to its ceiling without
+    /// being asked is worse than leaving a flag up. That reasoning still holds for `fixAll` — the
+    /// subject family is still absent from a whole-frame run — but it was the wrong rule for the
+    /// per-issue button, because the button applied a *relative* nudge with nothing measuring it.
+    /// The user got an endless supply of changes and no correction. One click now goes as far as
+    /// the correction goes and no further, and the outcome says which of those happened.
+    ///
+    /// The ceilings (±2 EV, ±30 contrast) are unchanged and still bound everything here.
+    public static func convergeSubject(
+        issue: AestheticEvaluator.Issue,
+        from start: SubjectState,
+        measure: (SubjectState) throws -> Reading
+    ) rethrows -> SubjectResult {
+        guard subjectStep(for: issue) != nil else {
+            return SubjectResult(state: start, passes: 0, outcome: .notApplicable)
+        }
+        let startReading = try measure(start)
+        guard startReading.issues.contains(issue) else {
+            return SubjectResult(state: start, passes: 0, outcome: .notFlagged)
+        }
+
+        var accepted = start
+        var acceptedReading = startReading
+        var passes = 0
+        var outcome = Outcome.budgetSpent
+
+        passes: for _ in 0..<maxSubjectPasses {
+            guard let step = subjectStep(for: issue, reading: acceptedReading,
+                                         exposureEV: accepted.exposureEV,
+                                         contrast: accepted.contrast) else {
+                outcome = .budgetSpent; break            // no headroom, or nothing left to ask for
+            }
+            var scale = 1.0
+            for attempt in 0...maxSubjectBacktracks {
+                var trialStep = step
+                trialStep.exposureEV = step.exposureEV * scale
+                trialStep.contrast = step.contrast * scale
+                let next = trialStep.applied(exposureEV: accepted.exposureEV,
+                                             contrast: accepted.contrast)
+                let trial = SubjectState(exposureEV: next.exposureEV, contrast: next.contrast)
+                guard trial != accepted else { outcome = .budgetSpent; break passes }
+                let trialReading = try measure(trial)
+
+                // COLLATERAL. A subject correction may not buy its own metric with the subject's
+                // features, at either end, and may not invent a flag the photo did not have. This
+                // is the brake that caught masked contrast crushing 44% of a dark face to black
+                // while the modelling number it targets went up.
+                let invented = Set(trialReading.issues).subtracting(startReading.issues)
+                let harmed = grew(trialReading.face.skinClipLow, acceptedReading.face.skinClipLow)
+                    || grew(trialReading.face.skinClipHigh, acceptedReading.face.skinClipHigh)
+                if !invented.isEmpty || harmed {
+                    if attempt < maxSubjectBacktracks { scale /= 2; continue }
+                    outcome = .wouldHarm; break passes
+                }
+
+                // EVIDENCE. The pass has to move the thing it was aimed at.
+                let before = subjectExcess(issue, acceptedReading) ?? 0
+                let after = subjectExcess(issue, trialReading) ?? 0
+                guard after < before - 1e-9 || !trialReading.issues.contains(issue) else {
+                    outcome = .noProgress; break passes
+                }
+
+                accepted = trial
+                acceptedReading = trialReading
+                passes += 1
+                if !trialReading.issues.contains(issue) { outcome = .resolved; break passes }
+                break                                    // this pass landed; measure and go again
+            }
+        }
+
+        return SubjectResult(state: accepted, passes: passes, outcome: outcome)
+    }
+
+    /// Clipping that was not there before, allowing for the resolution of a 32×32 face sample.
+    private static func grew(_ after: Double?, _ before: Double?) -> Bool {
+        guard let after, let before else { return false }
+        return after > before + 0.01
     }
 
     // MARK: - The loop
