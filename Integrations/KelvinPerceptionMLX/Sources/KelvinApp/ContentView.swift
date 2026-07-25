@@ -564,6 +564,18 @@ final class AppState: ObservableObject {
     @Published var focus: [URL: FocusMeasure.Reading] = [:]
     @Published var focusScanProgress: Double?      // nil = not scanning
 
+    /// What a scan concluded about each frame, beyond sharpness.
+    ///
+    /// Read in the SAME pass as focus rather than a second one. Both want the same 1200 px proxy,
+    /// and on a RAW folder that proxy costs about 900 ms of decode per frame — 6.6 minutes across
+    /// a 437-frame shoot. Scanning twice would pay that twice for a measurement that adds 2 ms.
+    ///
+    /// Deliberately NOT wired to any filter that hides frames. The concerns are advisory: the rule
+    /// from the culling work is that photos are flagged for review, never auto-rejected, "so you
+    /// can discover false positives" — and the pass that produces these deleted four of its own
+    /// seven proposed verdicts after they fired on perfectly good photographs.
+    @Published var triage: [URL: PhotoTriage.Verdict] = [:]
+
     var softCount: Int { folderPhotos.filter { focus[$0]?.isSoft == true }.count }
 
     /// Measure every frame in the folder, newest results published as they arrive so the strip
@@ -1839,8 +1851,30 @@ final class AppState: ObservableObject {
                 out[m.id.uuidString] = hit.image
                 continue
             }
-            guard let composited = Renderer.brushMask(m.stamps, extent: extent),
-                  let cg = context.createCGImage(composited, from: extent) else { continue }
+            // INCREMENTAL. The cache keys on stamp count, so every new dab invalidated it and the
+            // WHOLE stroke was re-composited — `Renderer.brushMask` is O(stamps), measured at
+            // 18 ms for 1200 of them, and this runs on the main actor from `updateActiveRecipe`.
+            // So the cost was 18 ms *per dab* near the end of a long stroke, and the stroke got
+            // slower the longer you painted: O(N²) over a gesture, which is the shape of a brush
+            // that feels fine for two seconds and then drags.
+            //
+            // Only the new stamps need compositing, over the bitmap already baked.
+            let baked = brushCache[m.id]
+            let fresh = (baked.map { m.stamps.count > $0.count } ?? false)
+                ? Array(m.stamps.suffix(m.stamps.count - (baked?.count ?? 0)))
+                : m.stamps
+            guard let addition = Renderer.brushMask(fresh, extent: extent) else { continue }
+            let composited: CIImage
+            if let baked, m.stamps.count > baked.count {
+                // Lighten, not source-over: a mask is coverage, and two overlapping dabs must not
+                // read as more opaque than one.
+                composited = addition.applyingFilter("CILightenBlendMode", parameters: [
+                    kCIInputBackgroundImageKey: baked.image
+                ]).cropped(to: extent)
+            } else {
+                composited = addition
+            }
+            guard let cg = context.createCGImage(composited, from: extent) else { continue }
             let flat = CIImage(cgImage: cg)          // concrete — breaks the O(N) filter chain
             brushCache[m.id] = (m.stamps.count, flat)
             out[m.id.uuidString] = flat

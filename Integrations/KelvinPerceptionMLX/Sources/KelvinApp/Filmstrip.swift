@@ -377,12 +377,47 @@ struct FilmstripView: View {
                 }
                 .overlay(alignment: .bottomLeading) {
                     if let flag = flags[url] {
-                        Image(systemName: flag == .keep ? "flag.fill" : "xmark")
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundColor(flag == .keep ? Theme.base : Theme.ink)
-                            .padding(3)
-                            .background(Circle().fill(flag == .keep ? Theme.glow : Theme.surface2))
-                            .padding(3)
+                        // Clickable, so a flag can be taken back where it was put. `onFlag` was
+                        // declared and wired and never called from anywhere in this file: keep and
+                        // reject existed only on P and X, applied only to the OPEN photo, so there
+                        // was no way at all to flag a frame with the mouse or to change your mind
+                        // about one you had flagged.
+                        Button(action: { onFlag(url, flag) }) {
+                            Image(systemName: flag == .keep ? "flag.fill" : "xmark")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundColor(flag == .keep ? Theme.base : Theme.ink)
+                                .padding(3)
+                                .background(Circle().fill(flag == .keep ? Theme.glow : Theme.surface2))
+                                .padding(3)
+                        }
+                        .buttonStyle(.plain)
+                        .help(flag == .keep ? "Keeping this — click to clear"
+                                            : "Rejected — click to clear")
+                    }
+                }
+                // Hovering an unflagged frame offers both verdicts, so culling does not require
+                // opening every photograph to press a key at it.
+                .overlay(alignment: .bottomLeading) {
+                    if hovered == url, flags[url] == nil {
+                        HStack(spacing: 3) {
+                            Button(action: { onFlag(url, .keep) }) {
+                                Image(systemName: "flag")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .foregroundColor(Theme.glow)
+                                    .padding(3)
+                                    .background(Circle().fill(Theme.base.opacity(0.85)))
+                            }
+                            .buttonStyle(.plain).help("Keep (P)")
+                            Button(action: { onFlag(url, .reject) }) {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .foregroundColor(Theme.inkDim)
+                                    .padding(3)
+                                    .background(Circle().fill(Theme.base.opacity(0.85)))
+                            }
+                            .buttonStyle(.plain).help("Reject (X)")
+                        }
+                        .padding(3)
                     }
                 }
                 // A dot marks frames you've already worked on, so a pass through a shoot is legible.
