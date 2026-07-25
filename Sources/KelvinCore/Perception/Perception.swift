@@ -21,16 +21,22 @@ public struct Perception: Codable, Equatable, Sendable {
     public var confidence: Double
     /// Free text. **Never parsed** — for debugging and for explaining a choice to the user.
     /// Do not build logic on it (docs/RECIPE-SCHEMA.md).
-    /// A sentence of free text from the model. NO LONGER REQUESTED, and the field survives only so
-    /// that perception JSON written before that change still decodes.
+    /// One sentence from the model naming what it actually saw.
     ///
-    /// Nothing has ever read it. Measured, generation is the whole cost of a read — 6.5 s of the
-    /// 6.5 s — and it is dominated by DECODE rather than by looking at the photograph, so the length
-    /// of the answer is the one lever that moves it. This field was a fifth of the output, produced
-    /// for every photograph, for a human who was never shown it.
+    /// Briefly removed, because it costs real time: generation is the whole cost of a read, it is
+    /// dominated by DECODE rather than by looking at the photograph, and measured, this field is
+    /// 13% of it (6.48s → 5.66s, 410 → 326 characters). It was cut for being written for a human
+    /// who was never shown it.
     ///
-    /// If it comes back, it should come back as something a person can actually see — an explanation
-    /// on the candidate that says why the read went the way it did — and be paid for deliberately.
+    /// Then put back, because the answer was to SHOW it rather than to stop asking. This codebase's
+    /// standing objection to automatic judgements is that they are unfalsifiable — "a flag you can
+    /// click through to a measurement is not". The app reads a photograph, proposes four
+    /// interpretations of it, and without this said nothing at all about what it thought it was
+    /// looking at. When a candidate comes out wrong, this is what tells you whether the READ was
+    /// wrong or the MAPPING was, which are entirely different bugs.
+    ///
+    /// 13% for the app's only explanation of itself is a fair price, and it is now paid deliberately
+    /// instead of by default.
     public var notes: String?
 
     public static let currentSchemaVersion = 1

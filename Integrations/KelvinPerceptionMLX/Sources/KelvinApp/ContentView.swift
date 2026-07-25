@@ -1188,6 +1188,28 @@ final class AppState: ObservableObject {
         await perceptionProvider.preload()
     }
 
+    /// What the model said it saw, for the panel — the categorical read on one line, and its own
+    /// sentence beneath.
+    ///
+    /// Deliberately not a confidence number. A model's stated confidence is the least reliable thing
+    /// it produces, and putting 0.82 next to a description invites it to be read as a measurement
+    /// when everything else on this screen genuinely is one.
+    var sceneSummary: (headline: String, note: String?)? {
+        guard let p = perception else { return nil }
+        var parts: [String] = [p.scene.rawValue]
+        if let light = ExportNaming.descriptor(for: p.lighting.condition) {
+            parts.append(light.replacingOccurrences(of: "-", with: " "))
+        }
+        if p.subject.present, p.subject.type != .none {
+            parts.append(p.subject.type.rawValue)
+        }
+        if !p.problems.isEmpty {
+            parts.append(p.problems.map(\.rawValue).joined(separator: ", "))
+        }
+        let note = p.notes?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (parts.joined(separator: " · "), (note?.isEmpty == false) ? note : nil)
+    }
+
     /// Whether any photograph has been read since launch. Only ever used to tell the truth about
     /// how long the first one takes.
     private var hasReadAPhoto = false
@@ -3942,6 +3964,29 @@ struct ContentView: View {
 
                 Group {
                 CollapsibleSection("Candidates", icon: "rectangle.stack", defaultOpen: true) {
+                // WHAT IT SAW, above what it proposes — so the panel reads as a chain of reasoning
+                // rather than four options from nowhere.
+                //
+                // This is the app's only account of itself. Everything below is computed from the
+                // read: if a candidate comes out wrong, this is what tells you whether the READ was
+                // wrong ("golden hour" on an overcast morning) or the MAPPING was (a correct read
+                // turned into the wrong numbers). Those are entirely different bugs and, without
+                // this, indistinguishable from the outside.
+                if let seen = appState.sceneSummary {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(seen.headline)
+                            .font(Theme.mono(10)).foregroundColor(Theme.inkDim)
+                            .textSelection(.enabled)
+                        if let note = seen.note {
+                            Text(note)
+                                .font(Theme.ui(11)).foregroundColor(Theme.ink)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.bottom, 4)
+                }
                 if appState.candidates.isEmpty {
                     // Say what's happening instead of leaving a hole. The photo is already on
                     // screen, so this is the only part still pending.

@@ -50,7 +50,8 @@ public enum PerceptionPrompt {
         Include a problem only if it is clearly visible.
           "intent": one of [\(list(Intent.self))] — the editing goal that best suits \
         this photo,
-          "confidence": a number from 0 to 1 for how certain you are
+          "confidence": a number from 0 to 1 for how certain you are,
+          "notes": one short sentence naming only what you can actually see
         }
 
         Return the JSON object and nothing else.

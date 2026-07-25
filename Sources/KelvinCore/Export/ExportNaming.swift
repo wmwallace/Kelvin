@@ -149,7 +149,11 @@ public enum ExportNaming {
     /// Lighting conditions worth putting in a filename. `indoor-daylight` is the model's fallback
     /// value, so it carries no information and is deliberately omitted — a token that appears on
     /// everything is noise.
-    static func descriptor(for condition: Condition) -> String? {
+    /// Public because it is the one place a lighting condition is turned into words a person reads,
+    /// and the app's scene summary needs the same vocabulary the filenames use — two spellings of
+    /// "golden hour" in one product is how a photographer starts wondering if they mean different
+    /// things.
+    public static func descriptor(for condition: Condition) -> String? {
         switch condition {
         case .goldenHour:    return "golden-hour"
         case .blueHour:      return "blue-hour"
