@@ -4245,7 +4245,31 @@ struct CandidateRow: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var temp: Double? { candidate.baseRecipe.global.temperatureK }
-    private var exposure: Double { candidate.baseRecipe.global.exposureEV }
+
+    /// What makes THIS candidate different from the others, in at most three numbers.
+    ///
+    /// The row used to show exposure and nothing else, which made four genuinely different options
+    /// describe themselves identically: `RecipeEngine.exposure` deliberately returns exactly zero for
+    /// any frame whose median luma sits between 0.30 and 0.60 — "leave a reasonably-exposed frame
+    /// alone" — and that band covers most competently exposed photographs. So the picker was
+    /// reporting the one value designed not to move, while the contrast and vibrance that actually
+    /// separate Natural from Dramatic went unmentioned.
+    ///
+    /// Ordered by how much a photographer would notice, not by magnitude: exposure first when it is
+    /// doing anything, then contrast, then colour. Empty means this candidate really is a no-op,
+    /// which is worth saying out loud rather than dressing up as "+0.00 EV".
+    private var signature: String {
+        let g = candidate.baseRecipe.global
+        var parts: [String] = []
+        if abs(g.exposureEV) >= 0.01 { parts.append(String(format: "%+.2f EV", g.exposureEV)) }
+        if abs(g.contrast) >= 1 { parts.append(String(format: "%+.0f contrast", g.contrast)) }
+        if abs(g.vibrance) >= 1 { parts.append(String(format: "%+.0f vibrance", g.vibrance)) }
+        else if abs(g.saturation) >= 1 { parts.append(String(format: "%+.0f saturation", g.saturation)) }
+        if parts.isEmpty, abs(g.highlights) >= 1 {
+            parts.append(String(format: "%+.0f highlights", g.highlights))
+        }
+        return parts.isEmpty ? "as shot" : parts.prefix(3).joined(separator: " · ")
+    }
 
     var body: some View {
         Button(action: onSelect) {
@@ -4260,8 +4284,9 @@ struct CandidateRow: View {
                     Text(candidate.label)
                         .font(Theme.ui(14, .semibold))
                         .foregroundColor(isSelected ? Theme.ink : Theme.inkDim)
-                    Text(String(format: "%+.2f EV", exposure))
+                    Text(signature)
                         .font(Theme.mono(10)).foregroundColor(Theme.inkFaint)
+                        .lineLimit(1)
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 5) {
