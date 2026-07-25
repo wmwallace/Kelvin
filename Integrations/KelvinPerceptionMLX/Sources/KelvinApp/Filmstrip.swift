@@ -185,9 +185,41 @@ struct FilmstripView: View {
     /// once the user has clicked this control, their choice wins from then on.
     @AppStorage(FilmstripFold.expandedKey) private var expanded = true
 
+    /// How tall the strip is, and therefore how many rows of thumbnails fit in it.
+    ///
+    /// One row was fine while the strip was a list and useless once it became groups: a burst of
+    /// twenty needs horizontal scrolling INSIDE a column that is already scrolling horizontally, so
+    /// the grouping showed you the structure of the shoot and then hid its contents. Dragging the
+    /// top edge trades preview space for strip space, which is a judgement only the person looking
+    /// at the photograph can make — some shoots are about one frame, some are about forty.
+    @AppStorage("filmstrip.height") private var stripHeight = Self.oneRow
+    @State private var heightAtDragStart: Double?
+
+    /// A cell is 56 tall; the rest is the gap between rows.
+    private static let cellHeight: Double = 56
+    private static let rowSpacing: Double = 8
+    static let oneRow: Double = cellHeight
+    private static let maxRows = 6
+
+    private var rowCount: Int {
+        let rows = (stripHeight + Self.rowSpacing) / (Self.cellHeight + Self.rowSpacing)
+        return min(Self.maxRows, max(1, Int(rows.rounded(.down))))
+    }
+
+    /// Fill each column top to bottom, then move right — the reading order of a horizontal scroll.
+    /// Wrapping left-to-right instead would put frame 2 offscreen while frame 1 has an empty space
+    /// beneath it.
+    private func columns(_ urls: [URL]) -> [[URL]] {
+        guard rowCount > 1 else { return urls.map { [$0] } }
+        return stride(from: 0, to: urls.count, by: rowCount).map {
+            Array(urls[$0..<min($0 + rowCount, urls.count)])
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             Rectangle().fill(Theme.hairline).frame(height: 1)
+                .overlay(resizeHandle)
             header
             if expanded { strip }
         }
@@ -385,11 +417,7 @@ struct FilmstripView: View {
                         if let groups {
                             groupedRuns(groups)
                         } else {
-                            HStack(spacing: 8) {
-                                ForEach(photos, id: \.self) { url in
-                                    cell(url).id(url)
-                                }
-                            }
+                            grid(photos)
                         }
                     }
                     .padding(.horizontal, 14)
@@ -428,11 +456,7 @@ struct FilmstripView: View {
                 }
                 VStack(alignment: .leading, spacing: 5) {
                     heading(for: group)
-                    HStack(spacing: 8) {
-                        ForEach(group.urls, id: \.self) { url in
-                            cell(url).id(url)
-                        }
-                    }
+                    grid(group.urls)
                 }
             }
         }
@@ -463,6 +487,43 @@ struct FilmstripView: View {
         // worse than no heading: it is a label you have to guess at.
         .fixedSize()
         .frame(height: 11, alignment: .leading)
+    }
+
+    /// Thumbnails filling the available rows before advancing rightwards.
+    private func grid(_ urls: [URL]) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            ForEach(Array(columns(urls).enumerated()), id: \.offset) { _, column in
+                VStack(alignment: .leading, spacing: Self.rowSpacing) {
+                    ForEach(column, id: \.self) { url in
+                        cell(url).id(url)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The grab area for resizing: the strip's top edge. A hairline is too small a target, so the
+    /// gesture covers a few points either side of it and the cursor says so on hover.
+    private var resizeHandle: some View {
+        Rectangle()
+            .fill(Color.clear)
+            .frame(height: 6)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { value in
+                        let start = heightAtDragStart ?? stripHeight
+                        if heightAtDragStart == nil { heightAtDragStart = start }
+                        // Upward drag is a taller strip, so the translation is inverted.
+                        let proposed = start - value.translation.height
+                        let maxHeight = Double(Self.maxRows) * (Self.cellHeight + Self.rowSpacing)
+                        stripHeight = min(maxHeight, max(Self.oneRow, proposed))
+                    }
+                    .onEnded { _ in heightAtDragStart = nil }
+            )
     }
 
     private func cell(_ url: URL) -> some View {

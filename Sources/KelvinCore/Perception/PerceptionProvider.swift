@@ -86,6 +86,46 @@ public enum PerceptionProxy {
         return proxy
     }
 
+    /// A proxy good enough to MEASURE a frame, including for RAW — where `fromFile` deliberately
+    /// refuses and pays for a full decode instead.
+    ///
+    /// The refusal in `fromFile` is right for its purpose and wrong for this one. ImageIO answers a
+    /// RAW file with the camera manufacturer's embedded preview rather than Apple's decode, which
+    /// disqualifies it for perception and for anything that becomes pixels a user keeps: the colour
+    /// is the camera's opinion, not Core Image's. But triage measures **sharpness, exposure extremes
+    /// and a difference hash** — three relative measurements of the same photograph. The camera's own
+    /// preview is a perfectly good subject for all three, and it is already decoded.
+    ///
+    /// The cost this avoids is not marginal. A full `CIRAWFilter` decode is ~1170 ms per frame,
+    /// measured; the embedded preview is tens of milliseconds. On a 437-frame RAW shoot that is the
+    /// difference between six and a half minutes and well under one.
+    ///
+    /// **`IfAbsent`, not `Always`** — the opposite of `fromFile`. `Always` would make ImageIO decode
+    /// the RAW itself, which is the expense being avoided. If a camera embeds no preview, or one too
+    /// small to measure, this returns nil and the caller falls back to the real decode.
+    ///
+    /// The one thing to know: a camera preview carries in-camera sharpening and JPEG artefacts, both
+    /// of which push an acuity reading UP relative to the Lanczos proxy the soft/unusable thresholds
+    /// were calibrated against. `kelvin-cli triage-compare` measures that difference on real frames.
+    /// Triage is advisory by design — flagged for review, never auto-rejected — so a shifted
+    /// threshold changes which frames are offered for a look, not which frames survive.
+    public static func measurementProxy(_ url: URL, maxEdge: Int = defaultMaxEdge) -> CIImage? {
+        if let fast = fromFile(url, maxEdge: maxEdge) { return fast }
+        guard ImageDecoder.rawExtensions.contains(url.pathExtension.lowercased()),
+              let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let preview = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                  kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+                  kCGImageSourceThumbnailMaxPixelSize: maxEdge,
+                  kCGImageSourceCreateThumbnailWithTransform: true
+              ] as CFDictionary)
+        else { return nil }
+        // A preview far below the measurement size is a postage stamp from an old body, and every
+        // reading built on it would be worse than the decode it saved. Half the target is the floor.
+        let image = CIImage(cgImage: preview)
+        guard max(image.extent.width, image.extent.height) >= Double(maxEdge) / 2 else { return nil }
+        return image
+    }
+
     /// Scale `image` down so its longer side is at most `maxEdge`. Never upscales — a proxy
     /// larger than the source would waste the model's context for no information gain.
     public static func downsample(_ image: CIImage, maxEdge: Int = defaultMaxEdge) -> CIImage {

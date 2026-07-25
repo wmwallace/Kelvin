@@ -29,6 +29,16 @@ func printUsage() {
       \(tool) corpus-init --root <dir> --references <a,b,c> [--source <dir>] [--perception <dir>]
       \(tool) corpus-degrade --in-dir <good-photos> --out-dir <corpus>
       \(tool) eval --corpus <dir> [--out <report.json>] [--engine-version <v>]
+      \(tool) triage-compare --in-dir <dir> [--limit <n>]
+
+    triage-compare options:
+      --in-dir   Directory of photographs to measure. Required.
+      --limit    Stop after this many frames (default 25).
+
+      Measures every frame twice — once from the camera's embedded preview, once from a full
+      decode — and reports the acuity difference and the time saved. The fast path is what the
+      folder scan uses; this says whether it moves the soft/unusable verdicts your thresholds
+      were calibrated for. Run it on a RAW shoot before trusting either.
 
     render options:
       --in       Path to the source image (RAW, JPEG, or PNG). Required.
@@ -339,6 +349,64 @@ case "mask":
         print("Wrote mask.png + lifted.png to \(outDir.path)")
     } catch {
         fail("\(error)")
+    }
+
+case "triage-compare":
+    // MEASURE, DO NOT GUESS. The folder scan reads a RAW file's embedded preview rather than
+    // paying ~1170 ms for a full decode, which is the difference between six minutes and thirty
+    // seconds on a real shoot. The catch is that a camera preview carries in-camera sharpening and
+    // JPEG artefacts, both of which push acuity UP relative to the proxy the soft/unusable
+    // thresholds were calibrated against. This prints that difference on real frames instead of
+    // leaving it to be discovered by a photographer wondering why nothing is flagged any more.
+    let rest = Array(arguments.dropFirst())
+    guard let dir = value(for: "--in-dir", in: rest) else {
+        FileHandle.standardError.write(Data("triage-compare: --in-dir is required\n".utf8))
+        exit(2)
+    }
+    let limit = value(for: "--limit", in: rest).flatMap(Int.init) ?? 25
+    let files = Array((try? BatchApply.imageFiles(in: URL(fileURLWithPath: dir))) ?? []).prefix(limit)
+    guard !files.isEmpty else {
+        FileHandle.standardError.write(Data("triage-compare: no readable images in \(dir)\n".utf8))
+        exit(1)
+    }
+
+    print("frame                          fast    full    delta   fast(ms)  full(ms)")
+    var deltas: [Double] = []
+    var verdictChanges = 0
+    var fastTotal = 0.0, fullTotal = 0.0
+    for file in files {
+        let t0 = Date()
+        let fast = PhotoTriage.read(url: file, fastRAW: true)
+        let fastMs = Date().timeIntervalSince(t0) * 1000
+        let t1 = Date()
+        let full = PhotoTriage.read(url: file, fastRAW: false)
+        let fullMs = Date().timeIntervalSince(t1) * 1000
+        guard let fast, let full else { continue }
+        let delta = fast.focus.acuity - full.focus.acuity
+        deltas.append(delta)
+        fastTotal += fastMs; fullTotal += fullMs
+        // The number that actually matters: not whether the reading moved, but whether the VERDICT
+        // moved. A shifted acuity nobody acts on is arithmetic; a flipped soft flag is a behaviour
+        // change for the person using it.
+        let flipped = fast.focus.isSoft != full.focus.isSoft
+        if flipped { verdictChanges += 1 }
+        print(String(format: "%-28s %6.2f  %6.2f  %+6.2f  %8.0f  %8.0f%@",
+                     (file.lastPathComponent as NSString).utf8String!,
+                     fast.focus.acuity, full.focus.acuity, delta, fastMs, fullMs,
+                     flipped ? "   ← SOFT FLAG FLIPPED" : ""))
+    }
+    if !deltas.isEmpty {
+        let mean = deltas.reduce(0, +) / Double(deltas.count)
+        let worst = deltas.map(abs).max() ?? 0
+        print("")
+        print(String(format: "%d frames · mean acuity delta %+.3f · largest %.3f · soft-flag changes %d",
+                     deltas.count, mean, worst, verdictChanges))
+        print(String(format: "time: fast %.1fs, full %.1fs — %.1fx faster",
+                     fastTotal / 1000, fullTotal / 1000, fullTotal / max(fastTotal, 0.001)))
+        if verdictChanges > 0 {
+            print("Soft verdicts moved. Recalibrate FocusMeasure's thresholds for the fast path, or")
+            print("set fastRAW: false in the scan, before trusting the speed-up.")
+        }
     }
 
 case "bench":

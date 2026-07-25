@@ -190,8 +190,15 @@ public enum PhotoTriage {
     /// "no opinion", exactly as `FocusMeasure` treats a frame it could not measure.
     ///
     /// Safe to run several at once: nothing in this path touches Vision.
-    public static func read(url: URL) -> Verdict? {
-        if let fast = PerceptionProxy.fromFile(url, maxEdge: proxyEdge) { return read(fast) }
+    public static func read(url: URL, fastRAW: Bool = true) -> Verdict? {
+        // `measurementProxy` also accepts a RAW file's embedded preview, which `fromFile` refuses.
+        // For measurement that is the right trade — see its documentation — and it is the difference
+        // between six minutes and thirty seconds on a RAW shoot. `fastRAW: false` forces the slow,
+        // fully-decoded path, which is what `triage-compare` uses as its reference.
+        if let fast = fastRAW ? PerceptionProxy.measurementProxy(url, maxEdge: proxyEdge)
+                              : PerceptionProxy.fromFile(url, maxEdge: proxyEdge) {
+            return read(fast)
+        }
         guard let full = try? ImageDecoder.decode(url: url) else { return nil }
         let scaled = PerceptionProxy.downsample(full, maxEdge: proxyEdge)
         guard let cg = ImageWriter.exportContext.createCGImage(scaled, from: scaled.extent)
