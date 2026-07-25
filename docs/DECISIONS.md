@@ -459,3 +459,49 @@ sitting where a `KELVIN_MODEL=` experiment could reach for them.
 Verified end to end: with `HF_HOME` pointed at an empty directory and `HF_HUB_OFFLINE=1`, a full
 `kelvin-perceive` run completed in 26 s against the staged directory — so the bundled path genuinely
 loads from disk and cannot be silently falling back to a cache or a download.
+
+---
+
+## D8 — Licence: AGPL-3.0 plus a contributor agreement · **Decided 25 July 2026**
+
+Supersedes the deferral above. The owner's requirement, in their words: *"I don't want a closed
+product on my work unless I decided to do so myself in the future."* That sentence has two halves and
+they need two different mechanisms.
+
+**AGPL-3.0 handles the first half.** Nobody can take this work, close it, and ship it. AGPL rather
+than GPL because the loophole GPL leaves open is exactly the shape of this project's value: a
+competitor cannot ship a closed *app*, but under GPL they could take the recipe engine and the
+perception pipeline, run them server-side as an "AI photo editing API", and release nothing. AGPL §13
+closes that. It is also the licence RapidRAW chose, for the reason D1 already records approvingly —
+to prevent absorption into closed software.
+
+**A contributor licence agreement handles the second half**, and this is the part that is easy to get
+wrong. Copyleft does not preserve the owner's own option; sole copyright ownership does. The moment a
+third-party contribution is merged, relicensing requires that contributor's permission, and after a
+dozen PRs the commercial option is gone in practice whether or not anyone intended it. `CLA.md`
+therefore takes a licence grant plus an explicit right to relicense, rather than a copyright
+assignment: same outcome, reads far less aggressively, and assignment demonstrably deters contributors
+on principle.
+
+**Verified before choosing:** every dependency in the graph is MIT or Apache-2.0 — mlx-swift,
+mlx-swift-lm, yyjson and EventSource are MIT; the swift-* and huggingface packages are Apache-2.0.
+Both are one-way compatible *into* GPLv3/AGPLv3. Note that Apache-2.0 is **incompatible with GPLv2**,
+so v3 was the only copyleft available; picking v2 would have been a licence conflict with the
+perception backend.
+
+**Two consequences recorded so they are not rediscovered later:**
+
+- **The direction of travel is one-way.** The rights holder can always loosen a licence. Nothing can
+  tighten one retroactively — anything published under permissive terms stays available under them
+  forever. Starting copyleft preserves every option; starting permissive burns them irreversibly.
+- **AGPL conflicts with the Mac App Store.** The FSF's position is that App Store terms are
+  incompatible with the GPL family (this is why VLC was removed). App Store distribution therefore
+  requires shipping under different terms, which is possible only while all rights are held — i.e. it
+  depends on the CLA, not on the licence.
+
+**Chosen identifier: `AGPL-3.0-only`**, not `-or-later`. A future FSF version cannot be read in
+advance, and the point of this pairing is that the owner controls the terms.
+
+**Not legal advice, and `CLA.md` says so at the top.** It is a working draft modelled on the Apache
+ICLA with a relicensing clause added. Before any commercial edition is actually offered it needs a
+solicitor's review, or a formal equivalent generated at harmonyagreements.org.

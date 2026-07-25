@@ -117,8 +117,25 @@ Include the macOS version, the Mac (Apple Silicon or Intel), the file format tha
 what you expected instead. If it involves a photograph you cannot share, say so — the shape of the
 frame (backlit, high ISO, no clear subject) is usually enough to reproduce it synthetically.
 
-## Licence
+## Licence and the contributor agreement
 
-**Not yet chosen.** Until a `LICENSE` file exists, no contribution can be accepted, because there is
-nothing to contribute *under* — see `docs/DECISIONS.md` D8. If you want to help before then, filing
-issues and reproductions is genuinely useful and carries no licensing question.
+This project is **AGPL-3.0** ([`LICENSE`](LICENSE)). Your contribution is released under the same
+terms, and every published release stays under them permanently.
+
+There is also a **contributor licence agreement** ([`CLA.md`](CLA.md)), and it is worth two minutes of
+your time to understand why rather than just clicking through it. You keep your copyright. What you
+grant is the right for the maintainer to license the project under other terms in future — a
+commercial edition, or Mac App Store distribution, whose terms the FSF considers incompatible with the
+GPL family. Without that grant, the first merged pull request would permanently foreclose those
+options, because relicensing would then require the permission of every contributor who ever
+participated.
+
+The AGPL is doing the load-bearing work here: nobody can take this and close it. The agreement exists
+so that "nobody" does not accidentally include the person who wrote it.
+
+An automated check will ask you to accept it on your first pull request — one click, recorded once.
+Typo and whitespace fixes are exempt.
+
+**If you would rather not sign, you can still help.** Bug reports, reproductions, measurements and
+design critique carry no licensing question, and on this project they are often worth more than a
+patch.
