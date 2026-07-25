@@ -230,3 +230,43 @@ flat threshold is 0.45). The corpus now uses a degradation that is actually flat
 
 **Not decided here:** whether the range stretch lands as a new recipe field or a reinterpretation
 of the existing endpoints. That changes the schema, so it is the owner's call (CLAUDE.md).
+
+---
+
+## D-model-3 — Perception model: measured alternatives, July 2026
+
+**Decision: stay on `Qwen2.5-VL-3B-Instruct-4bit`.** Nothing free currently beats it. Revisit when
+the Swift MLX stack can load Gemma 4.
+
+Perception costs **~6 s per photo** and is now the dominant cost of opening one — the rest of the
+load path is about 1.3 s. So the model is the biggest remaining performance lever, which is why
+this was worth measuring rather than assuming. Every figure below was taken on the owner's machine
+against real photographs, with weights cached, via `KELVIN_MODEL=<repo-id>`.
+
+| model | licence | inference | result |
+|---|---|---|---|
+| **Qwen2.5-VL-3B-4bit** (current) | — | **5.9–6.3 s** | correct on every frame tried |
+| SmolVLM2-500M | Apache 2.0 | 2.5 s | "golden-hour" on an overcast frame; on another, *all twelve* problems at once |
+| SmolVLM2-2.2B | Apache 2.0 | slower than current | emitted malformed JSON (`subject` as a string) — hard parse failure |
+| Gemma 3 4B | Gemma Terms (commercial permitted, custom) | 11.0 s | good — arguably a better scene read ("portrait" where Qwen said "other") |
+| Gemma 4 | **Apache 2.0** | — | **will not load**: `config.json` has no `vision_config` the Swift VLM decoder can use |
+| Apple FastVLM, Ferret | Apple research licence | — | **commercially prohibited** — "non-commercial scientific research and academic purposes" only |
+| Apple `FoundationModels` | free, built into macOS | — | **text-only** to third-party apps; cannot read an image |
+
+**There is no free-to-use Apple vision model for this.** Apple's open VLMs are research-licensed,
+and the system on-device model exposed to apps does not take image input.
+
+**Smaller did not mean faster-and-fine.** The architecture's whole premise (non-negotiable #1) is
+that the model only emits categories, so a small model *should* suffice — and it may yet, with a
+tighter prompt. But the categories are the input to every number the engine computes, so a wrong
+one does not degrade the edit gracefully, it produces a confidently wrong recipe. SmolVLM2-500M is
+2.4× faster and its output is unusable; that is not a trade worth making. Both SmolVLM tests used
+the Qwen-tuned prompt, which is a real confound — a constrained or few-shot prompt deserves a try
+before the family is written off.
+
+**Gemma 4 is the one to watch.** Apache 2.0 with no custom terms, multimodal across 1B/4B/12B/27B.
+The blocker is tooling, not licence, and tooling moves.
+
+**Also found:** `kelvin-perceive` printed "Loading Qwen2.5-VL-3B-Instruct-4bit" regardless of
+`KELVIN_MODEL`, so throughout an A/B it named the model that was not running. Fixed — but it means
+any earlier comparison recorded elsewhere should be distrusted.
