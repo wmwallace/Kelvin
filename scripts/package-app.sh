@@ -86,9 +86,14 @@ VERSION="${KELVIN_VERSION:-0.1.0}"
 BUILD_NUMBER="$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)"
 COPYRIGHT="© $(date +%Y) William Wallace. Licensed under AGPL-3.0-only; source at https://github.com/wmwallace/Kelvin"
 
+# A SEPARATE SCRATCH PATH, so packaging does not fight the editor. SwiftPM takes an exclusive lock
+# on a build directory, so a packaging run using the package's own `.build` blocks `swift run
+# kelvin-app` with "Another instance of SwiftPM is already running" — at exactly the moment someone
+# is trying to test. Override with KELVIN_BUILD_PATH.
+SCRATCH="${KELVIN_BUILD_PATH:-${TMPDIR:-/tmp}kelvin-package-build}"
 echo "▸ Building kelvin-app ($CONFIG)…"
-( cd "$PKG" && swift build -c "$CONFIG" --product kelvin-app )
-BUILD="$PKG/.build/$CONFIG"
+( cd "$PKG" && swift build -c "$CONFIG" --product kelvin-app --scratch-path "$SCRATCH" )
+BUILD="$SCRATCH/$CONFIG"
 
 APP="$OUT/$NAME.app"
 echo "▸ Assembling $APP"
