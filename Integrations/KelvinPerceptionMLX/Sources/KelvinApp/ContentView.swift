@@ -2887,7 +2887,13 @@ struct ContentView: View {
                     Divider().overlay(Theme.hairline).padding(.vertical, 2)
                     ToneSlider(label: "Exposure", value: $appState.edit.exposureEV, range: -5...5, step: 0.05, unit: " EV", onChange: ch, identity: .exposure)
                     ToneSlider(label: "Contrast", value: $appState.edit.contrast, range: -100...100, step: 1, unit: "", onChange: ch, identity: .contrast)
-                    ToneSlider(label: "Highlights", value: $appState.edit.highlights, range: -100...100, step: 1, unit: "", onChange: ch, identity: .highlights)
+                    // RECOVERY ONLY, exactly as the masked version already is. `CIHighlightShadowAdjust`
+                    // documents its highlight amount as 0…1 with 1.0 meaning no change, so the
+                    // renderer's `1.0 + highlights/100` clamps for every positive value and does
+                    // nothing — measured at ΔE 0.0 when this was found on the mask panel. The
+                    // global slider went through byte-identical code and was left at full range,
+                    // so half its travel moved a number and not the photograph.
+                    ToneSlider(label: "Highlight recovery", value: $appState.edit.highlights, range: -100...0, step: 1, unit: "", onChange: ch, identity: .highlights)
                     ToneSlider(label: "Shadows", value: $appState.edit.shadows, range: -100...100, step: 1, unit: "", onChange: ch, identity: .shadows)
                     ToneSlider(label: "Whites", value: $appState.edit.whites, range: -100...100, step: 1, unit: "", onChange: ch, identity: .highlights)
                     ToneSlider(label: "Blacks", value: $appState.edit.blacks, range: -100...100, step: 1, unit: "", onChange: ch, identity: .shadows)
@@ -2997,7 +3003,10 @@ struct ContentView: View {
                             mask: $m, onChange: appState.onEdit,
                             onDelete: { appState.removeUserMask(m.id) },
                             isSelected: appState.selectedUserMaskId == m.id,
-                            onSelect: { appState.selectedUserMaskId = m.id },
+                            // `onEdit()` is what rebuilds the render, and the render is what
+                            // chooses the overlay bitmap — without it the red stayed on the
+                            // previously selected mask until you happened to nudge a slider.
+                            onSelect: { appState.selectedUserMaskId = m.id; appState.onEdit() },
                             isPainting: appState.paintingMaskId == m.id,
                             togglePaint: { appState.paintingMaskId = (appState.paintingMaskId == m.id) ? nil : m.id },
                             clearStrokes: { appState.clearStrokes(m.id) },
@@ -3497,6 +3506,9 @@ struct ToneSlider: View {
     /// the pipeline and put intermediate states into the undo history. The number therefore snaps,
     /// as does the knob, and only the readout's colour acknowledges the reset. Keying on a counter
     /// rather than on `value` also guarantees this can never fire mid-drag.
+    /// Called with true when a drag starts and false when it ends. Used to hide the mask overlay
+    /// for the duration, so the photograph is visible while it is being judged.
+    var onDragging: (Bool) -> Void = { _ in }
     @State private var resetTick = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -3511,7 +3523,13 @@ struct ToneSlider: View {
                     .animation(Motion.gated(Motion.quick, reduceMotion), value: resetTick)
             }
             VStack(spacing: 3) {
-                Slider(value: $value, in: range, step: step)
+                // `onEditingChanged` brackets the DRAG — true when the thumb is grabbed, false
+                // when it is let go. The overlay-suppression flag was being driven from the value
+                // setter and `onChange` instead, which meant it went true, then false, and only
+                // THEN was a render built: never true when it was read, so the feature was dead on
+                // arrival. A gesture's begin and end are the only honest place to bracket a
+                // gesture.
+                Slider(value: $value, in: range, step: step, onEditingChanged: onDragging)
                     // The accent stays the same on every slider: it is the language of "where the
                     // value is", and the rail below is the language of "what this does". Making
                     // both vary at once would leave neither reliable.
@@ -3614,6 +3632,18 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
         case id, kind, cx, cy, radius, angle, softness, stamps, selCenter, selRange, selSoftness
         case exposure, contrast, saturation, instanceId, instanceLabel, instanceBox, instanceKind
         case tightness, feather, invert
+        // EVERY STORED PROPERTY MUST BE LISTED HERE. With an explicit `CodingKeys`, the synthesised
+        // encoder writes only what this enum names — so a property added above and forgotten here
+        // is not a smaller file, it is silent data loss. `init(from:)` decodes these with
+        // defaults, which is exactly what made it invisible: the values came back looking like
+        // untouched defaults rather than like something that failed to save.
+        //
+        // Lost this way until now: the three adjustments hand-drawn masks had just gained
+        // (shadows, highlights, vibrance), every mask's name, and the whole refine feature. All of
+        // it survived switching photos, because that path keeps objects in memory, and vanished on
+        // relaunch.
+        case shadows, highlights, vibrance, name
+        case refinement, refineCenter, refineRange, refineSoftness
     }
 
     init(id: UUID = UUID(), kind: Kind, cx: Double = 0.5, cy: Double = 0.5, radius: Double = 0.35, angle: Double = 0.0, softness: Double = 0.35, stamps: [BrushStamp] = [], selCenter: Double = 0.0, selRange: Double = 0.1, selSoftness: Double = 0.1, exposure: Double = 0.0, contrast: Double = 0.0, saturation: Double = 0.0, instanceId: String? = nil, instanceLabel: String? = nil, instanceBox: CGRect? = nil, instanceKind: SubjectInstances.Kind? = nil, tightness: Double = 0.0, feather: Double = 0.0, invert: Bool = false) {
@@ -3933,12 +3963,13 @@ struct UserMaskEditor: View {
             ForEach(AppState.maskAdjustmentSpecs, id: \.key) { spec in
                 ToneSlider(label: spec.label,
                            value: Binding(get: { mask[adjustment: spec.key] },
-                                          set: { onAdjustBegin(); mask[adjustment: spec.key] = $0 }),
+                                          set: { mask[adjustment: spec.key] = $0 }),
                            range: spec.range,
                            step: spec.key == "exposure_ev" ? 0.05 : 1,
                            unit: spec.unit,
-                           onChange: { onAdjustEnd(); onChange() },
-                           identity: ToneIdentity.adjustment(spec.key))
+                           onChange: onChange,
+                           identity: ToneIdentity.adjustment(spec.key),
+                           onDragging: { $0 ? onAdjustBegin() : onAdjustEnd() })
             }
             ToneSlider(label: "Tightness", value: $mask.tightness, range: 0...100, step: 1, unit: "", onChange: onChange)
         }
@@ -4036,14 +4067,13 @@ struct MaskControl: View {
                         VStack(spacing: 10) {
                             ForEach(AppState.maskAdjustmentSpecs, id: \.key) { spec in
                                 ToneSlider(label: spec.label,
-                                           value: Binding(
-                                               get: { adjustment(spec.key).wrappedValue },
-                                               set: { onAdjustBegin(); adjustment(spec.key).wrappedValue = $0 }),
+                                           value: adjustment(spec.key),
                                            range: spec.range,
                                            step: spec.key == "exposure_ev" ? 0.05 : 1,
                                            unit: spec.unit,
-                                           onChange: { onAdjustEnd(); onChange() },
-                                           identity: ToneIdentity.adjustment(spec.key))
+                                           onChange: onChange,
+                                           identity: ToneIdentity.adjustment(spec.key),
+                                           onDragging: { $0 ? onAdjustBegin() : onAdjustEnd() })
                             }
                             if let feather {
                                 ToneSlider(label: "Feather", value: feather, range: 0...100,
