@@ -515,28 +515,61 @@ final class AppState: ObservableObject {
         guard !photos.isEmpty else { return }
         focusScanProgress = 0
 
+        // Only the ones not already read — the scan used to walk every frame in the folder and skip
+        // them one at a time, which made the progress bar lie about how much work was left.
+        let pending = photos.filter { focus[$0] == nil }
+        guard !pending.isEmpty else { focusScanProgress = nil; return }
+
         Task { [weak self] in
             var done = 0
-            for url in photos {
-                guard let self else { return }
-                if self.focus[url] == nil {
-                    // Measured on the same 1200px proxy the thresholds were calibrated against —
-                    // a different scale would silently invalidate them.
-                    let reading = await Task.detached(priority: .utility) { () -> FocusMeasure.Reading? in
-                        guard let full = try? ImageDecoder.decode(url: url) else { return nil }
-                        let proxy = AppState.materialiseShared(
-                            PerceptionProxy.downsample(full, maxEdge: 1200))
-                        return FocusMeasure.read(proxy)
-                    }.value
-                    if let reading { self.focus[url] = reading }
+            // SEVERAL AT ONCE. This was one photo at a time, and on a folder of large frames that
+            // is minutes: the cost is dominated by decoding, and decoding one file leaves nine
+            // cores idle.
+            //
+            // Safe to parallelise where the measurement passes on a single photo were not:
+            // `FocusMeasure` is a Laplacian and a gradient, with no Vision anywhere in it. Vision
+            // is the framework that crashes when two of its requests race, and none of this
+            // touches it.
+            //
+            // Bounded rather than unbounded. Each task can hold a decoded frame, and a folder of
+            // 60 MP files would otherwise try to hold all of them at once.
+            let limit = min(4, max(2, ProcessInfo.processInfo.activeProcessorCount - 2))
+            await withTaskGroup(of: (URL, FocusMeasure.Reading?).self) { group in
+                var next = 0
+                func start() {
+                    guard next < pending.count else { return }
+                    let url = pending[next]; next += 1
+                    group.addTask(priority: .utility) { (url, AppState.readFocus(url)) }
                 }
-                done += 1
-                self.focusScanProgress = Double(done) / Double(photos.count)
-                // Yield so the UI keeps drawing and the scan can be interrupted by simply working.
-                await Task.yield()
+                for _ in 0..<min(limit, pending.count) { start() }
+                for await (url, reading) in group {
+                    guard let self else { return }
+                    if let reading { self.focus[url] = reading }
+                    done += 1
+                    self.focusScanProgress = Double(done) / Double(pending.count)
+                    start()          // keep `limit` in flight until the queue is empty
+                }
             }
             self?.focusScanProgress = nil
         }
+    }
+
+    /// One photo's focus reading, off the main actor.
+    ///
+    /// Prefers the ImageIO proxy, which decodes straight to 1200 px instead of decoding the whole
+    /// frame to throw 98% of it away — on a 60 MP JPEG that is 2017 ms against 120 ms, and the scan
+    /// is almost entirely decode.
+    ///
+    /// The thresholds were calibrated against the Lanczos proxy, so the two were compared before
+    /// this was allowed: across five real photographs the ImageIO proxy reads 1–3% lower acuity
+    /// (4.940→4.799, 4.700→4.657, 7.814→7.676, 3.700→3.585, 5.499→5.342) and agrees on every
+    /// soft/not-soft verdict. A consistent 2% is not nothing — a frame sitting within 2% of the
+    /// soft threshold could flip — but such a frame is genuinely borderline, and the flag is a
+    /// prompt to review rather than a decision. RAW has no fast path and keeps the real decode.
+    nonisolated static func readFocus(_ url: URL) -> FocusMeasure.Reading? {
+        if let fast = PerceptionProxy.fromFile(url, maxEdge: 1200) { return FocusMeasure.read(fast) }
+        guard let full = try? ImageDecoder.decode(url: url) else { return nil }
+        return FocusMeasure.read(materialiseShared(PerceptionProxy.downsample(full, maxEdge: 1200)))
     }
 
     var keeperCount: Int { folderPhotos.filter { flags[$0] == .keep }.count }

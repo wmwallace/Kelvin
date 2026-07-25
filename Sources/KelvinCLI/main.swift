@@ -454,6 +454,16 @@ case "bench-load":
             }
         }
 
+        // The focus thresholds were calibrated against the Lanczos-downsampled 1200 px proxy, and a
+        // focus measure reads exactly the high-frequency content a different resampling filter
+        // would change. So before letting the fast proxy anywhere near the focus scan, check the
+        // two agree about the photograph.
+        if let fast = PerceptionProxy.fromFile(url, maxEdge: 1200) {
+            let a = FocusMeasure.read(proxy), b = FocusMeasure.read(fast)
+            print(String(format: "  focus: lanczos acuity %.3f (soft %@)  imageio %.3f (soft %@)",
+                         a.acuity, a.isSoft ? "yes" : "no", b.acuity, b.isSoft ? "yes" : "no"))
+        }
+
         let stats = try time("statistics") { try ImageStatistics.compute(proxy) }
         // None of these four reads another's output, which is the whole point of measuring them
         // one at a time and then together.
@@ -522,6 +532,50 @@ case "bench-load":
             return kept
         }
         _ = time("EXIF header read") { ExifReader.iso(url: url) }
+    } catch { fail("\(error)") }
+
+case "bench-focus":
+    // The culling focus scan, sequential vs the arrangement the app now uses. FocusMeasure touches
+    // no Vision, so unlike the per-photo measurement block this one is safe to parallelise.
+    do {
+        let rest = Array(arguments.dropFirst())
+        guard let dir = value(for: "--in-dir", in: rest) else { fail("bench-focus requires --in-dir") }
+        let files = try BatchApply.imageFiles(in: URL(fileURLWithPath: dir)).sorted { $0.path < $1.path }
+        guard !files.isEmpty else { fail("no readable images in \(dir)") }
+        func read(_ url: URL) -> FocusMeasure.Reading? {
+            if let fast = PerceptionProxy.fromFile(url, maxEdge: 1200) { return FocusMeasure.read(fast) }
+            guard let full = try? ImageDecoder.decode(url: url) else { return nil }
+            let lazy = PerceptionProxy.downsample(full, maxEdge: 1200)
+            let ctx = CIContext(options: [.cacheIntermediates: false])
+            guard let cg = ctx.createCGImage(lazy, from: lazy.extent) else { return nil }
+            return FocusMeasure.read(CIImage(cgImage: cg))
+        }
+        func slowRead(_ url: URL) -> FocusMeasure.Reading? {
+            guard let full = try? ImageDecoder.decode(url: url) else { return nil }
+            let lazy = PerceptionProxy.downsample(full, maxEdge: 1200)
+            let ctx = CIContext(options: [.cacheIntermediates: false])
+            guard let cg = ctx.createCGImage(lazy, from: lazy.extent) else { return nil }
+            return FocusMeasure.read(CIImage(cgImage: cg))
+        }
+        print("Focus scan over \(files.count) photos")
+        let mode = value(for: "--mode", in: rest) ?? "new"
+        let start = Date()
+        if mode == "old" {
+            for f in files { _ = slowRead(f) }
+        } else {
+            let group = DispatchGroup()
+            let sem = DispatchSemaphore(value: min(4, max(2, ProcessInfo.processInfo.activeProcessorCount - 2)))
+            for f in files {
+                group.enter()
+                DispatchQueue.global(qos: .utility).async {
+                    sem.wait(); _ = read(f); sem.signal(); group.leave()
+                }
+            }
+            group.wait()
+        }
+        print(String(format: "  %@: %.0f ms total, %.0f ms/photo", mode as NSString,
+                     Date().timeIntervalSince(start) * 1000,
+                     Date().timeIntervalSince(start) * 1000 / Double(files.count)))
     } catch { fail("\(error)") }
 
 case "fuse":

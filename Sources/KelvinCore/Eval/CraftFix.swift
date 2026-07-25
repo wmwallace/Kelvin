@@ -70,6 +70,21 @@ public enum CraftFix {
     /// bounded by 0 mired however high the Kelvin goes; nothing here can change that.
     public static let whiteBalanceCorrection: ClosedRange<Double> = 2500 ... 12000
 
+    /// Kelvin → mired. The unit colour temperature is actually linear in.
+    static func mired(_ kelvin: Double) -> Double { 1e6 / max(1, kelvin) }
+
+    /// Move a temperature by a mired shift, staying inside the automatic-correction span.
+    ///
+    /// Clamped in MIRED, before the reciprocal — a large warm correction drives the target toward
+    /// zero mired, where `1e6 / mired` runs away, so clamping afterwards would mean converting a
+    /// meaningless number first and then tidying it up.
+    static func shiftTemperature(_ kelvin: Double, byMired shift: Double) -> Double {
+        let coolest = mired(whiteBalanceCorrection.upperBound)
+        let warmest = mired(whiteBalanceCorrection.lowerBound)
+        let target = mired(kelvin) + shift
+        return 1e6 / min(max(target, coolest), warmest)
+    }
+
     /// The same idea as `whiteBalanceCorrection`, for the tone and colour controls: how far from
     /// neutral an *automatic* correction may leave a slider, whatever the photo.
     ///
@@ -106,7 +121,18 @@ public enum CraftFix {
         public var shadows = 0.0
         public var whites = 0.0
         public var blacks = 0.0
-        public var temperatureK = 0.0
+        /// Temperature correction as a MIRED shift, not a Kelvin delta.
+        ///
+        /// It was a Kelvin delta, computed as `neutralisingTarget - 6500`, which is only the right
+        /// number when the photo is sitting at 6500 K. In the app it never is: the candidate's
+        /// recipe has already set a temperature, so the correction was added to the wrong place
+        /// and frequently landed outside the legal span — and `fullyLands` then threw the whole
+        /// pass away, which is why the Fix button did nothing on the photos that needed it.
+        ///
+        /// Mired composes. A cast measured on the CURRENT render needs the same mired shift from
+        /// wherever the temperature already is, so the correction no longer has to know or care
+        /// what it is starting from.
+        public var temperatureMired = 0.0
         public var tint = 0.0
         public var vibrance = 0.0
         public var saturation = 0.0
@@ -117,7 +143,7 @@ public enum CraftFix {
 
         /// Field-by-field magnitudes, for budget accounting.
         var magnitudes: [Double] {
-            [contrast, highlights, shadows, whites, blacks, temperatureK, tint, vibrance, saturation]
+            [contrast, highlights, shadows, whites, blacks, temperatureMired, tint, vibrance, saturation]
                 .map(abs)
         }
 
@@ -128,7 +154,7 @@ public enum CraftFix {
             s.shadows = shadows + other.shadows
             s.whites = whites + other.whites
             s.blacks = blacks + other.blacks
-            s.temperatureK = temperatureK + other.temperatureK
+            s.temperatureMired = temperatureMired + other.temperatureMired
             s.tint = tint + other.tint
             s.vibrance = vibrance + other.vibrance
             s.saturation = saturation + other.saturation
@@ -148,7 +174,7 @@ public enum CraftFix {
             s.shadows = shadows * k
             s.whites = whites * k
             s.blacks = blacks * k
-            s.temperatureK = temperatureK * k
+            s.temperatureMired = temperatureMired * k
             s.tint = tint * k
             s.vibrance = vibrance * k
             s.saturation = saturation * k
@@ -167,10 +193,12 @@ public enum CraftFix {
             out.tint = autoClamp(g.tint + tint, from: g.tint, Ceiling.tint, Ranges.tint)
             out.vibrance = autoClamp(g.vibrance + vibrance, from: g.vibrance, Ceiling.vibrance)
             out.saturation = autoClamp(g.saturation + saturation, from: g.saturation, Ceiling.saturation)
-            if temperatureK != 0 {
-                // The renderer's neutral is 6500 K; "as shot" (nil) starts from there.
-                out.temperatureK = clamp((g.temperatureK ?? 6500) + temperatureK,
-                                         CraftFix.whiteBalanceCorrection)
+            if temperatureMired != 0 {
+                // Composed in mired, then converted back. The renderer's neutral is 6500 K and
+                // "as shot" (nil) starts from there. Clamping happens in mired too, before the
+                // reciprocal, so a large correction cannot drive the target through zero.
+                out.temperatureK = CraftFix.shiftTemperature(g.temperatureK ?? 6500,
+                                                             byMired: temperatureMired)
             }
             return out
         }
@@ -196,8 +224,10 @@ public enum CraftFix {
                 && ok(tint, g.tint, out.tint)
                 && ok(vibrance, g.vibrance, out.vibrance)
                 && ok(saturation, g.saturation, out.saturation)
-                && (temperatureK == 0
-                    || ok(temperatureK, g.temperatureK ?? 6500, out.temperatureK ?? 6500))
+                && (temperatureMired == 0
+                    || ok(temperatureMired,
+                          CraftFix.mired(g.temperatureK ?? 6500),
+                          CraftFix.mired(out.temperatureK ?? 6500)))
         }
 
         /// Clamp to the field's legal range, then to ±`ceiling` — but never pull a value BACK from
@@ -271,9 +301,15 @@ public enum CraftFix {
     /// being applied to fur. Refusing the skin steps when there is no person is a *narrowing* — on
     /// a real portrait the flag still fires and the fix still runs; when the person check is
     /// wrong, the failure is a skipped correction, never a wrong number applied to someone's face.
+    /// - Parameter from: the adjustments the correction will be applied to. Only the colour-cast
+    ///   step uses it, and it needs it: temperature has a hard legal span, so a correction has to
+    ///   ask for what is actually reachable from where the photo already sits. Asking for more and
+    ///   letting it clamp means `fullyLands` throws the whole pass away and the button does
+    ///   nothing — which is precisely the bug this parameter exists to fix.
     public static func step(for issue: AestheticEvaluator.Issue,
                             reading: Reading,
-                            subjectIsPerson: Bool = true) -> Step? {
+                            subjectIsPerson: Bool = true,
+                            from: GlobalAdjustments = .neutral) -> Step? {
         var s = Step()
         switch issue {
         case .skinOverSaturated:
@@ -346,9 +382,20 @@ public enum CraftFix {
             // thrown away entirely, so the button did NOTHING on exactly the casts that needed it
             // most. Clamping the target here means the step always lands, and a second click can
             // no longer move a value already at the limit, so it still terminates.
-            let target = min(max(wb.temperatureK, CraftFix.whiteBalanceCorrection.lowerBound),
-                             CraftFix.whiteBalanceCorrection.upperBound)
-            s.temperatureK = target - 6500
+            // Straight from the measurement, as a shift rather than a destination: the cast was
+            // measured on the CURRENT render, so what it asks for is "this much further from
+            // wherever you are", and that composes from any starting temperature.
+            //
+            // Then held to what is REACHABLE from there. Cooling runs out — 12000 K is only −70.5
+            // mired from neutral — and a step that asks past the end of the range would be
+            // truncated, which `fullyLands` treats as a refused pass. Asking for the largest legal
+            // shift instead means a cast too strong to erase still gets corrected as far as the
+            // range allows, rather than not at all.
+            let now = CraftFix.mired(from.temperatureK ?? 6500)
+            let coolest = CraftFix.mired(CraftFix.whiteBalanceCorrection.upperBound)
+            let warmest = CraftFix.mired(CraftFix.whiteBalanceCorrection.lowerBound)
+            let wanted = -reading.stats.chromaB * RecipeEngine.miredPerChromaB
+            s.temperatureMired = min(max(now + wanted, coolest), warmest) - now
             s.tint = wb.tint
         case .shadowDetailLost:
             s.shadows = 20; s.blacks = 12; s.contrast = -6
@@ -628,7 +675,7 @@ public enum CraftFix {
             return Result(global: start, passes: 0, outcome: .notFlagged)
         }
         guard let firstStep = step(for: issue, reading: startReading,
-                                   subjectIsPerson: subjectIsPerson) else {
+                                   subjectIsPerson: subjectIsPerson, from: start) else {
             return Result(global: start, passes: 0, outcome: .notApplicable)
         }
 
@@ -643,7 +690,7 @@ public enum CraftFix {
         for pass in 0..<maxPasses {
             // Recomputed each pass: the colour-cast correction depends on the cast that is left.
             guard let s = step(for: issue, reading: acceptedReading,
-                               subjectIsPerson: subjectIsPerson) else {
+                               subjectIsPerson: subjectIsPerson, from: accepted) else {
                 outcome = .notApplicable; break
             }
             // BRAKE 1 — budget. Measured against the FIRST step, so a step that grows (or a

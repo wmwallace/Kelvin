@@ -463,7 +463,7 @@ final class CraftFixAuditTests: XCTestCase {
 
     private func fields(of s: CraftFix.Step) -> [(String, Double)] {
         [("contrast", s.contrast), ("highlights", s.highlights), ("shadows", s.shadows),
-         ("whites", s.whites), ("blacks", s.blacks), ("temperatureK", s.temperatureK),
+         ("whites", s.whites), ("blacks", s.blacks), ("temperatureMired", s.temperatureMired),
          ("tint", s.tint), ("vibrance", s.vibrance), ("saturation", s.saturation)]
     }
 
@@ -474,7 +474,7 @@ final class CraftFixAuditTests: XCTestCase {
         case "shadows": s.shadows = value
         case "whites": s.whites = value
         case "blacks": s.blacks = value
-        case "temperatureK": s.temperatureK = value
+        case "temperatureMired": s.temperatureMired = value
         case "tint": s.tint = value
         case "vibrance": s.vibrance = value
         case "saturation": s.saturation = value

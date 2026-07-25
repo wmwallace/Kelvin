@@ -83,6 +83,64 @@ final class ColorCastFixTests: XCTestCase {
         }
     }
 
+    /// THE REPORTED BUG, and the reason the previous fix was not enough: the button did nothing on
+    /// a photo whose temperature was already set — which, in the app, is every photo.
+    ///
+    /// The correction was a Kelvin delta computed as `neutralisingTarget − 6500`, so it was only
+    /// the right number starting from 6500 K. A candidate recipe has almost always set a
+    /// temperature already, so the delta was added to the wrong place; and because Kelvin
+    /// compresses badly at the cool end, the sum frequently landed outside the legal span, at which
+    /// point `fullyLands` threw the ENTIRE pass away. Not a weak correction — no correction, and no
+    /// explanation.
+    ///
+    /// Mired composes, so the same measured cast asks for the same shift from wherever the photo
+    /// already sits.
+    func testTheFixWorksFromAnAlreadyAdjustedTemperature() throws {
+        let image = castRamp(1.0, 0.74, 0.48)
+        // Starting points a candidate recipe might plausibly have left behind, warm and cool.
+        for start in [5200.0, 6500.0, 7800.0] {
+            var from = GlobalAdjustments.neutral
+            from.temperatureK = start
+
+            let measure: (GlobalAdjustments) throws -> CraftFix.Reading = { g in
+                var r = Recipe.neutral; r.global = g
+                let out = Renderer.render(image, with: r)
+                return CraftFix.Reading(stats: try ImageStatistics.compute(out),
+                                        face: FaceSkin.read(in: out))
+            }
+            let before = try measure(from)
+            guard before.issues.contains(.colorCast) else { continue }
+
+            let result = try CraftFix.converge(issue: .colorCast, from: from, measure: measure)
+            XCTAssertGreaterThan(result.passes, 0,
+                                 "from \(start) K the fix applied nothing at all")
+
+            var applied = Recipe.neutral; applied.global = result.global
+            let after = try cast(of: Renderer.render(image, with: applied))
+            XCTAssertLessThan(after, try cast(of: Renderer.render(image, with: {
+                var r = Recipe.neutral; r.global = from; return r }())) * 0.85,
+                              "from \(start) K the cast was barely reduced")
+        }
+    }
+
+    /// The composition property itself: the same measured cast asks for the same MIRED shift
+    /// wherever it starts, which a Kelvin delta cannot do.
+    func testTemperatureStepsComposeInMired() {
+        var step = CraftFix.Step()
+        step.temperatureMired = -40
+
+        var warm = GlobalAdjustments.neutral; warm.temperatureK = 4000
+        var cool = GlobalAdjustments.neutral; cool.temperatureK = 8000
+        let fromWarm = step.applied(to: warm).temperatureK ?? 0
+        let fromCool = step.applied(to: cool).temperatureK ?? 0
+
+        XCTAssertEqual(1e6 / fromWarm - 1e6 / 4000, -40, accuracy: 0.01)
+        XCTAssertEqual(1e6 / fromCool - 1e6 / 8000, -40, accuracy: 0.01)
+        // In Kelvin the same shift is 1290 K at one end and 5333 K at the other, which is exactly
+        // why adding Kelvin could not work.
+        XCTAssertGreaterThan(abs(fromCool - 8000), abs(fromWarm - 4000) * 3)
+    }
+
     /// The property the fix rests on: correction is linear in MIRED, so equal steps of measured
     /// cast buy equal steps of correction wherever you are on the scale. Under the old
     /// Kelvin-linear mapping the third step bought roughly half what the first did.
