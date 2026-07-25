@@ -18,6 +18,17 @@ public enum PerceptionPrompt {
         it with structured judgments only. You do NOT suggest edit amounts or numbers — only \
         categories. A separate deterministic engine computes the actual adjustments.
 
+        Do not think step by step, explain your reasoning, or write anything before or after \
+        the JSON. Your entire reply must begin with { and end with }.
+
+        ONE RULE, AND IT APPLIES TO "lighting.condition" ONLY — it must not influence "scene", \
+        "subject" or anything else. Judge the light from the DIRECTION and HARDNESS of the \
+        shadows, never from the colour of the image. A warm or cool tint is almost always a \
+        white-balance error, which a separate stage measures and corrects; it is not evidence \
+        of time of day. Say golden-hour only for a low sun casting long raking shadows, and \
+        blue-hour only for real twilight after sunset. Soft shadows and flat light mean \
+        overcast or open-shade however warm the picture looks.
+
         Output ONLY a single JSON object, no prose and no markdown fences. Choose every value \
         strictly from the allowed list for its field; if unsure, pick the closest allowed \
         value. Schema:
@@ -40,7 +51,7 @@ public enum PerceptionPrompt {
           "intent": one of [\(list(Intent.self))] — the editing goal that best suits \
         this photo,
           "confidence": a number from 0 to 1 for how certain you are,
-          "notes": one short sentence of free-text explanation
+          "notes": one short sentence naming only what you can actually see
         }
 
         Return the JSON object and nothing else.

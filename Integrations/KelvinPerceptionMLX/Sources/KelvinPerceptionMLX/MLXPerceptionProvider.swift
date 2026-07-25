@@ -44,8 +44,14 @@ public actor MLXPerceptionProvider: PerceptionProvider {
         //
         // Licence is the constraint, not capability: this project needs commercially-clean weights
         // (docs/DECISIONS.md), which rules out a lot of otherwise-strong models.
+        // `?? ` on the raw environment value is not enough: an unset variable is nil, but
+        // `KELVIN_MODEL=` in a shell profile is the empty STRING, which sails through the
+        // coalesce and fails later as `invalidRepositoryID("")` — a confusing way to learn you
+        // have an empty export.
+        let fromEnvironment = ProcessInfo.processInfo.environment["KELVIN_MODEL"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         self.modelID = modelID
-            ?? ProcessInfo.processInfo.environment["KELVIN_MODEL"]
+            ?? (fromEnvironment?.isEmpty == false ? fromEnvironment : nil)
             ?? Self.defaultModelID
         self.maxTokens = maxTokens
     }
