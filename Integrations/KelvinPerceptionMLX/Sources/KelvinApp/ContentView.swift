@@ -1056,6 +1056,11 @@ final class AppState: ObservableObject {
         updateActiveRecipe()
     }
 
+    func selectCandidateIndex(_ index: Int) {
+        guard index >= 0, index < candidates.count else { return }
+        selectCandidate(id: candidates[index].id)
+    }
+
     func onEdit() { updateActiveRecipe(); scheduleCommit() }
 
     /// True while a Fix click is still working, so a second click can't start a parallel loop.
@@ -2063,6 +2068,14 @@ struct ContentView: View {
                         .keyboardShortcut("[", modifiers: [])
                     Button("") { appState.adjustBrushRadius(by: 0.02) }
                         .keyboardShortcut("]", modifiers: [])
+                    Button("") { appState.selectCandidateIndex(0) }
+                        .keyboardShortcut("1", modifiers: [])
+                    Button("") { appState.selectCandidateIndex(1) }
+                        .keyboardShortcut("2", modifiers: [])
+                    Button("") { appState.selectCandidateIndex(2) }
+                        .keyboardShortcut("3", modifiers: [])
+                    Button("") { appState.selectCandidateIndex(3) }
+                        .keyboardShortcut("4", modifiers: [])
                     Button("") { Task { await appState.advance(by: 1) } }
                         .keyboardShortcut(.rightArrow, modifiers: [])
                     Button("") { Task { await appState.advance(by: -1) } }
@@ -2073,7 +2086,10 @@ struct ContentView: View {
         }
         .task { await appState.loadDemoIfRequested() }
         .sheet(isPresented: $appState.showBatchSheet) { batchSheet }
+        .sheet(isPresented: $showShortcutsSheet) { ShortcutsSheet() }
     }
+
+    @State private var showShortcutsSheet = false
 
     // MARK: Header — wordmark + instrument status readout
 
@@ -2090,7 +2106,7 @@ struct ContentView: View {
                     .foregroundColor(Theme.ink)
             }
             Spacer()
-            HStack(spacing: 8) {
+            HStack(spacing: 12) {
                 if appState.isProcessing {
                     ProgressView().controlSize(.small).tint(Theme.glow)
                 } else {
@@ -2099,6 +2115,22 @@ struct ContentView: View {
                 Text(appState.statusMessage)
                     .font(Theme.mono(11))
                     .foregroundColor(Theme.inkDim)
+                Button(action: { showShortcutsSheet = true }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "keyboard").font(.system(size: 10))
+                        Text("Shortcuts").font(Theme.mono(10))
+                    }
+                    .foregroundColor(Theme.inkDim)
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .background(Capsule().stroke(Theme.hairline, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                // ⌘/ rather than the "?" the tooltip used to promise: nothing was bound to "?",
+                // and it needs Shift on most layouts anyway, so it would not have fired reliably
+                // even if it had been. ⌘/ is the macOS convention for this and takes no modifier
+                // gymnastics.
+                .keyboardShortcut("/", modifiers: .command)
+                .help("Keyboard shortcuts (⌘/)")
             }
         }
         .padding(.horizontal, 20)
@@ -3658,5 +3690,58 @@ struct MaskControl: View {
             RoundedRectangle(cornerRadius: 8).fill(Theme.surface.opacity(0.5))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.hairline.opacity(0.6), lineWidth: 1))
         )
+    }
+}
+
+// MARK: - Keyboard Shortcuts Sheet
+
+struct ShortcutsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    private let shortcuts: [(key: String, description: String)] = [
+        ("P", "Flag photo as Keep & advance to next"),
+        ("X", "Flag photo as Reject & advance to next"),
+        ("O", "Toggle Mask Overlay red visualization"),
+        ("[ / ]", "Decrease / Increase brush size"),
+        ("1 – 4", "Select Candidate Edit 1, 2, 3, or 4"),
+        ("Hold", "Press & hold 'Hold to compare' for original"),
+        ("⌘Z", "Undo edit"),
+        ("⌘Shift Z", "Redo edit"),
+        ("⌘O", "Open another photo or folder"),
+        ("← / →", "Navigate to previous / next photo in strip"),
+        ("⌘/", "Show this list")
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("KEYBOARD SHORTCUTS")
+                    .font(Theme.mono(11, .semibold)).tracking(1.4).foregroundColor(Theme.ink)
+                Spacer()
+                Button("Done") { dismiss() }
+                    .font(Theme.ui(12, .semibold)).foregroundColor(Theme.glow)
+                    .buttonStyle(.plain)
+            }
+            Divider().overlay(Theme.hairline)
+
+            VStack(spacing: 9) {
+                ForEach(shortcuts, id: \.key) { item in
+                    HStack(spacing: 12) {
+                        Text(item.key)
+                            .font(Theme.mono(10, .semibold))
+                            .foregroundColor(Theme.base)
+                            .padding(.horizontal, 7).padding(.vertical, 3)
+                            .background(Capsule().fill(Theme.glow))
+                            .frame(width: 76, alignment: .leading)
+                        Text(item.description)
+                            .font(Theme.ui(12)).foregroundColor(Theme.ink)
+                        Spacer()
+                    }
+                }
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+        .background(Theme.surface)
     }
 }
