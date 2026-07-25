@@ -8,11 +8,17 @@ import KelvinCore
 /// somewhere to see the rest of the shoot, and a way back to a frame you already worked on.
 enum PhotoBrowser {
 
-    /// Image files sitting alongside `url`, in a stable order. Uses the same extension list the
-    /// batch path does, so what you can browse is what Kelvin can actually edit.
+    /// Image files sitting alongside `url`. Uses the same extension list the batch path does, so
+    /// what you can browse is what Kelvin can actually edit.
+    ///
+    /// Ordering lives in `PhotoOrder` (KelvinCore) rather than here, because the order a shoot
+    /// reads in is a rule worth testing without a window. This returns the cheap, immediate order —
+    /// filename, no file reads beyond the directory listing. Capture-time order needs an EXIF pass
+    /// and arrives later; see `AppState.loadCaptureDates`.
     static func siblings(of url: URL) -> [URL] {
         let dir = url.deletingLastPathComponent()
-        return (try? BatchApply.imageFiles(in: dir))?.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending } ?? [url]
+        guard let files = try? BatchApply.imageFiles(in: dir), !files.isEmpty else { return [url] }
+        return PhotoOrder.sorted(files, by: .filename)
     }
 
     /// A small thumbnail for the strip. Decoding a 60 MP RAW per thumbnail would be absurd, so this
@@ -30,6 +36,46 @@ enum PhotoBrowser {
         ]
         guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
         return NSImage(cgImage: cg, size: .zero)
+    }
+}
+
+/// Whether the filmstrip starts folded, and — separately — whether the user has ever said.
+///
+/// Opening one frame used to pull the whole folder into view: 437 thumbnails, a strip you did not
+/// ask for, from a double-click on a single file. The fix is to let the *intent* of the open set
+/// the default. Open a single file and the shoot is listed but folded away — available, not
+/// imposed. Open a folder and it is expanded, because that is plainly what was asked for.
+///
+/// But a photographer who has deliberately folded or unfolded the strip has overruled all of that,
+/// and having their choice quietly undone by the next open is worse than either default. So the
+/// intent only ever writes while `hasUserChoice` is false: the first time the fold control is
+/// clicked, the choice is recorded and the intent stops writing for good. Nothing here fights the
+/// user; it fills in for them until they say, and then it stops.
+enum FilmstripFold {
+    static let expandedKey = "filmstrip.expanded"
+    /// Deliberately a second key rather than making the first one optional: `expanded == true`
+    /// cannot tell you whether that was a decision or the default it shipped with, and the whole
+    /// question here is which of the two it was.
+    private static let userChoiceKey = "filmstrip.expanded.chosen"
+
+    static var hasUserChoice: Bool { UserDefaults.standard.bool(forKey: userChoiceKey) }
+
+    /// Called from the fold control. From here on the strip does what it is told.
+    static func recordUserChoice(expanded: Bool) {
+        UserDefaults.standard.set(expanded, forKey: expandedKey)
+        UserDefaults.standard.set(true, forKey: userChoiceKey)
+    }
+
+    /// Apply the default implied by how a photo was opened. A no-op once the user has decided.
+    /// - Parameter openedFolder: true when a directory was opened (dropped, or picked in ⌘O),
+    ///   false for a single file.
+    static func applyOpenIntent(openedFolder: Bool) {
+        guard !hasUserChoice else { return }
+        // Written straight to UserDefaults rather than through a binding because the view that
+        // owns the fold state does not exist yet at this point — the strip is only built once a
+        // folder has more than one photo in it. `@AppStorage` observes the store, so the value is
+        // there when the view appears and updates it in place if it is already on screen.
+        UserDefaults.standard.set(openedFolder, forKey: expandedKey)
     }
 }
 
@@ -87,11 +133,16 @@ struct FilmstripView: View {
     var softCount: Int = 0
     var scanProgress: Double? = nil
     var onScanFocus: () -> Void = {}
+    @Binding var sortKey: PhotoSortKey
+    @Binding var sortReversed: Bool
+    /// True while the EXIF pass is still running, so the header can say the order is provisional
+    /// rather than let the strip silently rearrange under the pointer.
+    var sortPending: Bool = false
     @State private var hovered: URL?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// Collapsed by default is wrong — you would not know the strip exists — but it must be
-    /// possible to get the shoot off the screen entirely when working one photo.
-    @AppStorage("filmstrip.expanded") private var expanded = true
+    /// The fold. Which way it starts is set by how the photo was opened (see `FilmstripFold`);
+    /// once the user has clicked this control, their choice wins from then on.
+    @AppStorage(FilmstripFold.expandedKey) private var expanded = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -106,7 +157,12 @@ struct FilmstripView: View {
     /// strip still reports where the cull has got to.
     private var header: some View {
         HStack(spacing: 10) {
-            Button { withAnimation(Motion.gated(Motion.quick, reduceMotion)) { expanded.toggle() } } label: {
+            Button {
+                withAnimation(Motion.gated(Motion.quick, reduceMotion)) { expanded.toggle() }
+                // A click here is a decision. Record it, and the open-intent default stops
+                // overriding the fold from the next photo onwards.
+                FilmstripFold.recordUserChoice(expanded: expanded)
+            } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 8, weight: .bold))
@@ -173,11 +229,54 @@ struct FilmstripView: View {
             .frame(width: 220)
             .controlSize(.small)
 
-            Text("P keep · X reject · ←→ move")
-                .font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
+            sortControl
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 7)
+        // The culling keys used to be spelled out here in a run of static text. That text was the
+        // widest thing in an already-full row (the comment above measures it at 575 pt against a
+        // 580 pt pane), and it is read once and then never again — where the sort order is a
+        // decision a photographer changes per shoot. So the hint moved to the row's tooltip: the
+        // shortcuts stay discoverable by hovering the strip's own header, which is where you
+        // already are when you are culling, and the width went to the control that earns it.
+        .help("P keep · X reject · ←→ move")
+    }
+
+    /// Sort: what "the shoot in order" means, and which way round.
+    ///
+    /// A menu rather than another segmented picker — there is one segmented control in this row
+    /// already, and two side by side read as one control with six positions. The button says the
+    /// current order so the strip is never silently sorted by something you cannot see.
+    private var sortControl: some View {
+        Menu {
+            Picker("Order", selection: $sortKey) {
+                ForEach(PhotoSortKey.allCases, id: \.self) { key in
+                    Text(key.longLabel).tag(key)
+                }
+            }
+            .pickerStyle(.inline)
+            Divider()
+            Toggle("Reverse", isOn: $sortReversed)
+        } label: {
+            HStack(spacing: 4) {
+                // The arrow shows the direction, so reverse is legible without opening the menu.
+                Image(systemName: sortReversed ? "arrow.down" : "arrow.up")
+                    .font(.system(size: 8, weight: .bold))
+                Text(sortKey.label).font(Theme.mono(9))
+                // Capture-time order is provisional until the EXIF read lands. Saying so is the
+                // difference between "still working" and "sorted wrong".
+                if sortPending {
+                    ProgressView().controlSize(.mini).scaleEffect(0.6).frame(width: 10)
+                }
+            }
+            .foregroundColor(Theme.inkDim)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(sortPending
+              ? "Reading capture times — showing filename order until they land"
+              : "Sort the shoot by \(sortKey.longLabel.lowercased())")
     }
 
     private var strip: some View {
@@ -199,6 +298,14 @@ struct FilmstripView: View {
                     withAnimation(Motion.gated(Motion.standard, reduceMotion)) {
                         proxy.scrollTo(url, anchor: .center)
                     }
+                }
+                .onChange(of: photos) { _ in
+                    // The list itself changed under you — re-sorted, or the capture times landed
+                    // and moved everything. Put the frame you are actually editing back under the
+                    // pointer, without animating: the content has already moved, and sliding it
+                    // afterwards would read as the strip drifting on its own.
+                    guard let url = current else { return }
+                    proxy.scrollTo(url, anchor: .center)
                 }
             }
         }

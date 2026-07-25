@@ -277,10 +277,79 @@ final class AppState: ObservableObject {
 
     // MARK: Folder browsing + per-photo sessions
 
-    /// The other photos sitting in the folder you opened from, for the filmstrip.
+    /// The other photos sitting in the folder you opened from, for the filmstrip, in the order the
+    /// strip shows them.
     @Published var folderPhotos: [URL] = []
     /// Photos whose edit differs from the candidate Kelvin generated (drives the strip's dot).
     @Published var editedURLs: Set<URL> = []
+
+    // MARK: Strip order
+    //
+    // The strip sorted by filename, which is only a proxy for the order the frames were taken in:
+    // two bodies, two cards, a renamed export or a frame counter past 9999 all interleave wrongly
+    // and there was no way to say so. The rules live in `PhotoOrder` (KelvinCore) so they are
+    // testable without a window; what lives here is when to re-sort and where the dates come from.
+
+    /// Time, because "the shoot in order" means time. Not persisted: which order a folder wants is
+    /// a property of the folder — a wedding wants time, a folder of numbered scans wants names —
+    /// so carrying last week's choice into an unrelated shoot would be a worse guess than the
+    /// default is.
+    @Published var photoSort: PhotoSortKey = .captureTime { didSet { reorderFolderPhotos() } }
+    @Published var photoSortReversed = false { didSet { reorderFolderPhotos() } }
+
+    /// `DateTimeOriginal` per photo for the folder named by `captureDatesFolder`. Empty until the
+    /// background read lands, which `PhotoOrder.sorted` treats as "nothing is dated" — so the
+    /// strip shows filename order in the meantime rather than an empty or jumping list.
+    private var captureDates: [URL: Date] = [:]
+    /// Which directory `captureDates` describes. One folder at a time, which is how a shoot is
+    /// worked: opening every frame of a 437-shot folder must not re-read 437 EXIF headers each
+    /// time. Leaving for another folder and coming back costs one re-read, which is the price of
+    /// not carrying an unbounded cache of dates for folders nobody is looking at.
+    private var captureDatesFolder: URL?
+    private var captureDateTask: Task<Void, Never>?
+    /// True while the read is in flight, so the strip's sort control can say the order is not
+    /// settled yet instead of appearing to have sorted wrongly.
+    @Published private(set) var captureDatesPending = false
+
+    /// Whether the order on screen is still provisional. Only true under capture-time sort — the
+    /// read also runs when you are sorting by name (so switching later is instant), but a name
+    /// sort is not waiting on it and must not display as though it were.
+    var sortOrderPending: Bool { captureDatesPending && photoSort == .captureTime }
+
+    /// Put `folderPhotos` back in the order the controls currently ask for. Cheap — a sort of a
+    /// few hundred URLs against an in-memory dictionary, no file access.
+    private func reorderFolderPhotos() {
+        folderPhotos = PhotoOrder.sorted(folderPhotos, by: photoSort,
+                                         reversed: photoSortReversed, captureDates: captureDates)
+    }
+
+    /// Read the capture times for a folder, **off the main thread**, and re-sort when they arrive.
+    ///
+    /// An EXIF read is a header read, not a decode, so it is cheap per file — but 437 files is 437
+    /// file opens, and this codebase has twice put the window on the floor by doing per-file work
+    /// on the main thread (thumbnails once decoded whole RAWs during view layout and the window
+    /// never appeared). So: never on the main thread, never blocking the open, and the strip is
+    /// usable in filename order throughout.
+    private func loadCaptureDates(for folder: URL, photos: [URL]) {
+        guard captureDatesFolder != folder else { return }      // already have this folder
+        captureDateTask?.cancel()
+        captureDatesFolder = folder
+        captureDates = [:]
+        captureDatesPending = true
+        captureDateTask = Task { [weak self] in
+            let dates = await Task.detached(priority: .utility) {
+                PhotoOrder.captureDates(for: photos)
+            }.value
+            guard !Task.isCancelled, let self else { return }
+            // Guard against a folder switch that started while this read was running — a late
+            // result must not re-sort the strip you are looking at now using another folder's
+            // dates.
+            guard self.captureDatesFolder == folder else { return }
+            self.captureDates = dates
+            self.captureDatesPending = false
+            self.reorderFolderPhotos()
+        }
+    }
 
     // MARK: Culling — deciding what stays, before editing what's left
     //
@@ -585,12 +654,16 @@ final class AppState: ObservableObject {
         if isDirectory.boolValue {
             // Dragging a shoot folder in is a natural thing to try; open the first frame and let
             // the filmstrip carry the rest.
-            guard let first = (try? BatchApply.imageFiles(in: url))?
-                .sorted(by: { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending })
-                .first else {
+            guard let first = (try? BatchApply.imageFiles(in: url))
+                .map({ PhotoOrder.sorted($0, by: .filename) })?.first else {
                 statusMessage = "No photos Kelvin can read in \(url.lastPathComponent)."
                 return
             }
+            // Opening a folder is an explicit request for the shoot, so the strip starts open.
+            // (First frame by filename, not capture time — picking by time would mean reading
+            // every EXIF header before the first photo could appear. Once the dates land the strip
+            // re-sorts around whichever frame is open, which costs nothing.)
+            FilmstripFold.applyOpenIntent(openedFolder: true)
             await openPhoto(first)
             return
         }
@@ -598,6 +671,9 @@ final class AppState: ObservableObject {
             statusMessage = "Kelvin can't read .\(url.pathExtension) files."
             return
         }
+        // One file was asked for, so one file is what takes over the screen. The rest of the folder
+        // is still listed and one click away — it just does not arrive uninvited.
+        FilmstripFold.applyOpenIntent(openedFolder: false)
         await openPhoto(url)
     }
 
@@ -638,7 +714,15 @@ final class AppState: ObservableObject {
         // Keep whatever you were working on before this photo takes over.
         if imageURL != nil, imageURL != url { stashCurrentSession() }
         imageURL = url
-        folderPhotos = PhotoBrowser.siblings(of: url).filter { !dismissedURLs.contains($0) || $0 == url }
+        let siblings = PhotoBrowser.siblings(of: url).filter { !dismissedURLs.contains($0) || $0 == url }
+        // Kick the EXIF pass off first: it clears the cache synchronously when the folder has
+        // changed, so the sort below can never use the previous folder's dates.
+        loadCaptureDates(for: url.deletingLastPathComponent(), photos: siblings)
+        // Sorted with whatever dates are already cached — none on the first open of a folder,
+        // which `PhotoOrder` resolves to filename order. The pass above fills them in and re-sorts;
+        // the strip is never blocked waiting for it.
+        folderPhotos = PhotoOrder.sorted(siblings, by: photoSort,
+                                         reversed: photoSortReversed, captureDates: captureDates)
         // Photos edited in an earlier session already carry a dot.
         editedURLs.formUnion(EditStore.edited(among: folderPhotos))
         flags = FlagStore.flags(among: folderPhotos)
@@ -1795,7 +1879,10 @@ struct ContentView: View {
                                   softURLs: Set(appState.focus.filter { $0.value.isSoft }.keys),
                                   softCount: appState.softCount,
                                   scanProgress: appState.focusScanProgress,
-                                  onScanFocus: appState.scanFocus)
+                                  onScanFocus: appState.scanFocus,
+                                  sortKey: $appState.photoSort,
+                                  sortReversed: $appState.photoSortReversed,
+                                  sortPending: appState.sortOrderPending)
                 }
             }
             .frame(minWidth: 460)
