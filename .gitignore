@@ -39,3 +39,8 @@ build/
 *~
 .idea/
 .vscode/
+
+# Pre-launch working notes. Deliberately not published: working notes,
+# what to do about specific commits, and personal details — internal judgement calls, not decisions.
+# The decisions themselves live in docs/DECISIONS.md, and the release *process* is docs/RELEASING.md.
+*.local.md

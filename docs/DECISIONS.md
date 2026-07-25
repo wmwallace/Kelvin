@@ -522,82 +522,51 @@ solicitor's review, or a formal equivalent generated at harmonyagreements.org.
 
 ## D11 — Domain: `usekelvin.app` · **Decided 25 July 2026, registered**
 
-Bought before the first binary release, deliberately. The Sparkle appcast URL is compiled into every
-copy shipped, and every installed copy checks that exact URL forever — so choosing it after the first
-release would mean either abandoning those users' ability to update or never moving.
+Bought before the first binary release, deliberately: a Sparkle appcast URL is compiled into every
+copy shipped and checked by every installed copy forever, so choosing it afterwards would mean
+abandoning those users' ability to update.
 
-`kelvin.app`, `kelvin.com` and `kelvin.dev` are all registered to other parties; `kelvin.app` is
-additionally premium-priced. So a variant was always the answer.
+`kelvin.app`, `kelvin.com` and `kelvin.dev` are registered to other parties, so a variant was always
+the answer. Chosen over `kelvineditor.com` — cheaper, and the only TLD with a capped renewal increase
+— because the cap protects against an annoyance, while the `.com` costs something every time the
+project is mentioned aloud: it has to be spelled out and does not contain the product name.
 
-**Chosen over `kelvineditor.com`** ($11.25/yr flat, versus $9 then $15) even though the `.com` is
-cheaper and is the only TLD with an ICANN-capped renewal increase (7%/yr). The cap protects against an
-annoyance — `.app` drifting from $15 toward $25 over a decade. It does not protect against the cost
-that is paid every single time the project is mentioned: `kelvineditor.com` has to be spelled out
-aloud, reads as SEO bait, and does not contain the product name. `usekelvin.app` does, and `.app`
-signals "Mac application" without explanation.
+`.app` is HSTS-preloaded, so a certificate failure would take the site and the update feed dark with
+no HTTP fallback. A real objection for a hand-managed server; not for one served by Vercel, which
+renews certificates automatically.
 
-**`.app` is HSTS-preloaded**, so there is no HTTP fallback ever and a certificate failure would take
-the site *and* the update feed completely dark. That is a genuine objection for anyone hand-managing
-certificates; it does not apply here, because the site is served by Vercel, which provisions and
-renews automatically.
+Ruled out despite being the exact brand match: `kelvin.photography`. It maximises confusion with the
+other product using this name, which is the risk D9 accepted and not one worth amplifying.
 
-**Ruled out despite being the exact brand match: `kelvin.photography`** ($29.35/yr, available,
-non-premium). It maximises confusion with the other product using this name — the specific risk D9
-accepted, and no reason to amplify it — and Identity Digital's registry agreement has no cap on
-renewal increases, unlike `.com`.
-
-**Traps found while checking, recorded so nobody re-treads them:** `kelvin.site` and `kelvin.space`
-renew at **$273/yr** after a $68 first year (registry premium renewals never lapse), and `kelvin.art`
-renews at ~$77 despite one registrar advertising $27 — the registry's own fee API reports $70
-wholesale, and the advertised figure was a standard rate leaking onto a premium listing.
-
-**This domain is now load-bearing infrastructure, not marketing.** Keep auto-renew on and the payment
-method current. If it lapses, every installed copy silently loses the ability to update, and whoever
-registers it next can serve their own appcast to this project's users. That is the most dangerous
-single failure mode in the distribution setup.
+**This domain is infrastructure now, not marketing.** Keep auto-renew on. If it lapses after a
+Sparkle build ships, every installed copy loses the ability to update, and whoever registers it next
+can serve their own appcast to this project's users.
 
 ---
 
-## D-model-5 — The weights ship inside the app. Users download nothing. · **Decided 25 July 2026**
+## D-model-5 — The weights ship inside the app · **Decided 25 July 2026**
 
-Supersedes the open question left in D-model-4 about how alpha users would obtain the model. Three
-options were on the table: fetch from Hugging Face on first run, fetch from our own GitHub release,
-or bundle. **Bundled, in a single artifact.**
+Closes the open question in D-model-4 about how alpha users get the model: they do not get it, they
+already have it. One artifact, no first-run download, no third party.
 
-The owner's reasoning, and it is the right one: *"I always have control and can predict behaviour."*
+The argument that decided it is reproducibility, not privacy. `ModelConfiguration(id:)` resolves
+revision `main`, so a shipped build would fetch whatever that repository points at on the day someone
+runs it. Every threshold in this project was calibrated against one snapshot. Weights that travel
+with the binary cannot drift out from under a release.
 
-**The argument that decided it is not privacy — it is reproducibility.** `ModelConfiguration(id:)`
-resolves revision `main`, which means a shipped build downloads *whatever that repository points at
-on the day the user runs it*. A re-quantisation upstream would change perception behaviour for new
-users of an already-released build, with no commit on our side and no way to notice. This project's
-thresholds — the soft/unusable focus limits, the perception vocabulary the parser expects, the whole
-A/B in D-model-3 — were calibrated against one specific snapshot. Weights that travel with the binary
-cannot drift.
+Everything else is a bonus: no rate limits, no repository rename breaking installs, no first-run
+wait, and "no cloud" becomes literally true rather than true-with-an-asterisk. Hosting costs nothing.
 
-Everything else follows as a bonus rather than as the goal: no third-party dependency at runtime, no
-rate limits, no repository rename breaking installs, no first-run wait, and the "no cloud" claim
-becomes literally true for a released build rather than true-with-an-asterisk. Hosting costs nothing —
-GitHub release assets are free and unmetered for public repositories.
+**Enforced, not just intended.** `scripts/package-app.sh` refuses to produce a signed build without
+staged weights — otherwise forgetting `make stage-model` would ship an app that reaches for Hugging
+Face on a stranger's machine. Source builds still fetch, at a pinned revision.
 
-**Enforced, not just intended.** `scripts/package-app.sh` REFUSES to produce a signed build without
-staged weights. Forgetting `make stage-model` would otherwise yield an app that looks correct, ships,
-notarises, and then reaches for Hugging Face on a stranger's machine — the exact behaviour this
-decision removes, discovered by the worst possible person.
+### Two consequences
 
-**Also pinned for source builds:** `defaultModelRevision` names the exact commit
-(`93760be…`) rather than tracking `main`, so a `swift run` build gets the weights the project was
-measured against too. `KELVIN_MODEL` keeps its own default revision, because naming another
-repository is asking for whatever it holds.
-
-### Two consequences to plan for
-
-- **GitHub caps a release asset at 2 GB.** The bundle lands around 1.6 GB, so there is roughly 400 MB
-  of headroom. A larger model — the 4B is ~2.9 GB — would not fit, and would force a split-asset or
-  first-run-download design after all. The packaging script warns if the bundle crosses 2 GB.
-- **Sparkle delta updates move from optional to REQUIRED.** With weights inside the app, every
-  release is a ~1.6 GB download unless deltas are configured. `BinaryDelta` handles this well —
-  unchanged files contribute almost nothing, so a code-only update is a few MB — but it must exist
-  before the *second* release, or the first update teaches users that this app is expensive to keep.
+- **GitHub caps a release asset at 2 GB.** The bundle is ~1.7 GB, so there is ~300 MB of headroom. A
+  larger model would not fit and would force a split-asset design. The packaging script warns.
+- **Sparkle binary deltas are now required, not optional.** With weights inside, every update is
+  1.7 GB without them. Set this up before the second release.
 
 ---
 

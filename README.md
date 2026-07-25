@@ -1,144 +1,102 @@
 # Kelvin
 
-**A local-AI photo editor for macOS.** Drop in a photo — RAW, JPEG or PNG. A small vision model reads
-the scene. The app hands back three or four fully-formed candidate edits. You pick one, tune it, and
-apply it across the rest of the shoot.
+**A local-AI photo editor for macOS.**
 
-Everything that touches your photographs runs on your machine. No cloud, no account, no upload.
+Drop in a photo. A small vision model reads the scene, and Kelvin hands you three or four finished
+edits to choose between. Pick one, tune it, apply it across the shoot.
+
+Everything runs on your machine. Your photographs never leave it.
 
 <!--
-SCREENSHOTS GO HERE, and they are the highest-value thing missing from this file. For a photo editor,
-one image of the candidate picker beside a real photograph does more than every paragraph below it.
-Three worth having: the candidate picker on a real frame, the mask panel with a subject selected, and
-the filmstrip grouped into bursts.
+SCREENSHOTS GO HERE — the highest-value thing missing from this file. For a photo editor, one image
+of the candidate picker beside a real photograph does more than every paragraph below it. Worth
+having: the candidate picker on a real frame, the mask panel with a subject selected, and the
+filmstrip grouped into bursts.
 -->
 
-## What makes it different
+## Why
 
-Existing tools give you one of three things:
+Most tools give you one answer, or ask you to teach them your style with thousands of past edits
+first, or repaint your pixels with a generative model.
 
-- **Deterministic auto-adjust** — one answer, with no reasoning about what the photograph actually is.
-- **Style cloning** — genuinely good, but it needs thousands of your own finished edits before it does
-  anything at all.
-- **Generative editing** — repaints pixels, which is the wrong operation for retouching.
+Kelvin reads one photograph and offers a few defensible interpretations of it. You pick. That choice
+is the point of the whole app.
 
-Kelvin does something narrower on purpose: **it reads one photograph semantically, then computes
-several defensible interpretations of it and lets you choose.** Your choice is the signal.
+The idea underneath: **the model never chooses numbers.** It answers categorical questions — what
+kind of scene, what the light is doing, what's technically wrong. Every actual value is then computed
+by ordinary, tested code from the histogram and the EXIF. Ask a small model for `exposure: +0.37` and
+it will invent one, confidently, and you will never know which answers were guesses.
 
-The architectural claim underneath that, which is the whole project in one sentence: **the model never
-emits numbers.** It returns categorical judgements — scene, subject, lighting condition, what is
-technically wrong. Every actual parameter is computed by deterministic, unit-tested code from the
-histogram, the EXIF and the mask stack. Ask a 4B-class model for `exposure_ev: +0.37` and it will
-invent one confidently, and you will never be able to tell a good hallucination from a bad one.
+## Status: pre-alpha
 
-## Status: pre-alpha, source only
+**Works:** the editor, with the full adjustment set, colour mixer, geometry and a mask kit (subject,
+sky, radial, graduated, brush, colour range, luminance, skin, per-person). On-device scene reading.
+Candidate generation. Culling with keep/reject. A scan that measures sharpness, exposure extremes and
+near-duplicates. Batch apply across a folder. Non-destructive editing — your originals are never
+written to.
 
-Honest summary of where this is:
+**Not yet:** no public release build. Preference learning exists in the engine but isn't wired into a
+loop. Nothing generative, on purpose.
 
-**Working** — the recipe format and renderer; the evaluation harness; the recipe engine and candidate
-generation; on-device perception through a 4-bit vision model; the editor itself, with the full
-adjustment set, a colour mixer, geometry, and a mask kit (subject, sky, radial, graduated, brush,
-colour-range, luminance, skin, per-instance subjects); culling with keep/reject flags; a triage scan
-that measures sharpness, exposure extremes and near-duplicates; batch apply across a folder;
-non-destructive sidecar persistence.
-
-**Not working yet** — there is no *released* binary. `scripts/package-app.sh` produces a working
-double-clickable app, but nothing is signed or notarised yet, so macOS will refuse to open it on
-anyone else's machine; building from source is the supported route for now. Preference learning
-exists in the engine but is not a live loop.
-
-**Not built** — anything generative. See `docs/DECISIONS.md` D10.
-
-There are 369 tests over the core and 85 over the app. CI runs the core suite on every pull request.
+465 tests. CI runs on every pull request.
 
 ## Running it
 
-Requires **macOS 14+** and **Xcode 16.3+**.
+macOS 14+, Xcode 16.3+.
 
 ```sh
-xcodebuild -downloadComponent MetalToolchain    # once — Xcode does not install this by default
-make build && make test                        # core: renderer, engine, eval harness
-make app                                       # launch the editor
+xcodebuild -downloadComponent MetalToolchain   # once — Xcode doesn't install this by default
+make build && make test
+make app
 ```
 
-Building from source, the first run downloads about **1.6 GB of model weights** from Hugging Face
-into `~/.cache/huggingface`, pinned to the exact revision this project was measured against. To skip
-that and run the same path a release build takes:
+The first run downloads about 1.6 GB of model weights. Released builds include them instead — see
+[Privacy](#privacy). [`CONTRIBUTING.md`](CONTRIBUTING.md) has the details and the gotchas.
 
-```sh
-make stage-model && make app-staged
-```
-
-**A released build downloads nothing.** The weights ship inside the app — see [Privacy](#privacy).
-
-Fuller instructions, and the gotchas worth knowing before you file a build issue, are in
-[`CONTRIBUTING.md`](CONTRIBUTING.md).
+Opens RAW, JPEG, HEIC, PNG and TIFF.
 
 ## Privacy
 
-The claim is specific, so here is exactly what it means:
+- **Your photographs never leave your Mac.** No upload, no account, no telemetry, no crash reporting.
+  There is no server to send anything to.
+- **Released builds make no network requests at all** — the model ships inside the app. Building from
+  source downloads the weights once, at a fixed revision.
+- **Your originals are never modified.** Edits are stored separately.
+- **Exports carry the original photo's metadata by default, including its location.** There is a
+  switch in the export panel to strip that, with tests that read the file back to prove it works.
 
-- **Your photographs never leave your machine.** No upload, no account, no telemetry, no analytics, no
-  crash reporting. There is no server component to send anything to.
-- **Edits are written to sidecars** in Application Support, never next to your originals and never
-  into them. The original file is read-only by design.
-- **Exports carry the source photograph's metadata by default**, including its GPS position — the same
-  behaviour as every other editor. The export panel has a toggle to strip location and camera serial,
-  and there are tests that read the written file back to prove it works.
-- **A released build makes no network requests at all.** The perception weights ship inside the app,
-  so there is no first-run download, no model server, and nothing to be rate-limited by. It works on
-  a plane, on day one. That is also why the app is ~1.6 GB.
-- **Building from source is the one exception:** an unstaged source build fetches the weights from
-  Hugging Face once, pinned to a fixed revision. `make stage-model` avoids even that.
+## Built with
 
-## How it is built
+Swift 6 and SwiftUI. Core Image for RAW decoding, so camera profiles come from Apple. MLX for
+on-device inference with a 4-bit vision model. Edits are stored as small JSON recipes.
 
-| | |
-|---|---|
-| Language | Swift 6 |
-| UI | SwiftUI |
-| RAW decode | Core Image (`CIRAWFilter`) — Apple's decoder and per-camera colour profiles |
-| Render | Core Image / Metal |
-| Inference | MLX Swift, a 4-bit vision model (Apache-2.0 weights) |
-| Persistence | JSON sidecars |
-
-Two packages, deliberately: the root package is the renderer, recipe engine and eval harness, with
-**no MLX and no UI** — headless, fast and independently testable. `Integrations/KelvinPerceptionMLX`
-holds the SwiftUI app and the vision backend.
-
-Mac-only is a positioning choice, not an oversight. See `docs/DECISIONS.md` D3.
+Mac-only is a choice, not an oversight — see [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ## Documentation
 
-| Document | Read it when |
+| | |
 |---|---|
-| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Before your first build or patch |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Understanding the pipeline |
-| [`docs/RECIPE-SCHEMA.md`](docs/RECIPE-SCHEMA.md) | Touching the data model |
-| [`docs/DECISIONS.md`](docs/DECISIONS.md) | **Before proposing any architectural change** — most obvious ideas are already in here with reasons |
-| [`docs/EVALUATION.md`](docs/EVALUATION.md) | Judging whether an edit is actually better |
-| [`CLAUDE.md`](CLAUDE.md) | Working on this with an AI assistant |
-
-## How this was built
-
-Kelvin is written by its owner working with Claude, and the commit history says so — most commits
-carry a `Co-Authored-By` trailer, and the messages are long because they record what was measured and
-why a decision went the way it did. That history is deliberately kept rather than squashed; it is the
-most honest documentation in the repository.
+| [CONTRIBUTING](CONTRIBUTING.md) | Before your first build or patch |
+| [docs/ARCHITECTURE](docs/ARCHITECTURE.md) | How the pipeline fits together |
+| [docs/RECIPE-SCHEMA](docs/RECIPE-SCHEMA.md) | The data model |
+| [docs/DECISIONS](docs/DECISIONS.md) | Why things are the way they are — read before proposing changes |
+| [docs/EVALUATION](docs/EVALUATION.md) | How edit quality is measured |
+| [docs/RELEASING](docs/RELEASING.md) | Building a signed, notarised release |
 
 ## Contributing
 
-Bug reports and reproductions are genuinely valuable and carry no licensing question. For patches, see
-[`CONTRIBUTING.md`](CONTRIBUTING.md) — including the five non-negotiables a change has to respect, and
-the reason edits are judged with the evaluation harness rather than by eye.
+Bug reports and reproductions are welcome and carry no licensing question. For patches, see
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+Kelvin is written by its owner working with Claude, and the commit history says so. That history is
+kept rather than squashed — it records what was measured and why decisions went the way they did.
 
 ## Licence
 
-**[AGPL-3.0-only](LICENSE).** Copyleft on purpose: if you build on this and ship it — as an
-application or as a hosted service — your source has to be open too. Nobody gets to close this work.
+[AGPL-3.0-only](LICENSE). If you build on this and ship it — as an app or as a service — your source
+has to be open too.
 
-Contributions are covered by a [contributor licence agreement](CLA.md) which leaves your copyright
-with you and grants the maintainer the right to relicense. The reasoning, including why that is
-necessary rather than merely convenient, is in `docs/DECISIONS.md` D8.
+Contributions are covered by a [contributor licence agreement](CLA.md): you keep your copyright, and
+the maintainer keeps the ability to relicense. Reasoning in `docs/DECISIONS.md` (D8).
 
 Copyright © 2026 William Wallace.
