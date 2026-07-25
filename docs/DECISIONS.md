@@ -505,3 +505,41 @@ advance, and the point of this pairing is that the owner controls the terms.
 **Not legal advice, and `CLA.md` says so at the top.** It is a working draft modelled on the Apache
 ICLA with a relicensing clause added. Before any commercial edition is actually offered it needs a
 solicitor's review, or a formal equivalent generated at harmonyagreements.org.
+
+---
+
+## D11 — Domain: `usekelvin.app` · **Decided 25 July 2026, registered**
+
+Bought before the first binary release, deliberately. The Sparkle appcast URL is compiled into every
+copy shipped, and every installed copy checks that exact URL forever — so choosing it after the first
+release would mean either abandoning those users' ability to update or never moving.
+
+`kelvin.app`, `kelvin.com` and `kelvin.dev` are all registered to other parties; `kelvin.app` is
+additionally premium-priced. So a variant was always the answer.
+
+**Chosen over `kelvineditor.com`** ($11.25/yr flat, versus $9 then $15) even though the `.com` is
+cheaper and is the only TLD with an ICANN-capped renewal increase (7%/yr). The cap protects against an
+annoyance — `.app` drifting from $15 toward $25 over a decade. It does not protect against the cost
+that is paid every single time the project is mentioned: `kelvineditor.com` has to be spelled out
+aloud, reads as SEO bait, and does not contain the product name. `usekelvin.app` does, and `.app`
+signals "Mac application" without explanation.
+
+**`.app` is HSTS-preloaded**, so there is no HTTP fallback ever and a certificate failure would take
+the site *and* the update feed completely dark. That is a genuine objection for anyone hand-managing
+certificates; it does not apply here, because the site is served by Vercel, which provisions and
+renews automatically.
+
+**Ruled out despite being the exact brand match: `kelvin.photography`** ($29.35/yr, available,
+non-premium). It maximises confusion with the other product using this name — the specific risk D9
+accepted, and no reason to amplify it — and Identity Digital's registry agreement has no cap on
+renewal increases, unlike `.com`.
+
+**Traps found while checking, recorded so nobody re-treads them:** `kelvin.site` and `kelvin.space`
+renew at **$273/yr** after a $68 first year (registry premium renewals never lapse), and `kelvin.art`
+renews at ~$77 despite one registrar advertising $27 — the registry's own fee API reports $70
+wholesale, and the advertised figure was a standard rate leaking onto a premium listing.
+
+**This domain is now load-bearing infrastructure, not marketing.** Keep auto-renew on and the payment
+method current. If it lapses, every installed copy silently loses the ability to update, and whoever
+registers it next can serve their own appcast to this project's users. That is the most dangerous
+single failure mode in the distribution setup.
