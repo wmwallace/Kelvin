@@ -19,7 +19,7 @@ public enum SubjectInstances {
 
     /// What kind of thing an instance is. Drives both the label and the ordering; the engine can
     /// also treat a person differently from a rock (skin tone protection, for one).
-    public enum Kind: String, Sendable, Equatable {
+    public enum Kind: String, Sendable, Equatable, Codable {
         case person, animal, object
 
         /// Singular noun used to build the display label.
@@ -45,6 +45,97 @@ public enum SubjectInstances {
         /// Normalised bounding box (Vision convention, bottom-left origin), for hit-testing a
         /// click on the photo and for placing a label.
         public let boundingBox: CGRect
+
+        /// This instance's identity without its pixels — cheap to keep in a session and to hand
+        /// back at export time. See `reidentify`.
+        public var reference: Reference { Reference(id: id, kind: kind, boundingBox: boundingBox) }
+    }
+
+    /// Who an instance *is*, separated from the bitmap that shows where it is.
+    ///
+    /// The ids above are Vision's per-pass instance indices. They are stable within one detection
+    /// pass and meaningless between two: run the segmentation again — on the same photo at a
+    /// different resolution, which is exactly what export does — and `person2` may be a different
+    /// person, or nobody. A recipe that says "brighten person2" would then silently brighten
+    /// somebody else in the exported file while looking correct on screen.
+    ///
+    /// So the id is never re-derived. The pass the photographer actually edited against hands its
+    /// references forward, and `reidentify` matches a fresh detection back onto them by geometry.
+    public struct Reference: Sendable, Equatable, Codable {
+        public let id: String
+        public let kind: Kind
+        /// Normalised (Vision convention), so it carries across resolutions unchanged.
+        public let boundingBox: CGRect
+
+        public init(id: String, kind: Kind, boundingBox: CGRect) {
+            self.id = id; self.kind = kind; self.boundingBox = boundingBox
+        }
+    }
+
+    /// The result of matching a fresh detection back onto a known set of instances.
+    public struct Reidentified: Sendable {
+        /// Fresh masks keyed by the ORIGINAL instance's id, ready for `Renderer.render`.
+        public let bitmaps: [String: CIImage]
+        /// Ids that nothing in the fresh pass matched — the subject moved out of the frame, or
+        /// segmentation simply found it this time and not that time. The caller must decide what
+        /// to do; rendering with a silently missing mask drops the local edit without a word.
+        public let unmatched: [String]
+    }
+
+    /// Two boxes are the same thing if they cover the same ground. Below this, they are not.
+    /// Generous by the standards of object detection (0.5 is the usual "same object" bar) because
+    /// the two passes here are the *same photograph* at two resolutions, where the same subject
+    /// lands at an IoU well above 0.9 — anything near the threshold is already suspicious.
+    public static let reidentificationOverlap = 0.5
+
+    /// Re-key a fresh detection's masks onto the ids a recipe was authored against.
+    ///
+    /// Matching is greedy by descending overlap, each side used once, so the strongest agreement
+    /// wins and no two references can claim the same mask. Kind breaks ties but does not gate the
+    /// match: the person segmentation is a threshold decision and can flip between a 1200px proxy
+    /// and a 60 MP frame, and dropping an edit because someone was re-classified is a worse
+    /// failure than matching them across that flip. Geometry is the stronger evidence — two
+    /// *different* subjects overlapping this much in one photograph is not a real case.
+    public static func reidentify(_ fresh: [Instance], as references: [Reference],
+                                  minimumOverlap: Double = reidentificationOverlap) -> Reidentified {
+        var pairs: [(ref: Int, fresh: Int, iou: Double, sameKind: Bool)] = []
+        for (r, reference) in references.enumerated() {
+            for (f, instance) in fresh.enumerated() {
+                let iou = intersectionOverUnion(reference.boundingBox, instance.boundingBox)
+                guard iou >= minimumOverlap else { continue }
+                pairs.append((r, f, iou, reference.kind == instance.kind))
+            }
+        }
+        // Descending overlap; same-kind first where two are equally good. The index tie-breaks last
+        // so the result cannot depend on the order pairs happened to be built in.
+        pairs.sort {
+            if $0.iou != $1.iou { return $0.iou > $1.iou }
+            if $0.sameKind != $1.sameKind { return $0.sameKind }
+            return ($0.ref, $0.fresh) < ($1.ref, $1.fresh)
+        }
+
+        var bitmaps: [String: CIImage] = [:]
+        var usedReferences = Set<Int>(), usedFresh = Set<Int>()
+        for pair in pairs {
+            guard !usedReferences.contains(pair.ref), !usedFresh.contains(pair.fresh) else { continue }
+            usedReferences.insert(pair.ref); usedFresh.insert(pair.fresh)
+            bitmaps[references[pair.ref].id] = fresh[pair.fresh].mask
+        }
+        let unmatched = references.enumerated()
+            .filter { !usedReferences.contains($0.offset) }
+            .map { $0.element.id }
+        return Reidentified(bitmaps: bitmaps, unmatched: unmatched)
+    }
+
+    /// Standard IoU on normalised boxes. Symmetric, unlike `overlap` below — here neither box is
+    /// the authority, they are two readings of the same thing.
+    static func intersectionOverUnion(_ a: CGRect, _ b: CGRect) -> Double {
+        let i = a.intersection(b)
+        guard !i.isNull, !i.isEmpty else { return 0 }
+        let intersection = Double(i.width * i.height)
+        let union = Double(a.width * a.height + b.width * b.height) - intersection
+        guard union > 0 else { return 0 }
+        return intersection / union
     }
 
     /// A mask covering essentially the whole frame is not a subject, it is the picture. Vision
