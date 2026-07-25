@@ -195,8 +195,13 @@ final class AppState: ObservableObject {
     @Published var maskInvert: [String: Bool] = [:]
     @Published var showMaskOverlay: Bool = false
 
-    /// Every local adjustment the renderer honours inside a mask, in the order a photographer
-    /// works: light first, then colour. Keys must match `Renderer.applyMaskedAdjustments`.
+    /// Presentation for every adjustment in `Mask.adjustmentKeys` — the renderer's contract, which
+    /// lives in Core and is tested there. This list supplies only the label, range and unit; it
+    /// must not decide WHICH adjustments exist, because that is exactly how the two mask editors
+    /// drifted apart (auto masks had six, hand-drawn masks three).
+    ///
+    /// `assertCoversTheContract()` below checks the two agree at launch in debug builds, since the
+    /// app package has no test target to check it properly.
     static let maskAdjustmentSpecs: [(key: String, label: String, range: ClosedRange<Double>, unit: String)] = [
         ("exposure_ev", "Exposure",   -3...3,      " EV"),
         // RECOVERY ONLY, and the range says so. `CIHighlightShadowAdjust`'s highlight amount is
@@ -209,6 +214,18 @@ final class AppState: ObservableObject {
         ("saturation",  "Saturation", -100...100,  ""),
         ("vibrance",    "Vibrance",   -100...100,  "")
     ]
+
+    /// Fails loudly in debug if the panel and the renderer disagree about which adjustments exist.
+    ///
+    /// The app package has no test target, so this is the only place the drift that motivated
+    /// `Mask.adjustmentKeys` can be caught automatically. A missing key means a slider the
+    /// renderer honours that nobody can reach; an extra one means a slider that does nothing.
+    static func assertCoversTheContract() {
+        assert(Set(maskAdjustmentSpecs.map(\.key)) == Set(Mask.adjustmentKeys),
+               "mask panel and renderer disagree: panel has "
+               + "\(Set(maskAdjustmentSpecs.map(\.key)).symmetricDifference(Set(Mask.adjustmentKeys)))"
+               + " that the other does not")
+    }
 
     /// Binding for one adjustment of one mask, falling back to the engine's own value.
     func maskAdjustmentBinding(_ maskId: String, _ key: String) -> Binding<Double> {
@@ -370,6 +387,7 @@ final class AppState: ObservableObject {
         problems: [], intent: .natural, confidence: 0.3)
 
     init() {
+        Self.assertCoversTheContract()
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent(Branding.displayName)
         let logURL = appSupport.appendingPathComponent("preferences.jsonl")
@@ -3416,7 +3434,21 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
     var cx = 0.5, cy = 0.5, radius = 0.35, angle = 0.0, softness = 0.35
     var stamps: [BrushStamp] = []                       // brush only
     var selCenter = 0.0, selRange = 0.1, selSoftness = 0.1   // colour / luminance / skin selection
+    /// The local adjustments this mask carries. Keys and ranges live in
+    /// `AppState.maskAdjustmentSpecs`, and the editor builds its sliders from that list, so a
+    /// hand-drawn mask and an auto mask can never again offer different controls.
+    ///
+    /// It used to be exposure/contrast/saturation and nothing else, while the renderer honoured
+    /// six — so `shadows`, `highlights` and `vibrance` were unreachable on every mask a user
+    /// drew: radial, graduated, brush, colour, luminance, skin, background, subject, instance.
+    /// All nine. The two auto masks got the full set. The sharpest version of the gap is that
+    /// `RecipeEngine.subjectMask` reaches for `shadows` deliberately — "detail recovery weighted
+    /// over raw exposure, kinder to skin at any tone" — and someone painting a mask over that
+    /// same face could not.
+    ///
+    /// Optional-with-default so a sidecar written before these existed still decodes.
     var exposure = 0.0, contrast = 0.0, saturation = 0.0
+    var shadows = 0.0, highlights = 0.0, vibrance = 0.0
     var tightness = 0.0
     var feather = 0.0
     var invert = false
@@ -3488,11 +3520,42 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
     }
     var hasCanvasHandles: Bool { kind == .radial || kind == .linear }
 
+    /// Adjustments addressed by the same key the renderer and `maskAdjustmentSpecs` use, so the
+    /// editor can be built from that list rather than from a hand-written set of sliders that
+    /// silently fell behind it.
+    subscript(adjustment key: String) -> Double {
+        get {
+            switch key {
+            case "exposure_ev": return exposure
+            case "contrast":    return contrast
+            case "saturation":  return saturation
+            case "shadows":     return shadows
+            case "highlights":  return highlights
+            case "vibrance":    return vibrance
+            default:            return 0
+            }
+        }
+        set {
+            switch key {
+            case "exposure_ev": exposure = newValue
+            case "contrast":    contrast = newValue
+            case "saturation":  saturation = newValue
+            case "shadows":     shadows = newValue
+            case "highlights":  highlights = newValue
+            case "vibrance":    vibrance = newValue
+            default:            break
+            }
+        }
+    }
+
     func toMask() -> Mask {
         var adj: [String: Double] = [:]
         if exposure != 0 { adj["exposure_ev"] = exposure }
         if contrast != 0 { adj["contrast"] = contrast }
         if saturation != 0 { adj["saturation"] = saturation }
+        if shadows != 0 { adj["shadows"] = shadows }
+        if highlights != 0 { adj["highlights"] = highlights }
+        if vibrance != 0 { adj["vibrance"] = vibrance }
         let f = feather
         let t = tightness
         let inv = invert
@@ -3628,9 +3691,21 @@ struct UserMaskEditor: View {
             }
 
             Rectangle().fill(Theme.hairline).frame(height: 1)
-            ToneSlider(label: "Exposure", value: $mask.exposure, range: -3...3, step: 0.05, unit: " EV", onChange: onChange, identity: .exposure)
-            ToneSlider(label: "Contrast", value: $mask.contrast, range: -100...100, step: 1, unit: "", onChange: onChange, identity: .contrast)
-            ToneSlider(label: "Saturation", value: $mask.saturation, range: -100...100, step: 1, unit: "", onChange: onChange, identity: .saturation(hue: nil))
+            // Built from the SAME list the auto-mask panel uses, rather than a hand-written
+            // subset. These two editors had drifted: the auto masks offered six adjustments and
+            // hand-drawn ones offered three, so half the renderer's local capability was
+            // unreachable on the masks people actually draw. Driving both from
+            // `maskAdjustmentSpecs` is what stops that happening again — add a control there and
+            // it appears in both places, with the same range and the same label.
+            ForEach(AppState.maskAdjustmentSpecs, id: \.key) { spec in
+                ToneSlider(label: spec.label,
+                           value: Binding(get: { mask[adjustment: spec.key] },
+                                          set: { mask[adjustment: spec.key] = $0 }),
+                           range: spec.range,
+                           step: spec.key == "exposure_ev" ? 0.05 : 1,
+                           unit: spec.unit, onChange: onChange,
+                           identity: ToneIdentity.adjustment(spec.key))
+            }
             ToneSlider(label: "Tightness", value: $mask.tightness, range: 0...100, step: 1, unit: "", onChange: onChange)
         }
         .padding(11)

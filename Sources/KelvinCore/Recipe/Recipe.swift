@@ -284,6 +284,23 @@ public struct HSLAdjustment: Codable, Equatable, Sendable {
 /// (invariant #6). Adjustments are kept as a keyed map for M1 since the renderer does not
 /// yet apply masks; the typed local-adjustment struct lands with mask rendering.
 public struct Mask: Codable, Equatable, Sendable {
+
+    /// Every local adjustment the renderer honours inside a mask, in the order a photographer
+    /// works: light first, then colour. THIS IS THE CONTRACT between the renderer and every UI
+    /// that offers mask controls.
+    ///
+    /// It lives here, tested, because the two mask editors in the app had silently drifted apart:
+    /// the auto masks (subject, sky) offered all six while every hand-drawn mask — radial,
+    /// graduated, brush, colour, luminance, skin, background, subject, instance — could only carry
+    /// exposure, contrast and saturation. Half the renderer's local capability was unreachable on
+    /// the masks people actually draw, including `shadows`, which the engine's own subject mask
+    /// reaches for deliberately as the tone-fair way to open up a face.
+    ///
+    /// Two hand-written lists cannot disagree if there is only one list.
+    public static let adjustmentKeys = [
+        "exposure_ev", "highlights", "shadows", "contrast", "saturation", "vibrance"
+    ]
+
     public var id: String
     public var type: String
     public var source: String?

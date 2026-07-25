@@ -41,10 +41,23 @@ final class MaskAdjustmentTests: XCTestCase {
     /// `CIHighlightShadowAdjust` documents its highlight amount as 0…1 with 1.0 meaning no change,
     /// so the renderer's `1.0 + highlights/100` clamps for any positive value. Measured at exactly
     /// ΔE 0.0 — a dead control, found by this test. The panel therefore offers -100…0 only.
-    private static let exposed: [(key: String, positiveWorks: Bool)] = [
-        ("exposure_ev", true), ("highlights", false), ("shadows", true),
-        ("contrast", true), ("saturation", true), ("vibrance", true)
-    ]
+    /// Derived from `Mask.adjustmentKeys` rather than hand-listed, so adding a key to the
+    /// renderer's contract without proving it is live fails here instead of shipping a dead
+    /// slider. `positiveWorks` is the per-key exception, not the source of the key list.
+    private static let positiveIsDead: Set<String> = ["highlights"]
+    private static let exposed: [(key: String, positiveWorks: Bool)] =
+        Mask.adjustmentKeys.map { ($0, !positiveIsDead.contains($0)) }
+
+    /// The list the UI builds its sliders from is the list the renderer honours — asserted, not
+    /// assumed, because the app package has no test target of its own to assert it there.
+    func testTheContractCoversExactlyWhatTheRendererHonours() {
+        XCTAssertEqual(Set(Mask.adjustmentKeys).count, Mask.adjustmentKeys.count,
+                       "duplicate key in the contract")
+        XCTAssertEqual(Set(Mask.adjustmentKeys),
+                       ["exposure_ev", "highlights", "shadows", "contrast", "saturation", "vibrance"],
+                       "the renderer's masked-adjustment contract changed — update every mask "
+                       + "editor that builds sliders from it, and prove the new key is live below")
+    }
 
     func testEveryExposedMaskAdjustmentChangesTheRender() throws {
         let neutral = render([:])
