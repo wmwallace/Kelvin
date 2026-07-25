@@ -56,11 +56,19 @@ public enum CraftFix {
     public static let minGainFraction = 0.25
     /// Newly clipped colour, as a fraction of the frame, that makes a pass unacceptable.
     public static let maxAddedColourClip = 0.01
-    /// The span an automatic white-balance correction may land in — tungsten to deep shade, the
-    /// same range the temperature slider exposes. The schema allows 2000–12000 K because a
-    /// photographer may want a look out there; an *automatic* correction that walks past 9500 K is
-    /// not correcting a cast any more, it is inventing one, and the UI could not show it.
-    public static let whiteBalanceCorrection: ClosedRange<Double> = 2500 ... 9500
+    /// The span an automatic white-balance correction may land in.
+    ///
+    /// The upper bound was 9500 K, on the reasoning that an automatic correction reaching past it
+    /// is inventing a cast rather than correcting one. That reads sensibly and is wrong, because
+    /// Kelvin flatters the warm end: 2500 K is +246 mired of warming from neutral, while 9500 K is
+    /// only −48.5 mired of cooling. The span allowed five times more correction one way than the
+    /// other, which is not a judgement anybody made — it is the Kelvin scale fooling the eye, the
+    /// same way it fooled the estimator (see `RecipeEngine.temperature(correctingChromaB:)`).
+    ///
+    /// Opened to the schema's own limit, which buys −70.5 mired and takes the strongest fully
+    /// correctable warm cast from about chroma-b 9 to about 13. Still lopsided, because cooling is
+    /// bounded by 0 mired however high the Kelvin goes; nothing here can change that.
+    public static let whiteBalanceCorrection: ClosedRange<Double> = 2500 ... 12000
 
     /// The same idea as `whiteBalanceCorrection`, for the tone and colour controls: how far from
     /// neutral an *automatic* correction may leave a slider, whatever the photo.
@@ -330,7 +338,17 @@ public enum CraftFix {
             // the measured image already carries it, so taking the neutralising value as an
             // absolute would discard it and over-correct on the next pass.
             let wb = RecipeEngine.neutralisingWhiteBalance(for: reading.stats)
-            s.temperatureK = wb.temperatureK - 6500
+            // Ask only for what a correction is allowed to land on. `fullyLands` refuses a pass
+            // that any limit has truncated — rightly, for a multi-slider step, where accepting the
+            // half that fitted is how `whites` walked to −40 while `highlights` stood still. But a
+            // cast strong enough to want more cooling than exists is not a partial step, it is the
+            // whole available step: asking for 12000 K when 9500 was the cap made the pass get
+            // thrown away entirely, so the button did NOTHING on exactly the casts that needed it
+            // most. Clamping the target here means the step always lands, and a second click can
+            // no longer move a value already at the limit, so it still terminates.
+            let target = min(max(wb.temperatureK, CraftFix.whiteBalanceCorrection.lowerBound),
+                             CraftFix.whiteBalanceCorrection.upperBound)
+            s.temperatureK = target - 6500
             s.tint = wb.tint
         case .shadowDetailLost:
             s.shadows = 20; s.blacks = 12; s.contrast = -6

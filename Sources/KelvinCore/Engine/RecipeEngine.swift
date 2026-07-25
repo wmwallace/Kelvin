@@ -544,7 +544,7 @@ public enum RecipeEngine {
         let castMagnitude = (s.chromaA * s.chromaA + s.chromaB * s.chromaB).squareRoot()
         guard strength > 0, castMagnitude > 6.0 else { return (nil, 0) }
 
-        let kelvin = 6500.0 + s.chromaB * 70.0 * strength
+        let kelvin = temperature(correctingChromaB: s.chromaB, strength: strength)
         let tint = s.chromaA * 1.8 * strength
 
         return (
@@ -564,8 +564,47 @@ public enum RecipeEngine {
     public static func neutralisingWhiteBalance(
         for s: ImageStatistics
     ) -> (temperatureK: Double, tint: Double) {
-        (roundedClamp(6500 + s.chromaB * 70, to: Ranges.temperatureK, step: 10),
+        (roundedClamp(temperature(correctingChromaB: s.chromaB), to: Ranges.temperatureK, step: 10),
          roundedClamp(s.chromaA * 1.8, to: Ranges.tint, step: 1))
+    }
+
+    /// Mired shift per unit of measured chroma-b, measured against the real renderer.
+    ///
+    /// Calibrated by sweeping the temperature that actually minimises the residual cast on graded
+    /// ramps, and it is strikingly consistent once you are in the right units: −5.25, −5.56, −5.04
+    /// and −5.48 mired per unit of b across four cast strengths in both directions, each leaving a
+    /// residual magnitude of about 1 — neutral, for practical purposes.
+    static let miredPerChromaB = 5.33
+
+    /// The temperature that pulls a measured chroma-b cast back toward neutral.
+    ///
+    /// COLOUR TEMPERATURE CORRECTION IS LINEAR IN MIRED (10⁶/K), NOT IN KELVIN. This was
+    /// `6500 + chromaB * 70` — a fixed number of Kelvin per unit of cast — and a Kelvin is not a
+    /// fixed amount of colour. Near 6500 K it buys about 0.024 mired; up at 11000 K it buys 0.008.
+    /// So the correction was progressively too weak the further it had to go, and worst in the
+    /// direction that needs the most travel. Measured end to end on the Fix button, the old
+    /// mapping under-corrected by 2.3× on a cool cast and 3.7× on a warm one, which is why the
+    /// button visibly did nothing on a strong warm cast: it moved 28.5 → 23.7 and left the flag up.
+    ///
+    /// Working in mired makes the response flat, so one calibrated constant serves every strength
+    /// and both directions.
+    ///
+    /// KNOWN LIMIT, and it is not this function's to fix. `Ranges.temperatureK` (2000…12000) is
+    /// wildly lopsided in the units that matter: 2000 K is +346 mired of warming from neutral,
+    /// while 12000 K is only −70.5 mired of cooling. Cooling therefore runs out at about
+    /// chroma-b 13, and a stronger warm cast than that cannot be fully neutralised at any legal
+    /// temperature — the sweep bottoms out against the range, not against the estimate. This
+    /// returns the best available correction and clamps; whether the range should be widened is an
+    /// owner's decision, since it is the recipe schema's validated range (see CLAUDE.md).
+    static func temperature(correctingChromaB b: Double, strength: Double = 1.0) -> Double {
+        let neutralMired = 1e6 / 6500.0
+        // Clamped in MIRED, before the reciprocal. A strong warm cast drives the target toward
+        // zero, where 1e6/mired runs away to infinity — clamping afterwards would mean converting
+        // a garbage number first.
+        let coolestMired = 1e6 / Ranges.temperatureK.upperBound
+        let warmestMired = 1e6 / Ranges.temperatureK.lowerBound
+        let target = neutralMired - b * miredPerChromaB * strength
+        return 1e6 / min(max(target, coolestMired), warmestMired)
     }
 
     /// How hard to correct colour, by intent and lighting mood. Literal intents correct
