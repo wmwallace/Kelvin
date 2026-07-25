@@ -44,3 +44,7 @@ build/
 # what to do about specific commits, and personal details — internal judgement calls, not decisions.
 # The decisions themselves live in docs/DECISIONS.md, and the release *process* is docs/RELEASING.md.
 *.local.md
+
+# Built application bundles and disk images. 1.7 GB of app does not belong in git — it is
+# assembled by scripts/package-app.sh and attached to a GitHub release.
+/dist/
