@@ -140,3 +140,121 @@ final class ExportMetadataTests: XCTestCase {
                        try ImageWriter.rgba8Bytes(image))
     }
 }
+
+/// Formats, sizes and colour spaces — the export options a photographer actually asks for.
+///
+/// Every assertion reads the written file back through ImageIO. "16-bit" and "never upscales" are
+/// exactly the sort of claim that is easy to make in a menu and quietly wrong on disk.
+final class ExportFormatTests: XCTestCase {
+
+    private var directory: URL!
+
+    override func setUpWithError() throws {
+        directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("kelvin-export-format-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    private func properties(of url: URL) throws -> [String: Any] {
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil))
+        return try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any])
+    }
+
+    private let image = TestSupport.makeGradientImage(width: 400, height: 300)
+
+    func testEveryFormatWritesAFileThatReadsBack() throws {
+        for format in [ImageWriter.Format.jpeg(quality: 0.9), .png, .tiff16, .heic(quality: 0.9)] {
+            let out = directory.appendingPathComponent("out.\(format.fileExtension)")
+            try ImageWriter.write(image, to: out, format: format)
+            let written = try properties(of: out)
+            XCTAssertEqual(written[kCGImagePropertyPixelWidth as String] as? Int, 400,
+                           "\(format.label) lost its dimensions")
+        }
+    }
+
+    /// The whole reason to choose TIFF: eight bits is enough to look at and not enough to edit
+    /// again. A 16-bit container holding 8 bits of data would be a bigger file and no more useful.
+    func testTIFFIsActuallySixteenBitsPerChannel() throws {
+        let out = directory.appendingPathComponent("deep.tif")
+        try ImageWriter.write(image, to: out, format: .tiff16)
+        XCTAssertEqual(try properties(of: out)[kCGImagePropertyDepth as String] as? Int, 16)
+    }
+
+    /// Long edge, because that is the number every submission guideline is written in, and the only
+    /// one that means the same thing for a portrait frame and a landscape one.
+    func testLongEdgeResizesTheLongestSideWhicheverItIs() throws {
+        let landscape = directory.appendingPathComponent("wide.png")
+        try ImageWriter.write(image, to: landscape, format: .png, size: .longEdge(200))
+        var written = try properties(of: landscape)
+        XCTAssertEqual(written[kCGImagePropertyPixelWidth as String] as? Int, 200)
+        XCTAssertEqual(written[kCGImagePropertyPixelHeight as String] as? Int, 150, "aspect kept")
+
+        let portrait = directory.appendingPathComponent("tall.png")
+        try ImageWriter.write(TestSupport.makeGradientImage(width: 300, height: 400),
+                              to: portrait, format: .png, size: .longEdge(200))
+        written = try properties(of: portrait)
+        XCTAssertEqual(written[kCGImagePropertyPixelHeight as String] as? Int, 200)
+    }
+
+    /// Asking for more pixels than exist must not invent them. Upscaling makes a larger file and a
+    /// softer photograph, and no export dialog should do that quietly.
+    func testAskingForMoreThanTheOriginalNeverUpscales() throws {
+        let out = directory.appendingPathComponent("big.png")
+        try ImageWriter.write(image, to: out, format: .png, size: .longEdge(4000))
+        XCTAssertEqual(try properties(of: out)[kCGImagePropertyPixelWidth as String] as? Int, 400)
+    }
+
+    /// The profile has to be IN the file. A wide-gamut export that does not say it is wide-gamut is
+    /// worse than an sRGB one, because everything downstream then guesses — and guesses sRGB.
+    ///
+    /// Asserted on the embedded ICC PROFILE rather than on `CGColorSpace.name`, because the name is
+    /// not a reliable round-trip: measured, sRGB and Display P3 both read back as
+    /// `kCGColorSpaceSRGB`/`kCGColorSpaceDisplayP3`, while Adobe RGB reads back with a nil name and a
+    /// perfectly good 544-byte profile. A test written against the name would have called a correct
+    /// Adobe RGB export a failure, which is how a real behaviour gets "fixed" into a wrong one.
+    func testTheColourSpaceIsWrittenIntoTheFile() throws {
+        func profile(of url: URL) throws -> Data {
+            let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil))
+            let cg = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+            let space = try XCTUnwrap(cg.colorSpace, "no colour space at all")
+            return try XCTUnwrap(space.copyICCData() as Data?, "no ICC profile embedded")
+        }
+
+        var profiles: [ImageWriter.ColorSpace: Data] = [:]
+        for space in ImageWriter.ColorSpace.allCases {
+            let out = directory.appendingPathComponent("\(space.rawValue).png")
+            try ImageWriter.write(image, to: out, format: .png, colorSpace: space)
+            profiles[space] = try profile(of: out)
+        }
+
+        // Each is genuinely a different profile — nothing silently fell back to sRGB.
+        XCTAssertNotEqual(profiles[.displayP3], profiles[.sRGB], "Display P3 fell back to sRGB")
+        XCTAssertNotEqual(profiles[.adobeRGB], profiles[.sRGB], "Adobe RGB fell back to sRGB")
+        XCTAssertNotEqual(profiles[.adobeRGB], profiles[.displayP3])
+    }
+
+    /// Resizing must not undo the metadata decision — the two settings are independent, and a
+    /// photographer stripping location for a web-sized export is the most likely combination there is.
+    func testResizingStillHonoursTheMetadataPolicy() throws {
+        let source = directory.appendingPathComponent("src.jpg")
+        let cg = try XCTUnwrap(ImageWriter.context.createCGImage(image, from: image.extent))
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithURL(
+            source as CFURL, UTType.jpeg.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, cg, [
+            kCGImagePropertyGPSDictionary as String: [kCGImagePropertyGPSLatitude as String: 50.4]
+        ] as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+
+        let out = directory.appendingPathComponent("small.jpg")
+        try ImageWriter.write(try XCTUnwrap(CIImage(contentsOf: source)), to: out,
+                              format: .jpeg(quality: 0.9), metadata: .withoutLocation,
+                              size: .longEdge(100))
+        let written = try properties(of: out)
+        XCTAssertNil(written[kCGImagePropertyGPSDictionary as String], "location survived a resize")
+        XCTAssertEqual(written[kCGImagePropertyPixelWidth as String] as? Int, 100)
+    }
+}

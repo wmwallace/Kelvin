@@ -964,6 +964,44 @@ final class AppState: ObservableObject {
     }
     static let stripLocationKey = "export.stripLocation"
 
+    // The rest of the export configuration. Persisted for the same reason: a photographer who
+    // exports 2048 px sRGB JPEGs for a gallery does it every time, and re-choosing it per file is
+    // how the one that matters gets exported at the wrong size.
+    @Published var exportFormatId = UserDefaults.standard.string(forKey: "export.format") ?? "jpeg" {
+        didSet { UserDefaults.standard.set(exportFormatId, forKey: "export.format") }
+    }
+    @Published var exportQuality = UserDefaults.standard.object(forKey: "export.quality") as? Double ?? 0.97 {
+        didSet { UserDefaults.standard.set(exportQuality, forKey: "export.quality") }
+    }
+    /// 0 means full resolution. Stored as a plain number so the setting survives a schema change.
+    @Published var exportLongEdge = UserDefaults.standard.object(forKey: "export.longEdge") as? Int ?? 0 {
+        didSet { UserDefaults.standard.set(exportLongEdge, forKey: "export.longEdge") }
+    }
+    @Published var exportColorSpaceId = UserDefaults.standard.string(forKey: "export.colorSpace") ?? "sRGB" {
+        didSet { UserDefaults.standard.set(exportColorSpaceId, forKey: "export.colorSpace") }
+    }
+    @Published var exportNamingId = UserDefaults.standard.string(forKey: "export.naming") ?? "descriptive" {
+        didSet { UserDefaults.standard.set(exportNamingId, forKey: "export.naming") }
+    }
+
+    var exportFormat: ImageWriter.Format {
+        switch exportFormatId {
+        case "png":    return .png
+        case "tiff16": return .tiff16
+        case "heic":   return .heic(quality: exportQuality)
+        default:       return .jpeg(quality: exportQuality)
+        }
+    }
+    var exportSize: ImageWriter.Size {
+        exportLongEdge > 0 ? .longEdge(exportLongEdge) : .fullResolution
+    }
+    var exportColorSpace: ImageWriter.ColorSpace {
+        ImageWriter.ColorSpace(rawValue: exportColorSpaceId) ?? .sRGB
+    }
+    var exportNaming: ExportNaming.Scheme {
+        ExportNaming.Scheme(rawValue: exportNamingId) ?? .descriptive
+    }
+
     var exportMetadata: ImageWriter.MetadataPolicy {
         stripLocationOnExport ? .withoutLocation : .asShot
     }
@@ -1057,7 +1095,8 @@ final class AppState: ObservableObject {
         guard let url = imageURL else { return "\(Branding.exportStem)." + ext }
         let look = activeLookId.flatMap { LookPreset.named($0)?.name }
             ?? candidates.first { $0.id == selectedCandidateId }?.label
-        return ExportNaming.filename(for: url, perception: perception, look: look, ext: ext)
+        return ExportNaming.filename(for: url, perception: perception, look: look, ext: ext,
+                                     scheme: exportNaming)
     }
 
     /// "12 Mar, 14:03" from an ISO timestamp — a restored edit should say *when*, not show a
@@ -2465,7 +2504,8 @@ final class AppState: ObservableObject {
             userMasks.contains { $0.kind == .instance && $0.instanceId == inst.id }
         }.map(\.reference)
         let input = ExportInput(fullRes: fullRes, recipe: recipe, url: exportURL,
-                                metadata: exportMetadata)
+                                metadata: exportMetadata, format: exportFormat,
+                                size: exportSize, colorSpace: exportColorSpace)
 
         // Carries back WHICH subject masks could not be found again at full resolution, because the
         // renderer's response to a missing bitmap is to skip that mask silently. A per-subject local
@@ -2488,7 +2528,8 @@ final class AppState: ObservableObject {
                 }
                 try ImageWriter.write(
                     Renderer.render(input.fullRes, with: input.recipe, maskBitmaps: bitmaps),
-                    to: input.url, metadata: input.metadata)
+                    to: input.url, format: input.format, metadata: input.metadata,
+                    size: input.size, colorSpace: input.colorSpace)
                 return .success(lost)
             } catch { return .failure(error) }
         }.value
@@ -2524,6 +2565,9 @@ final class AppState: ObservableObject {
         let recipe: Recipe
         let url: URL
         let metadata: ImageWriter.MetadataPolicy
+        let format: ImageWriter.Format
+        let size: ImageWriter.Size
+        let colorSpace: ImageWriter.ColorSpace
     }
 
     /// Apply the chosen *look* across a folder with per-photo intelligence: the style is held
@@ -3945,7 +3989,7 @@ struct ContentView: View {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.jpeg, .png]
         // Suggest a name that says what the photo IS — still fully editable in the panel.
-        panel.nameFieldStringValue = appState.suggestedExportName()
+        panel.nameFieldStringValue = appState.suggestedExportName(ext: appState.exportFormat.fileExtension)
         // The one thing about an export that is not visible in the file you get back.
         //
         // In the panel rather than in the sidebar, because it is a property of THIS export and the

@@ -645,8 +645,53 @@ struct OpenOptions: View {
 struct ExportOptions: View {
     @ObservedObject var appState: AppState
 
+    private static let sizes: [(String, Int)] = [
+        ("Full resolution", 0), ("4096 px", 4096), ("2048 px", 2048),
+        ("1600 px", 1600), ("1080 px", 1080)
+    ]
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                Picker("Format", selection: $appState.exportFormatId) {
+                    Text("JPEG").tag("jpeg")
+                    Text("HEIC").tag("heic")
+                    Text("PNG").tag("png")
+                    Text("TIFF 16-bit").tag("tiff16")
+                }
+                .frame(width: 190)
+
+                // Long edge, not width: it is the number every submission guideline is written in
+                // and the only one that means the same thing for a portrait and a landscape frame.
+                Picker("Size", selection: $appState.exportLongEdge) {
+                    ForEach(Self.sizes, id: \.1) { Text($0.0).tag($0.1) }
+                }
+                .frame(width: 190)
+            }
+
+            HStack(spacing: 12) {
+                Picker("Colour", selection: $appState.exportColorSpaceId) {
+                    ForEach(ImageWriter.ColorSpace.allCases, id: \.rawValue) {
+                        Text($0.label).tag($0.rawValue)
+                    }
+                }
+                .frame(width: 260)
+
+                // Shown only where it means something. A quality slider next to PNG is a control
+                // that does nothing, which is the thing this codebase keeps finding and removing.
+                if appState.exportFormat.isLossy {
+                    HStack(spacing: 6) {
+                        Text("Quality").font(.callout)
+                        Slider(value: $appState.exportQuality, in: 0.4...1)
+                            .frame(width: 90)
+                        Text("\(Int(appState.exportQuality * 100))")
+                            .font(.callout).monospacedDigit().frame(width: 26, alignment: .trailing)
+                    }
+                }
+            }
+
+            Divider()
+
             Toggle(isOn: $appState.stripLocationOnExport) {
                 Text("Remove location and camera serial")
             }
@@ -660,8 +705,8 @@ struct ExportOptions: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 20)
-        .padding(.vertical, 12)
-        .frame(width: 420, alignment: .leading)
+        .padding(.vertical, 14)
+        .frame(width: 520, alignment: .leading)
     }
 }
 

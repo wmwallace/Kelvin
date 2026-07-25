@@ -194,8 +194,8 @@ final class BatchApplyTests: XCTestCase {
         XCTAssertEqual(outcome.written.first?.lastPathComponent,
                        ExportNaming.filename(for: src, perception: nil, look: "Warm portrait", ext: "png"))
         // Traceability: whatever else the name says, the original stem is still in there.
-        XCTAssertTrue(outcome.written.first?.lastPathComponent.contains("dsc6595") == true,
-                      "the export must still map back to the frame on the card")
+        XCTAssertTrue(outcome.written.first?.lastPathComponent.contains("_DSC6595") == true,
+                      "the export must still map back to the frame on the card, by its real name")
     }
 
     func testDeterministicOrder() throws {

@@ -51,6 +51,22 @@ private struct GeneralSettings: View {
             }
 
             Section {
+                Picker("File names", selection: $appState.exportNamingId) {
+                    ForEach(ExportNaming.Scheme.allCases, id: \.rawValue) {
+                        Text($0.label).tag($0.rawValue)
+                    }
+                }
+                Text(ExportNaming.Scheme(rawValue: appState.exportNamingId)?.example ?? "")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundColor(.secondary)
+                if appState.exportNamingId == ExportNaming.Scheme.descriptive.rawValue {
+                    // Said once, here, rather than discovered later on a file already sent to a
+                    // client: these words come from a model reading the photograph, and models are
+                    // wrong sometimes.
+                    Text("Descriptive names come from the scene reading, so they can occasionally be wrong — and a filename is hard to take back.")
+                        .font(.caption).foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Toggle("Remove location and camera serial when exporting",
                        isOn: $appState.stripLocationOnExport)
                 Text(appState.stripLocationOnExport

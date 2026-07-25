@@ -6,15 +6,25 @@ import Metal
 /// Encoding a rendered `CIImage` to a file, plus a deterministic raster helper used by
 /// tests to compare pixels. Output is written in sRGB.
 public enum ImageWriter {
-    public enum Format: Sendable {
+    public enum Format: Sendable, Equatable {
         case jpeg(quality: Double)
         case png
+        /// 16 bits per channel, uncompressed. The format to hand to another editor, or to keep:
+        /// eight bits is plenty to LOOK at and not enough to edit again, because every further
+        /// curve quantises what is already quantised. Large — roughly six times a q0.97 JPEG.
+        case tiff16
+        /// Modern, small, and what a phone shoots. Roughly half a JPEG at matching quality, at the
+        /// cost of software older than about 2017 not opening it.
+        case heic(quality: Double)
 
         /// Pick a format from an output path's extension. JPEG defaults to q0.97 (near-lossless);
-        /// PNG is lossless. The photographer's output should never be silently over-compressed.
+        /// PNG and TIFF are lossless. The photographer's output should never be silently
+        /// over-compressed.
         public static func inferred(from url: URL) -> Format {
             switch url.pathExtension.lowercased() {
             case "png": return .png
+            case "tif", "tiff": return .tiff16
+            case "heic", "heif": return .heic(quality: 0.9)
             default: return .jpeg(quality: 0.97)
             }
         }
@@ -23,9 +33,83 @@ public enum ImageWriter {
         /// caller that guessed wrong would hand the user a `.png` file full of JPEG.
         public var fileExtension: String {
             switch self {
-            case .png: return "png"
-            case .jpeg: return "jpg"
+            case .png:    return "png"
+            case .jpeg:   return "jpg"
+            case .tiff16: return "tif"
+            case .heic:   return "heic"
             }
+        }
+
+        /// Whether this format throws pixels away. Drives whether a quality control is shown at all.
+        public var isLossy: Bool {
+            switch self {
+            case .jpeg, .heic:  return true
+            case .png, .tiff16: return false
+            }
+        }
+
+        public var label: String {
+            switch self {
+            case .jpeg:   return "JPEG"
+            case .png:    return "PNG"
+            case .tiff16: return "TIFF (16-bit)"
+            case .heic:   return "HEIC"
+            }
+        }
+    }
+
+    /// The colour space an export is written in.
+    ///
+    /// It was sRGB, always, with no way to say otherwise — and for a photo editor that is a real
+    /// limit rather than a simplification. A frame with saturated reds or deep cyans has colours
+    /// sRGB cannot represent, and writing it there clips them permanently. The trade runs the other
+    /// way too, which is why sRGB stays the default: a wide-gamut file shown by software that
+    /// ignores the profile looks WRONG — flat and undersaturated — and most of the web is still that
+    /// software.
+    public enum ColorSpace: String, Sendable, CaseIterable, Codable {
+        /// The safe answer. Anything, anywhere, looks approximately right.
+        case sRGB
+        /// Wider, and what modern Macs and iPhones display natively. The right choice for a file
+        /// staying inside the Apple ecosystem or going to a colour-managed viewer.
+        case displayP3
+        /// Wider in the cyans and greens; the print and prepress convention.
+        case adobeRGB
+
+        public var label: String {
+            switch self {
+            case .sRGB:      return "sRGB — safe everywhere"
+            case .displayP3: return "Display P3 — wide gamut"
+            case .adobeRGB:  return "Adobe RGB — print"
+            }
+        }
+
+        var cgColorSpace: CGColorSpace {
+            let name: CFString
+            switch self {
+            case .sRGB:      name = CGColorSpace.sRGB
+            case .displayP3: name = CGColorSpace.displayP3
+            case .adobeRGB:  name = CGColorSpace.adobeRGB1998
+            }
+            return CGColorSpace(name: name) ?? outputColorSpace
+        }
+    }
+
+    /// How large the exported file is, independent of the format it is written in.
+    ///
+    /// Expressed as a LONG EDGE rather than a width or a percentage, because that is the number
+    /// every submission guideline and every gallery is specified in, and it is the only one that
+    /// means the same thing for a portrait and a landscape frame.
+    public enum Size: Sendable, Equatable {
+        case fullResolution
+        case longEdge(Int)
+
+        /// Never upscales. Asking for 4000 px from a 3000 px frame gets 3000 px — inventing pixels
+        /// makes a bigger file and a softer photograph, and no export dialog should do it quietly.
+        func scale(for extent: CGRect) -> Double {
+            guard case .longEdge(let target) = self else { return 1 }
+            let longest = max(extent.width, extent.height)
+            guard longest > 0 else { return 1 }
+            return min(1, Double(target) / Double(longest))
         }
     }
 
@@ -82,9 +166,24 @@ public enum ImageWriter {
     static let outputColorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
 
     public static func write(_ image: CIImage, to url: URL, format: Format? = nil,
-                            metadata: MetadataPolicy = .asShot) throws {
+                            metadata: MetadataPolicy = .asShot,
+                            size: Size = .fullResolution,
+                            colorSpace: ColorSpace = .sRGB) throws {
         let fmt = format ?? Format.inferred(from: url)
-        let image = metadata == .asShot ? image : scrubbed(image)
+        var image = metadata == .asShot ? image : scrubbed(image)
+
+        // Resample BEFORE encoding, and with Lanczos — the difference between a downscale that
+        // keeps detail and one that aliases fences and hair into moiré. `CILanczosScaleTransform`
+        // carries the image's metadata through, so the policy above still holds.
+        let factor = size.scale(for: image.extent)
+        if factor < 1 {
+            let scaled = image.applyingFilter("CILanczosScaleTransform",
+                                              parameters: [kCIInputScaleKey: factor,
+                                                           kCIInputAspectRatioKey: 1.0])
+            image = scaled.settingProperties(image.properties)
+        }
+
+        let space = colorSpace.cgColorSpace
         do {
             switch fmt {
             case .jpeg(let quality):
@@ -94,7 +193,7 @@ public enum ImageWriter {
                 try exportContext.writeJPEGRepresentation(
                     of: image,
                     to: url,
-                    colorSpace: outputColorSpace,
+                    colorSpace: space,
                     options: [qualityKey: max(0, min(1, quality))]
                 )
             case .png:
@@ -102,8 +201,28 @@ public enum ImageWriter {
                     of: image,
                     to: url,
                     format: .RGBA8,
-                    colorSpace: outputColorSpace,
+                    colorSpace: space,
                     options: [:]
+                )
+            case .tiff16:
+                // RGBA16, not RGBA8: a 16-bit container holding 8 bits of data would be a larger
+                // file that is no more editable, which is the whole reason to choose TIFF.
+                try exportContext.writeTIFFRepresentation(
+                    of: image,
+                    to: url,
+                    format: .RGBA16,
+                    colorSpace: space,
+                    options: [:]
+                )
+            case .heic(let quality):
+                let qualityKey = CIImageRepresentationOption(
+                    rawValue: kCGImageDestinationLossyCompressionQuality as String)
+                try exportContext.writeHEIFRepresentation(
+                    of: image,
+                    to: url,
+                    format: .RGBA8,
+                    colorSpace: space,
+                    options: [qualityKey: max(0, min(1, quality))]
                 )
             }
         } catch {

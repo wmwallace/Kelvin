@@ -10,23 +10,72 @@ import Foundation
 ///
 /// Three rules shape the format, all of them about not being clever at the user's expense:
 ///
-///   1. **The original stem always survives, and comes first.** `_DSC6595` is how the file maps
-///      back to the RAW on the card, and to every other copy of it. A naming scheme that breaks
-///      that traceability is worse than no scheme.
+///   1. **The original stem always survives VERBATIM, and comes first.** `_DSC6595` is how the file
+///      maps back to the RAW on the card, and to every other copy of it. A naming scheme that
+///      breaks that traceability is worse than no scheme.
+///
+///      This rule was stated here from the beginning and the code broke it anyway: `sanitize` was
+///      applied to the stem as well as the tokens, so `_DSC6595` exported as `dsc6595` and
+///      `IMG_1234` as `img-1234`. The case was gone, the underscore had become a hyphen, and
+///      `ls _DSC6595*` found nothing. The stem arrived from a filesystem, so it was already a
+///      legal filename — sanitising it could only ever destroy information. On Nikon bodies the
+///      leading underscore is not even decoration; it marks Adobe RGB.
 ///   2. **Only describe what was actually judged.** Tokens come from the perception, never from
 ///      guesses, and anything the model was unsure of is left out rather than asserted.
 ///   3. **No duplication.** If the stem already says "sunset", the scheme doesn't say it twice.
 public enum ExportNaming {
+
+    /// How much of what Kelvin knows ends up in the filename.
+    ///
+    /// A choice rather than a fixed policy, because the right answer is a matter of how someone
+    /// works and the wrong answer is permanent. Descriptive names are genuinely useful — a
+    /// photographer hunting for that backlit beach frame can type "backlit" into Finder — but every
+    /// token is a MODEL JUDGEMENT written somewhere very durable. `docs/DECISIONS.md` D-model-3
+    /// records four models disagreeing about whether a 10:22 AM frame was golden hour; three were
+    /// wrong. A wrong slider is undone with a drag, and a wrong filename goes to a client.
+    public enum Scheme: String, CaseIterable, Sendable, Codable {
+        /// `_DSC6595` — exactly what came in. Collisions are handled by `uniqueURL`.
+        case original
+        /// `_DSC6595-Edit` — Lightroom's convention, and the one most existing workflows expect.
+        case edited
+        /// `_DSC6595_natural` — the look, for when several versions of one frame are exported.
+        case look
+        /// `_DSC6595_beach_backlit_natural` — everything the scene read supports.
+        case descriptive
+
+        public var label: String {
+            switch self {
+            case .original:    return "Original name"
+            case .edited:      return "Original + “-Edit”"
+            case .look:        return "Original + look"
+            case .descriptive: return "Describe the photo"
+            }
+        }
+
+        /// What this scheme would produce for a representative frame, for a settings preview.
+        /// Concrete beats abstract: nobody can picture "descriptive" until they see it.
+        public var example: String {
+            switch self {
+            case .original:    return "_DSC6595.jpg"
+            case .edited:      return "_DSC6595-Edit.jpg"
+            case .look:        return "_DSC6595_natural.jpg"
+            case .descriptive: return "_DSC6595_beach_backlit_natural.jpg"
+            }
+        }
+    }
 
     /// Build a filename stem (no extension) for an export.
     /// - Parameters:
     ///   - original: the source photo, whose stem is preserved.
     ///   - perception: what the model read, or nil to fall back to just the stem + look.
     ///   - look: the style or preset applied ("Natural", "Red filter"), if any.
-    public static func stem(for original: URL, perception: Perception?, look: String?) -> String {
-        let base = sanitize(original.deletingPathExtension().lastPathComponent)
+    public static func stem(for original: URL, perception: Perception?, look: String?,
+                            scheme: Scheme = .descriptive) -> String {
+        let base = preserved(original.deletingPathExtension().lastPathComponent)
         var parts = [base]
-        var used = Set(base.lowercased().split(separator: "-").map(String.init))
+        // Dedup still works case-insensitively and across both separators, so a file already called
+        // "sunset_landscape" or "Sunset-Landscape" does not get told what it is twice.
+        var used = Set(base.lowercased().split(whereSeparator: { $0 == "-" || $0 == "_" }).map(String.init))
 
         func add(_ token: String?) {
             guard let token, !token.isEmpty else { return }
@@ -38,7 +87,17 @@ public enum ExportNaming {
             used.formUnion(words)
         }
 
-        if let p = perception {
+        switch scheme {
+        case .original:
+            return base
+        case .edited:
+            // Lightroom's convention, and the one most photographers already have a workflow around.
+            return base + "-Edit"
+        case .look, .descriptive:
+            break
+        }
+
+        if scheme == .descriptive, let p = perception {
             // Scene first — it's the coarsest, most useful filter when scanning a folder.
             if p.scene != .other { add(p.scene.rawValue) }
             // Then the light, which is what actually distinguishes frames within a shoot.
@@ -62,9 +121,10 @@ public enum ExportNaming {
 
     /// A full filename, extension included.
     public static func filename(
-        for original: URL, perception: Perception?, look: String?, ext: String = "jpg"
+        for original: URL, perception: Perception?, look: String?, ext: String = "jpg",
+        scheme: Scheme = .descriptive
     ) -> String {
-        stem(for: original, perception: perception, look: look) + "." + ext
+        stem(for: original, perception: perception, look: look, scheme: scheme) + "." + ext
     }
 
     /// A destination that doesn't overwrite anything, by appending `-2`, `-3`, … if needed.
@@ -102,6 +162,20 @@ public enum ExportNaming {
         case .indoorTungsten: return "tungsten"
         case .indoorMixed, .indoorDaylight: return nil
         }
+    }
+
+    /// The original stem, unchanged — with only the two things a filesystem genuinely cannot take
+    /// removed.
+    ///
+    /// Deliberately NOT `sanitize`. This string was already a filename a moment ago, so anything it
+    /// contains is by definition legal; rewriting it can only lose the case and the separators that
+    /// make it match its RAW. A path separator cannot appear in a path component, and a leading dot
+    /// would hide the export, so those two are the whole job.
+    static func preserved(_ raw: String) -> String {
+        let cleaned = raw.replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        let trimmed = cleaned.drop(while: { $0 == "." })
+        return trimmed.isEmpty ? "export" : String(trimmed)
     }
 
     /// Lowercase, hyphenated, and safe on every filesystem — no separators, no spaces, no

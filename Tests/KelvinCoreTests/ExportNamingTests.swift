@@ -16,10 +16,11 @@ final class ExportNamingTests: XCTestCase {
 
     private let raw = URL(fileURLWithPath: "/photos/_DSC6595.ARW")
 
-    /// Traceability back to the file on the card matters more than any description.
+    /// Traceability back to the file on the card matters more than any description — and it is
+    /// traceability to `_DSC6595`, not to some lowercased approximation of it.
     func testOriginalStemAlwaysComesFirst() {
         let name = ExportNaming.stem(for: raw, perception: perception(), look: "Soft")
-        XCTAssertTrue(name.hasPrefix("dsc6595"), "got \(name)")
+        XCTAssertTrue(name.hasPrefix("_DSC6595"), "got \(name)")
     }
 
     func testDescribesSceneLightAndLook() {
@@ -45,18 +46,60 @@ final class ExportNamingTests: XCTestCase {
 
     func testWorksWithNoPerception() {
         let name = ExportNaming.stem(for: raw, perception: nil, look: "Natural")
-        XCTAssertEqual(name, "dsc6595_natural")
+        XCTAssertEqual(name, "_DSC6595_natural")
     }
 
-    /// Filenames have to survive every filesystem and sync client.
-    func testSanitisesAwkwardCharacters() {
+    /// THE ORIGINAL STEM SURVIVES BYTE FOR BYTE. This file's documentation has always claimed it
+    /// and the code has never done it: `sanitize` was applied to the stem too, so `_DSC6595` shipped
+    /// as `dsc6595` and `IMG_1234` as `img-1234`. The case was gone and the underscore had become a
+    /// hyphen, which breaks `ls _DSC6595*`, breaks matching an export back to its RAW by name, and —
+    /// on Nikon bodies — discards the leading underscore that marks Adobe RGB.
+    func testTheOriginalStemIsPreservedExactly() {
+        for stem in ["_DSC6595", "IMG_1234", "DSC_0001", "P1000123", "Shoot 2 Final"] {
+            let url = URL(fileURLWithPath: "/photos/\(stem).ARW")
+            let name = ExportNaming.stem(for: url, perception: nil, look: nil, scheme: .original)
+            XCTAssertEqual(name, stem, "the stem must arrive intact")
+        }
+    }
+
+    /// Each scheme is a different promise about how much judgement ends up on disk.
+    func testEverySchemeKeepsTheStemAndAddsOnlyWhatItPromises() {
+        let p = perception()
+        XCTAssertEqual(ExportNaming.stem(for: raw, perception: p, look: "Natural", scheme: .original),
+                       "_DSC6595")
+        XCTAssertEqual(ExportNaming.stem(for: raw, perception: p, look: "Natural", scheme: .edited),
+                       "_DSC6595-Edit")
+        XCTAssertEqual(ExportNaming.stem(for: raw, perception: p, look: "Natural", scheme: .look),
+                       "_DSC6595_natural")
+        // The descriptive scheme is the only one that writes a model judgement into a filename.
+        let described = ExportNaming.stem(for: raw, perception: p, look: "Natural", scheme: .descriptive)
+        XCTAssertTrue(described.hasPrefix("_DSC6595_"), described)
+        XCTAssertGreaterThan(described.count, "_DSC6595_natural".count, described)
+    }
+
+    /// A stem cannot contain a path separator, and a leading dot would hide the export. Everything
+    /// else a filesystem already accepted stays exactly as it was.
+    func testOnlyTheTwoImpossibleCharactersAreTouched() {
+        XCTAssertEqual(ExportNaming.preserved("a/b"), "a-b")
+        XCTAssertEqual(ExportNaming.preserved(".hidden"), "hidden")
+        XCTAssertEqual(ExportNaming.preserved("Perfectly Fine (2)"), "Perfectly Fine (2)")
+    }
+
+    /// WE sanitise what WE add. We do not sanitise what the photographer named.
+    ///
+    /// This test used to assert the opposite, and the opposite is presumptuous: `My Photo (final)
+    /// #2.jpg` already exists on their disk with spaces and parentheses, macOS accepted it, and
+    /// every other copy of that frame is called the same thing. Rewriting it to `my-photo-final-2`
+    /// breaks the one property the whole scheme is built on — that an export can be matched back to
+    /// its original. Tokens Kelvin appends are a different matter: those are ours to format, and
+    /// they stay lowercase and hyphenated.
+    func testSanitisesTokensButNeverTheUsersOwnName() {
         let url = URL(fileURLWithPath: "/photos/My Photo (final) #2.jpg")
         let name = ExportNaming.stem(for: url, perception: nil, look: "Red filter")
-        XCTAssertFalse(name.contains(" "), name)
-        XCTAssertFalse(name.contains("/"), name)
-        XCTAssertFalse(name.contains("#"), name)
-        XCTAssertFalse(name.contains("("), name)
-        XCTAssertTrue(name.contains("red-filter"), name)
+        XCTAssertTrue(name.hasPrefix("My Photo (final) #2"), "the photographer's name survives: \(name)")
+        XCTAssertTrue(name.contains("red-filter"), "our token is formatted: \(name)")
+        // The two a path component genuinely cannot carry are still handled.
+        XCTAssertFalse(ExportNaming.preserved("a/b").contains("/"))
     }
 
     func testStaysAReasonableLength() {
