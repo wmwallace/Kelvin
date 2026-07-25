@@ -235,8 +235,21 @@ of the existing endpoints. That changes the schema, so it is the owner's call (C
 
 ## D-model-3 — Perception model: measured alternatives, July 2026
 
-**Decision: stay on `Qwen2.5-VL-3B-Instruct-4bit`.** Nothing free currently beats it. Revisit when
-the Swift MLX stack can load Gemma 4.
+**The early default model is licensed for research and evaluation only, and needs replacing.**
+
+`Qwen/Qwen2.5-VL-3B-Instruct` is under `qwen-research`, whose text reads: *"You are granted a
+… limited license … FOR NON-COMMERCIAL PURPOSES ONLY"*, with *"Non-Commercial" defined as *"for
+research or evaluation purposes only"*, and *"If you are commercially using the Materials, you
+shall request a license from us."*
+
+It is the **only** model in its family with that licence. The 7B, the 32B, and every Qwen2-VL
+including the 2B are Apache 2.0. The default was picked for size and capability before anyone
+checked, and D-model-2's commercially-clean requirement is therefore not yet met. Nothing about this is urgent for a private repo and all of it is blocking before a
+first external user — the same deadline as the rename.
+
+**Recommendation: move to `Qwen2.5-VL-7B-Instruct` (Apache 2.0) unless the perception prompt can be
+made to work on `Qwen3.5-2B` (Apache 2.0), which would be both legal and faster.** Not swapped
+unilaterally: it costs ~1.8x perception time, and which trade to take is the owner's call.
 
 Perception costs **~6 s per photo** and is now the dominant cost of opening one — the rest of the
 load path is about 1.3 s. So the model is the biggest remaining performance lever, which is why
@@ -245,7 +258,11 @@ against real photographs, with weights cached, via `KELVIN_MODEL=<repo-id>`.
 
 | model | licence | inference | result |
 |---|---|---|---|
-| **Qwen2.5-VL-3B-4bit** (current) | — | **5.9–6.3 s** | correct on every frame tried |
+| **Qwen2.5-VL-3B-4bit** (current) | **`qwen-research` — NON-COMMERCIAL** | **5.9–6.3 s** | the most accurate of everything tried |
+| Qwen2.5-VL-7B-4bit | **Apache 2.0** | 10.4–11.2 s | works; better scene read, weaker lighting read |
+| Qwen3.5-2B-4bit | **Apache 2.0** | **4.5 s** | "golden-hour" on an overcast frame; "blue-hour / landscape" elsewhere, with an invented note about fisheye distortion |
+| Qwen3.5-4B-4bit | **Apache 2.0** | — | prose, no JSON at all — though its *reasoning* was right ("fits best under 'other'", matching the incumbent) |
+| Qwen2-VL-2B-4bit | **Apache 2.0** | — | no parseable JSON on either frame |
 | SmolVLM2-500M | Apache 2.0 | 2.5 s | "golden-hour" on an overcast frame; on another, *all twelve* problems at once |
 | SmolVLM2-2.2B | Apache 2.0 | slower than current | emitted malformed JSON (`subject` as a string) — hard parse failure |
 | Gemma 3 4B | Gemma Terms (commercial permitted, custom) | 11.0 s | good — arguably a better scene read ("portrait" where Qwen said "other") |
@@ -266,6 +283,22 @@ before the family is written off.
 
 **Gemma 4 is the one to watch.** Apache 2.0 with no custom terms, multimodal across 1B/4B/12B/27B.
 The blocker is tooling, not licence, and tooling moves.
+
+**The uncomfortable shape of this result:** the most accurate model tested is the one we may not
+ship. Every Apache-2.0 alternative is either slower (7B, Gemma 3), or faster but measurably worse at
+the categorical read that the entire engine is driven by (Qwen3.5-2B), or cannot produce parseable
+JSON at all (Qwen3.5-4B, Qwen2-VL-2B, SmolVLM2-2.2B).
+
+Two of those failures are *format*, not perception — Qwen3.5-4B reasoned correctly and then wrote
+prose. Qwen3.5 is a reasoning-mode family and the prompt was written for Qwen2.5. So the cheapest
+path to a legal AND faster perception layer is prompt work on Qwen3.5-2B, not a bigger model. That
+is worth trying before accepting the 1.8x cost of the 7B.
+
+**Verification note:** on IMG_5411 (EXIF: 10:22 AM, overcast) the incumbent 3B answered "overcast"
+while the 7B, Qwen3.5-2B and SmolVLM all answered "golden-hour" or "blue-hour". 10:22 is not golden
+hour, so the incumbent is right and the agreement among the others is not evidence against it. A
+wrong `condition` is not cosmetic: `wbStrength` halves for golden/blue hour, so it directly changes
+the white balance the engine applies.
 
 **Also found:** `kelvin-perceive` printed "Loading Qwen2.5-VL-3B-Instruct-4bit" regardless of
 `KELVIN_MODEL`, so throughout an A/B it named the model that was not running. Fixed — but it means
