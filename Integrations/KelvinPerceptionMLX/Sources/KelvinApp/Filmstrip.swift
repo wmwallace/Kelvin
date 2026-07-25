@@ -395,7 +395,7 @@ struct FilmstripView: View {
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                 }
-                .onChange(of: current) { url in
+                .onChange(of: current) { _, url in
                     guard let url else { return }
                     // A travelled scroll rather than a jump: arrowing through a shoot, the strip
                     // moving is how you keep your place in it.
@@ -403,7 +403,7 @@ struct FilmstripView: View {
                         proxy.scrollTo(url, anchor: .center)
                     }
                 }
-                .onChange(of: photos) { _ in
+                .onChange(of: photos) { 
                     // The list itself changed under you — re-sorted, or the capture times landed
                     // and moved everything. Put the frame you are actually editing back under the
                     // pointer, without animating: the content has already moved, and sliding it

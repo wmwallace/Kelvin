@@ -1108,6 +1108,10 @@ final class AppState: ObservableObject {
         return f.string(from: date)
     }
 
+    /// Whether any photograph has been read since launch. Only ever used to tell the truth about
+    /// how long the first one takes.
+    private var hasReadAPhoto = false
+
     /// The current edit, in the form that goes to disk.
     private func currentSavedEdit() -> SavedEdit {
         SavedEdit(styleId: selectedCandidateId, global: edit, userMasks: userMasks,
@@ -1376,7 +1380,10 @@ final class AppState: ObservableObject {
         // it read as the app doing something it had not been asked to do.
         panel.message = "Open one photo, or a folder to work through a whole shoot."
         // The checkbox that makes the folder listing a decision rather than a surprise.
-        panel.accessoryView = NSHostingView(rootView: OpenOptions(appState: self))
+        // AppKit, not SwiftUI — see PanelAccessories. A hosting view inside a modal panel renders
+        // once and then stops updating, so the checkbox looked stuck while the preference behind it
+        // flipped on every click.
+        panel.accessoryView = PanelAccessories.openOptions(self)
         panel.isAccessoryViewDisclosed = true
         if panel.runModal() == .OK, let url = panel.url {
             Task { await open(url) }
@@ -1478,7 +1485,13 @@ final class AppState: ObservableObject {
             let perceptionProxy = decoded.perceptionProxy
             let proxy = decoded.proxy
 
-            statusMessage = "Reading the scene…"
+            // The FIRST read of a session is not like the others: 1.6 GB of weights load before
+            // anything is looked at, which is fifteen seconds where a message identical to the
+            // two-second reads that follow makes a working app look like a hung one. Say which one
+            // this is. The flag flips once, so the long sentence never becomes wallpaper.
+            statusMessage = hasReadAPhoto
+                ? "Reading the scene…"
+                : "Loading the perception model — about 15 seconds, once per launch…"
             // Real perception: Qwen2.5-VL reads the 768px proxy. First call loads the model (a few
             // seconds once cached); if it can't run, fall back to a conservative read so the
             // app still produces candidates from the measured statistics.
@@ -1492,6 +1505,7 @@ final class AppState: ObservableObject {
             guard imageURL == url else { return }
             self.perception = perceptionRead
 
+            hasReadAPhoto = true
             statusMessage = "Measuring…"
             // Also off the main thread: the statistics pass, Vision's person/sky segmentation and
             // the dust scan each render the proxy, and together they were the second-biggest block
@@ -2840,7 +2854,7 @@ final class AppState: ObservableObject {
 
     /// Shared with the background candidate build — a CIContext is thread-safe and expensive to
     /// create, so one instance serves both.
-    nonisolated(unsafe) static let sharedContext: CIContext = {
+    nonisolated static let sharedContext: CIContext = {
         let opts: [CIContextOption: Any] = [.cacheIntermediates: true, .highQualityDownsample: false]
         if let device = MTLCreateSystemDefaultDevice() { return CIContext(mtlDevice: device, options: opts) }
         return CIContext(options: opts)
@@ -3996,7 +4010,7 @@ struct ContentView: View {
         // moment you are deciding it is the moment you are choosing where the file goes. It also
         // covers the batch, which writes hundreds of files from the same setting — so the checkbox
         // that says what travels has to be somewhere you meet before either.
-        panel.accessoryView = NSHostingView(rootView: ExportOptions(appState: appState))
+        panel.accessoryView = PanelAccessories.exportOptions(appState)
         if panel.runModal() == .OK, let url = panel.url {
             Task { await appState.exportFullResolution(to: url) }
         }
@@ -4357,7 +4371,7 @@ struct ToneSlider: View {
                     .tint(Theme.glow)
                     .controlSize(.small)
                     // Live: re-render on every value change during the drag, not just on release.
-                    .onChange(of: value) { _ in onChange() }
+                    .onChange(of: value) { onChange() }
                 ToneRail(identity: identity)
             }
         }
@@ -4790,7 +4804,7 @@ struct UserMaskEditor: View {
                     .font(Theme.ui(11)).foregroundColor(Theme.inkDim)
             }
             .toggleStyle(.switch).tint(Theme.glow)
-            .onChange(of: mask.invert) { _ in onChange() }
+            .onChange(of: mask.invert) { onChange() }
 
             HStack(spacing: 6) {
                 Text("REFINE").font(Theme.mono(9)).tracking(1.2).foregroundColor(Theme.inkFaint)
@@ -4801,7 +4815,7 @@ struct UserMaskEditor: View {
                     Text("Light").tag(UserMaskVM.Refinement.luminance)
                 }
                 .pickerStyle(.segmented).labelsHidden().frame(width: 170).controlSize(.small)
-                .onChange(of: mask.refinement) { _ in onChange() }
+                .onChange(of: mask.refinement) { onChange() }
             }
             .help("Narrow this mask to pixels that are also a certain colour or brightness")
 
@@ -4882,7 +4896,7 @@ struct MaskControl: View {
                     Text(name).font(Theme.ui(13, .medium)).foregroundColor(Theme.ink)
                 }
                 .toggleStyle(.switch).tint(Theme.glow)
-                .onChange(of: isOn) { _ in onChange() }
+                .onChange(of: isOn) { onChange() }
                 Spacer()
                 // Show-me-this-one, and click again to put it away. The auto masks previously had
                 // no way to say either: the overlay picked one on its own and the panel offered
@@ -4905,7 +4919,7 @@ struct MaskControl: View {
                 // Live, like every `ToneSlider`. Commit-on-release here alone made the one control
                 // in the panel that does not preview read as a control that does not work.
                 Slider(value: $strength, in: 0...100, step: 1)
-                    .onChange(of: strength) { _ in onChange() }
+                    .onChange(of: strength) { onChange() }
                     .tint(Theme.glow).controlSize(.small)
 
                 if let adjustment {
@@ -4955,7 +4969,7 @@ struct MaskControl: View {
                                         .font(Theme.ui(11)).foregroundColor(Theme.inkDim)
                                 }
                                 .toggleStyle(.switch).tint(Theme.glow)
-                                .onChange(of: invert.wrappedValue) { _ in onChange() }
+                                .onChange(of: invert.wrappedValue) { onChange() }
                             }
                         }
                         .padding(.top, 2)
