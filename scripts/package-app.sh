@@ -171,11 +171,41 @@ if ! codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | tail -2; then
   echo "package-app.sh: the bundle does not verify" >&2
   exit 1
 fi
+# Notarisation. Signing makes the app attributable to you; NOTARISATION is what stops macOS
+# refusing to open it on anyone else's machine. Both are required, and a signed-but-unnotarised
+# build is rejected by Gatekeeper with `source=Unnotarized Developer ID` — which reads like a
+# signing failure and is not one.
+#
+#   KELVIN_NOTARY_PROFILE=kelvin-notary KELVIN_SIGN_IDENTITY="Developer ID Application: …" \
+#     scripts/package-app.sh
+#
+# Create the profile once with:
+#   xcrun notarytool store-credentials "kelvin-notary" --key AuthKey_XXX.p8 --key-id XXX --issuer …
+NOTARY_PROFILE="${KELVIN_NOTARY_PROFILE:-}"
+if [ -n "$NOTARY_PROFILE" ] && [ "$IDENTITY" != "-" ]; then
+  echo "▸ Notarising (profile: $NOTARY_PROFILE)…"
+  # notarytool will not accept a bare .app — it wants a zip, a dmg or a pkg. `ditto -c -k
+  # --keepParent` is the required form; `zip -r` mangles symlinks and extended attributes.
+  ZIP="$OUT/$NAME-notarize.zip"
+  ditto -c -k --keepParent "$APP" "$ZIP"
+  if ! xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait; then
+    echo "package-app.sh: notarisation failed. For the reason, run:" >&2
+    echo "  xcrun notarytool log <submission-id> --keychain-profile $NOTARY_PROFILE" >&2
+    exit 1
+  fi
+  rm -f "$ZIP"
+  # Staple the ticket INTO the bundle so it validates with no network. Without this the app still
+  # passes on a connected machine and fails for anyone offline — the worst kind of intermittent.
+  xcrun stapler staple "$APP"
+fi
+
 if [ "$IDENTITY" != "-" ]; then
   echo "▸ Gatekeeper assessment:"
-  spctl -a -vvv -t exec "$APP" 2>&1 | sed 's/^/    /' || \
-    echo "    (rejected — expected until the build is notarised)"
-  echo "    Next: xcrun notarytool submit --wait, then xcrun stapler staple '$APP'"
+  spctl -a -vvv -t exec "$APP" 2>&1 | sed 's/^/    /' || true
+  if [ -z "$NOTARY_PROFILE" ]; then
+    echo "    A rejection here is EXPECTED without notarisation — the signature is fine."
+    echo "    Set KELVIN_NOTARY_PROFILE to notarise and staple in the same run."
+  fi
 fi
 touch "$APP"   # nudge Finder/LaunchServices to refresh the icon
 echo "✓ $APP"
