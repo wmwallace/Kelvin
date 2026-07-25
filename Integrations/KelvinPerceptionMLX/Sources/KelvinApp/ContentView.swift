@@ -194,6 +194,9 @@ final class AppState: ObservableObject {
     @Published var maskTightness: [String: Double] = [:]
     @Published var maskInvert: [String: Bool] = [:]
     @Published var showMaskOverlay: Bool = false
+    /// True while a mask's TONE slider is being dragged, which hides the overlay for the duration
+    /// so the photograph is visible underneath. Set by the editors, not by the renderer.
+    @Published var isAdjustingMaskTone: Bool = false
 
     /// Presentation for every adjustment in `Mask.adjustmentKeys` — the renderer's contract, which
     /// lives in Core and is tested there. This list supplies only the label, range and unit; it
@@ -320,8 +323,7 @@ final class AppState: ObservableObject {
     func addInstanceMask(_ instance: SubjectInstances.Instance) {
         if let existing = userMasks.first(where: { $0.instanceId == instance.id }) {
             selectedUserMaskId = existing.id
-            showMaskOverlay = true
-            onEdit()
+            onEdit()          // selecting is not creating — do not re-arm the overlay
             return
         }
         var m = UserMaskVM(kind: .instance)
@@ -335,6 +337,10 @@ final class AppState: ObservableObject {
         m.exposure = 0.3
         userMasks.append(m)
         selectedUserMaskId = m.id
+        // Shown once, on CREATION only. A mask you cannot see when it appears looks broken —
+        // but re-selecting an existing one used to turn the overlay back on too, which is why it
+        // felt like it could not be dismissed. Turn it off and it stays off until you make
+        // another mask.
         showMaskOverlay = true
         onEdit()
     }
@@ -762,7 +768,7 @@ final class AppState: ObservableObject {
         edit = s.edit; editBaseline = s.editBaseline
         baseMasks = s.baseMasks; maskEnabled = s.maskEnabled; maskStrength = s.maskStrength
         userMasks = s.userMasks; straighten = s.straighten; hsl = s.hsl; removeDust = s.removeDust
-        brushCache = [:]; selectedUserMaskId = nil; paintingMaskId = nil
+        brushCache = [:]; selectedMask = nil; paintingMaskId = nil
         zoom = 1; pan = .zero; showingOriginal = false
         updateActiveRecipe()
         resetHistory()
@@ -779,7 +785,7 @@ final class AppState: ObservableObject {
         candidates = []; selectedCandidateId = nil
         activeRecipe = nil; active = nil; original = nil
         lastRenderedCI = nil; activeCraftIssues = []; lastCraftReading = nil; exhaustedFixes = []
-        userMasks = []; paintingMaskId = nil; selectedUserMaskId = nil
+        userMasks = []; paintingMaskId = nil; selectedMask = nil
         subjectInstances = []; highlightedInstanceId = nil
         brushCache = [:]
         proxyMaskBitmaps = [:]; healSpots = []; detectedSpotCount = 0
@@ -911,7 +917,7 @@ final class AppState: ObservableObject {
         editedURLs.formUnion(EditStore.edited(among: folderPhotos))
         flags = FlagStore.flags(among: folderPhotos)
         capture = CaptureInfoReader.read(url: url)
-        userMasks = []; paintingMaskId = nil; selectedUserMaskId = nil   // hand-drawn masks are per-photo
+        userMasks = []; paintingMaskId = nil; selectedMask = nil   // hand-drawn masks are per-photo
         // The subjects belong to the photograph, so they go out with it. Left standing,
         // the list would offer the last photo's people while this one decoded.
         subjectInstances = []; highlightedInstanceId = nil
@@ -1476,7 +1482,29 @@ final class AppState: ObservableObject {
     @Published var paintingMaskId: UUID?
     @Published var brushRadius = 0.09
     /// The user mask being edited ON THE CANVAS (drag its handles to move/size it).
-    @Published var selectedUserMaskId: UUID?
+    /// WHICH MASK IS BEING WORKED ON — auto (subject/sky) or hand-drawn, one selection covering
+    /// both. It used to be `selectedUserMaskId: UUID?`, which could only ever name a hand-drawn
+    /// mask, and that single gap produced the reported bug: the sky came up covered in red that
+    /// you could not edit or dismiss.
+    ///
+    /// What actually happened is that with nothing selected, the overlay fell back to "the first
+    /// enabled auto mask" and drew it. So the red was not the sky mask being ON, it was the
+    /// overlay GUESSING — and since an auto mask could not be selected, there was no way to edit
+    /// the thing you were looking at, and no way to deselect it to make the red go away. An
+    /// overlay that shows something the selection model cannot name is an overlay with no off
+    /// switch.
+    enum MaskRef: Equatable {
+        case auto(String)       // "subject", "sky" — the engine's own masks
+        case user(UUID)         // anything hand-drawn or picked from the subject list
+    }
+    @Published var selectedMask: MaskRef?
+
+    /// The hand-drawn selection, for the call sites that only make sense for one (canvas handles,
+    /// brush painting). Setting it selects; reading it yields nil when an auto mask is selected.
+    var selectedUserMaskId: UUID? {
+        get { if case .user(let id) = selectedMask { return id } else { return nil } }
+        set { selectedMask = newValue.map { .user($0) } }
+    }
 
     // MARK: Canvas coordinate mapping (view ⇄ normalised image space)
 
@@ -1566,7 +1594,11 @@ final class AppState: ObservableObject {
         if kind == .subject { m.exposure = 0.3 }
         userMasks.append(m)
         selectedUserMaskId = m.id                      // show its canvas handles
-        showMaskOverlay = true                         // auto-show mask overlay when adding a mask
+        // Shown once, on CREATION only. A mask you cannot see when it appears looks broken —
+        // but re-selecting an existing one used to turn the overlay back on too, which is why it
+        // felt like it could not be dismissed. Turn it off and it stays off until you make
+        // another mask.
+        showMaskOverlay = true
         if kind == .brush { paintingMaskId = m.id }    // brush: start painting right away
         onEdit()
     }
@@ -1654,20 +1686,14 @@ final class AppState: ObservableObject {
                 return (b, maskStruct.invert, maskStruct.feather, maskStruct.tightness ?? 0)
             }
         }
-        if let firstBase = baseMaskIds.first(where: { maskEnabled[$0] ?? true }) {
-            if let b = proxyMaskBitmaps[firstBase] {
-                let invert = maskInvert[firstBase] ?? false
-                let feather = maskFeather[firstBase] ?? 0
-                let tightness = maskTightness[firstBase] ?? 0
-                return (b, invert, feather, tightness)
-            }
+        // An AUTO mask, now that the selection can name one.
+        if case .auto(let id) = selectedMask, let b = proxyMaskBitmaps[id] {
+            return (b, maskInvert[id] ?? false, maskFeather[id] ?? 0, maskTightness[id] ?? 0)
         }
-        if let firstUser = userMasks.first {
-            let maskStruct = firstUser.toMask()
-            if let b = bitmaps[maskStruct.id] ?? bitmaps[maskStruct.type] {
-                return (b, maskStruct.invert, maskStruct.feather, maskStruct.tightness ?? 0)
-            }
-        }
+        // NO FALLBACK, deliberately. This used to answer "the first enabled auto mask" and then
+        // "the first hand-drawn one" when nothing was selected, which is how the sky ended up
+        // covered in red that nothing could edit and nothing could turn off. Nothing selected now
+        // means nothing drawn, so the overlay always answers to something the user can point at.
         return nil
     }
 
@@ -1735,7 +1761,15 @@ final class AppState: ObservableObject {
         // Which photo these pixels are of. A render started before a photo switch can still land
         // after it; tagged, that frame is ignored instead of being shown under the new photo's name.
         let renderedURL = loadedURL
-        let showOverlay = showMaskOverlay
+        // SUPPRESSED WHILE ADJUSTING. The overlay is composited into the preview at 0.6 opacity,
+        // so while it is up you are grading a photograph you cannot see — drag Exposure and the
+        // red is what changes. Reported exactly that way: "if I use a slider, I can't really tell
+        // what has changed".
+        //
+        // The two things the overlay is for are opposites. Placing a mask needs the shape visible;
+        // adjusting one needs the picture visible. So it stays up for the first and gets out of
+        // the way for the second, and comes back on its own when you let go.
+        let showOverlay = showMaskOverlay && !isAdjustingMaskTone
         let overlayTarget = showOverlay ? activeSelectedMaskBitmap(extent: proxy.extent) : nil
         Task.detached(priority: .userInitiated) {
             var rendered = Renderer.render(input.proxy, with: input.recipe, maskBitmaps: input.bitmaps)
@@ -2872,7 +2906,26 @@ struct ContentView: View {
                             feather: appState.maskFeatherBinding(mid),
                             tightness: appState.maskTightnessBinding(mid),
                             invert: appState.maskInvertBinding(mid),
-                            onReset: { appState.resetMask(mid) })
+                            onReset: { appState.resetMask(mid) },
+                            // Selectable, like every other mask. Without this an auto mask could
+                            // be shown by the overlay but never named by the selection, so the
+                            // sky came up red with nothing to click and no way to clear it.
+                            isSelected: appState.selectedMask == .auto(mid),
+                            onSelect: {
+                                // The eye is "show me this one", so it arms the overlay as well as
+                                // selecting. Clicking the same eye again clears the selection, and
+                                // with nothing selected the overlay draws nothing — which is the
+                                // off switch the auto masks never had.
+                                if appState.selectedMask == .auto(mid) {
+                                    appState.selectedMask = nil
+                                } else {
+                                    appState.selectedMask = .auto(mid)
+                                    appState.showMaskOverlay = true
+                                }
+                                appState.onEdit()
+                            },
+                            onAdjustBegin: { appState.isAdjustingMaskTone = true },
+                            onAdjustEnd: { appState.isAdjustingMaskTone = false; appState.onEdit() })
                     }
                     // Hand-drawn masks: gradient geometry or brush strokes + local adjustments.
                     ForEach($appState.userMasks) { $m in
@@ -2886,7 +2939,9 @@ struct ContentView: View {
                             clearStrokes: { appState.clearStrokes(m.id) },
                             brushRadius: Binding(get: { appState.brushRadius },
                                                  set: { appState.brushRadius = $0 }),
-                            hasPerson: appState.hasPerson)
+                            hasPerson: appState.hasPerson,
+                            onAdjustBegin: { appState.isAdjustingMaskTone = true },
+                            onAdjustEnd: { appState.isAdjustingMaskTone = false })
                     }
                     VStack(alignment: .leading, spacing: 6) {
                         // The "+" used to be repeated on all eight buttons. Said once over the
@@ -3605,6 +3660,10 @@ struct UserMaskEditor: View {
     var clearStrokes: () -> Void = {}
     var brushRadius: Binding<Double> = .constant(0.09)
     var hasPerson = true
+    /// Bracket a tone drag so the overlay steps aside while the photograph is being judged —
+    /// otherwise you are grading 60% red and the slider appears to do nothing useful.
+    var onAdjustBegin: () -> Void = {}
+    var onAdjustEnd: () -> Void = {}
 
     /// Skin and Background are built from the person segmentation — flag it when there isn't one,
     /// so the mask isn't just quietly inert.
@@ -3700,10 +3759,11 @@ struct UserMaskEditor: View {
             ForEach(AppState.maskAdjustmentSpecs, id: \.key) { spec in
                 ToneSlider(label: spec.label,
                            value: Binding(get: { mask[adjustment: spec.key] },
-                                          set: { mask[adjustment: spec.key] = $0 }),
+                                          set: { onAdjustBegin(); mask[adjustment: spec.key] = $0 }),
                            range: spec.range,
                            step: spec.key == "exposure_ev" ? 0.05 : 1,
-                           unit: spec.unit, onChange: onChange,
+                           unit: spec.unit,
+                           onChange: { onAdjustEnd(); onChange() },
                            identity: ToneIdentity.adjustment(spec.key))
             }
             ToneSlider(label: "Tightness", value: $mask.tightness, range: 0...100, step: 1, unit: "", onChange: onChange)
@@ -3735,6 +3795,13 @@ struct MaskControl: View {
     var tightness: Binding<Double>? = nil
     var invert: Binding<Bool>? = nil
     var onReset: (() -> Void)? = nil
+    /// Whether this mask is the one the overlay is showing, and how to say "show me this one".
+    /// Clicking a selected mask again clears the selection, which is what puts the red away.
+    var isSelected: Bool = false
+    var onSelect: () -> Void = {}
+    /// Bracket a tone drag so the overlay can step aside while the picture is being judged.
+    var onAdjustBegin: () -> Void = {}
+    var onAdjustEnd: () -> Void = {}
     /// Folded by default. A subject mask usually needs nothing beyond the strength Kelvin chose,
     /// and six sliders per mask unfolded would rebuild the wall of controls the sidebar just lost.
     @State private var showAdjustments = false
@@ -3742,11 +3809,24 @@ struct MaskControl: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Toggle(isOn: $isOn) {
-                Text(name).font(Theme.ui(13, .medium)).foregroundColor(Theme.ink)
+            HStack(spacing: 8) {
+                Toggle(isOn: $isOn) {
+                    Text(name).font(Theme.ui(13, .medium)).foregroundColor(Theme.ink)
+                }
+                .toggleStyle(.switch).tint(Theme.glow)
+                .onChange(of: isOn) { _ in onChange() }
+                Spacer()
+                // Show-me-this-one, and click again to put it away. The auto masks previously had
+                // no way to say either: the overlay picked one on its own and the panel offered
+                // nothing to change or clear that choice.
+                Button(action: onSelect) {
+                    Image(systemName: isSelected ? "eye.fill" : "eye")
+                        .font(.system(size: 10))
+                        .foregroundColor(isSelected ? Theme.glow : Theme.inkFaint)
+                }
+                .buttonStyle(.plain)
+                .help(isSelected ? "Hide this mask's overlay" : "Show where this mask falls")
             }
-            .toggleStyle(.switch).tint(Theme.glow)
-            .onChange(of: isOn) { _ in onChange() }
 
             if isOn {
                 HStack {
@@ -3782,11 +3862,13 @@ struct MaskControl: View {
                         VStack(spacing: 10) {
                             ForEach(AppState.maskAdjustmentSpecs, id: \.key) { spec in
                                 ToneSlider(label: spec.label,
-                                           value: adjustment(spec.key),
+                                           value: Binding(
+                                               get: { adjustment(spec.key).wrappedValue },
+                                               set: { onAdjustBegin(); adjustment(spec.key).wrappedValue = $0 }),
                                            range: spec.range,
                                            step: spec.key == "exposure_ev" ? 0.05 : 1,
                                            unit: spec.unit,
-                                           onChange: onChange,
+                                           onChange: { onAdjustEnd(); onChange() },
                                            identity: ToneIdentity.adjustment(spec.key))
                             }
                             if let feather {
@@ -3815,7 +3897,9 @@ struct MaskControl: View {
         .padding(10)
         .background(
             RoundedRectangle(cornerRadius: 8).fill(Theme.surface.opacity(0.5))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.hairline.opacity(0.6), lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 8)
+                    .stroke(isSelected ? Theme.glow.opacity(0.6) : Theme.hairline.opacity(0.6),
+                            lineWidth: isSelected ? 1.5 : 1))
         )
     }
 }
