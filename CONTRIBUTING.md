@@ -13,9 +13,10 @@ that looks like a broken toolchain rather than a missing download:
 xcodebuild -downloadComponent MetalToolchain     # ~840 MB, once
 ```
 
-**The first run downloads ~1.6 GB of model weights** from Hugging Face into
-`~/.cache/huggingface`, unless you point the app at a local copy (see below). That is a one-time
-cost, and it is the only network request this application makes.
+**The first run downloads ~1.6 GB of model weights** from Hugging Face into `~/.cache/huggingface`,
+at a pinned revision, unless you stage them locally (see below). This applies to source builds only —
+**released apps ship the weights inside the bundle and make no network requests at all**, which is
+enforced: `scripts/package-app.sh` refuses to produce a signed build without staged weights.
 
 **Requirements:** macOS 14+, Xcode 16.3+ (Swift 6.1 for the app package; the core package needs
 only Swift 6.0).

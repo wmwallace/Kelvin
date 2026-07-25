@@ -49,6 +49,19 @@ public actor MLXPerceptionProvider: PerceptionProvider {
     /// The licence-clean choice being the quick one was not the expected outcome.
     public static let defaultModelID = "mlx-community/Qwen3.5-2B-MLX-4bit"
 
+    /// The exact commit of that repository this project has been measured against.
+    ///
+    /// `ModelConfiguration(id:)` resolves revision `"main"`, which means "whatever that repository
+    /// points at when the user happens to run it". For a project whose thresholds were calibrated
+    /// against specific weights — the soft/unusable focus limits, the perception vocabulary the
+    /// parser expects, the A/B in D-model-3 — that is a dependency that can change behaviour with
+    /// no commit on our side and no way to notice.
+    ///
+    /// Shipped builds do not reach the network at all (the weights are bundled), so this pin governs
+    /// source builds and `KELVIN_MODEL` experiments. Update it deliberately, and re-run the eval
+    /// harness when you do.
+    public static let defaultModelRevision = "93760be4f1f69842a46bc13dbdc0f19e291392a3"
+
     private let modelID: String
     private let maxTokens: Int
     private var container: ModelContainer?
@@ -149,8 +162,16 @@ public actor MLXPerceptionProvider: PerceptionProvider {
             configuration = ModelConfiguration(directory: directory)
         } else {
             // The remaining path, and the only one that touches the network: a repo id with nothing
-            // local to satisfy it. Reached during development and by a build with no staged weights.
-            configuration = ModelConfiguration(id: modelID)
+            // local to satisfy it. A SHIPPED BUILD NEVER GETS HERE — `scripts/package-app.sh`
+            // refuses to produce a signed app without the weights inside it, precisely so that a
+            // user of a release can never be sent to a third party for a 1.6 GB download.
+            //
+            // Pinned to a revision rather than tracking `main`, so that even a source build gets the
+            // weights this project was measured against. An explicit `KELVIN_MODEL` keeps its own
+            // default revision: naming another repository means asking for whatever it holds.
+            configuration = modelID == Self.defaultModelID
+                ? ModelConfiguration(id: modelID, revision: Self.defaultModelRevision)
+                : ModelConfiguration(id: modelID)
         }
         let loaded = try await #huggingFaceLoadModelContainer(configuration: configuration)
         container = loaded

@@ -555,3 +555,46 @@ wholesale, and the advertised figure was a standard rate leaking onto a premium 
 method current. If it lapses, every installed copy silently loses the ability to update, and whoever
 registers it next can serve their own appcast to this project's users. That is the most dangerous
 single failure mode in the distribution setup.
+
+---
+
+## D-model-5 — The weights ship inside the app. Users download nothing. · **Decided 25 July 2026**
+
+Supersedes the open question left in D-model-4 about how alpha users would obtain the model. Three
+options were on the table: fetch from Hugging Face on first run, fetch from our own GitHub release,
+or bundle. **Bundled, in a single artifact.**
+
+The owner's reasoning, and it is the right one: *"I always have control and can predict behaviour."*
+
+**The argument that decided it is not privacy — it is reproducibility.** `ModelConfiguration(id:)`
+resolves revision `main`, which means a shipped build downloads *whatever that repository points at
+on the day the user runs it*. A re-quantisation upstream would change perception behaviour for new
+users of an already-released build, with no commit on our side and no way to notice. This project's
+thresholds — the soft/unusable focus limits, the perception vocabulary the parser expects, the whole
+A/B in D-model-3 — were calibrated against one specific snapshot. Weights that travel with the binary
+cannot drift.
+
+Everything else follows as a bonus rather than as the goal: no third-party dependency at runtime, no
+rate limits, no repository rename breaking installs, no first-run wait, and the "no cloud" claim
+becomes literally true for a released build rather than true-with-an-asterisk. Hosting costs nothing —
+GitHub release assets are free and unmetered for public repositories.
+
+**Enforced, not just intended.** `scripts/package-app.sh` REFUSES to produce a signed build without
+staged weights. Forgetting `make stage-model` would otherwise yield an app that looks correct, ships,
+notarises, and then reaches for Hugging Face on a stranger's machine — the exact behaviour this
+decision removes, discovered by the worst possible person.
+
+**Also pinned for source builds:** `defaultModelRevision` names the exact commit
+(`93760be…`) rather than tracking `main`, so a `swift run` build gets the weights the project was
+measured against too. `KELVIN_MODEL` keeps its own default revision, because naming another
+repository is asking for whatever it holds.
+
+### Two consequences to plan for
+
+- **GitHub caps a release asset at 2 GB.** The bundle lands around 1.6 GB, so there is roughly 400 MB
+  of headroom. A larger model — the 4B is ~2.9 GB — would not fit, and would force a split-asset or
+  first-run-download design after all. The packaging script warns if the bundle crosses 2 GB.
+- **Sparkle delta updates move from optional to REQUIRED.** With weights inside the app, every
+  release is a ~1.6 GB download unless deltas are configured. `BinaryDelta` handles this well —
+  unchanged files contribute almost nothing, so a code-only update is a few MB — but it must exist
+  before the *second* release, or the first update teaches users that this app is expensive to keep.

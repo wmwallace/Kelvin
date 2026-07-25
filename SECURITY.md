@@ -20,10 +20,11 @@ removes most of the usual categories. What remains is worth reporting:
 - **Malformed-input crashes or memory-safety problems** reachable by opening a crafted image file.
   RAW decoding goes through Apple's Core Image, so many such issues belong to Apple; report them
   anyway and they will be forwarded.
-- **Unexpected network activity.** The application makes exactly one kind of outbound request: a
-  one-time download of the perception model's weights from Hugging Face, and not at all when the
-  weights are bundled or staged locally. Any other outbound connection is a bug, and a serious one
-  given what the project claims.
+- **Any network activity at all in a released build.** Releases ship the perception weights inside
+  the app and make no outbound requests whatsoever. A packet leaving a release build is a bug by
+  definition, and a serious one given what the project claims. (A build from source, without
+  `make stage-model`, fetches the weights once from Hugging Face at a pinned revision — that one is
+  expected and documented.)
 - **Metadata leaking into exported files** beyond what the export settings say. Exports carry the
   source photograph's metadata by default, including its GPS position — that is documented and
   toggleable in the export panel. A case where the toggle does not take effect, or where data

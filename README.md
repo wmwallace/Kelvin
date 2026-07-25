@@ -61,13 +61,15 @@ make build && make test                        # core: renderer, engine, eval ha
 make app                                       # launch the editor
 ```
 
-The first run downloads about **1.6 GB of model weights** from Hugging Face into `~/.cache/hugging‑
-face`. That one-time fetch is the only network request this application makes — see
-[Privacy](#privacy). To avoid it, or to run the same path a release build takes:
+Building from source, the first run downloads about **1.6 GB of model weights** from Hugging Face
+into `~/.cache/huggingface`, pinned to the exact revision this project was measured against. To skip
+that and run the same path a release build takes:
 
 ```sh
 make stage-model && make app-staged
 ```
+
+**A released build downloads nothing.** The weights ship inside the app — see [Privacy](#privacy).
 
 Fuller instructions, and the gotchas worth knowing before you file a build issue, are in
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
@@ -83,8 +85,11 @@ The claim is specific, so here is exactly what it means:
 - **Exports carry the source photograph's metadata by default**, including its GPS position — the same
   behaviour as every other editor. The export panel has a toggle to strip location and camera serial,
   and there are tests that read the written file back to prove it works.
-- **One outbound request exists:** the one-time model download described above. Nothing else. Nothing
-  is fetched per photograph, and the app works offline once the weights are present.
+- **A released build makes no network requests at all.** The perception weights ship inside the app,
+  so there is no first-run download, no model server, and nothing to be rate-limited by. It works on
+  a plane, on day one. That is also why the app is ~1.6 GB.
+- **Building from source is the one exception:** an unstaged source build fetches the weights from
+  Hugging Face once, pinned to a fixed revision. `make stage-model` avoids even that.
 
 ## How it is built
 

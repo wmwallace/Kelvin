@@ -1,10 +1,26 @@
 #!/usr/bin/env bash
-# Package Kelvin.app — a double-clickable macOS bundle with the icon and the MLX resources.
+# Package Kelvin — a double-clickable .app, and the .dmg a user downloads.
 #
 #   scripts/package-app.sh [--debug] [out-dir]
 #
-# By default builds release. Bundles the executable, the SwiftPM resource bundles (which
-# carry MLX's default.metallib), the icon, an Info.plist, and ad-hoc code-signs.
+# Local development build (ad-hoc signed, no notarisation, no weights required):
+#   scripts/package-app.sh
+#
+# Release build (self-contained, signed, notarised, stapled, plus a signed disk image):
+#   make stage-model
+#   KELVIN_SIGN_IDENTITY="Developer ID Application: … (TEAMID)" \
+#   KELVIN_NOTARY_PROFILE=kelvin-notary \
+#     scripts/package-app.sh
+#
+# Environment:
+#   KELVIN_SIGN_IDENTITY   signing identity; ad-hoc ("-") when unset
+#   KELVIN_NOTARY_PROFILE  notarytool keychain profile; skips notarisation when unset
+#   KELVIN_VERSION         CFBundleShortVersionString (default 0.1.0)
+#   KELVIN_DMG=0           skip building the disk image
+#
+# Measured on a release build with the weights inside: app 1.7 GB, dmg 1.4 GB, ~1 min to build the
+# image, and the notary service takes roughly fifteen minutes per submission at that size. There are
+# TWO submissions — the app and then the image — and the ordering is deliberate; see the dmg section.
 #
 # THE LAUNCH FAILURE IS FIXED, AND IT WAS NEITHER OF THE THINGS THIS COMMENT USED TO BLAME.
 #
@@ -91,6 +107,36 @@ fi
 if [ ! -f "$APP/Contents/Resources/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ]; then
   echo "package-app.sh: default.metallib is not where MLX looks for it" >&2
   exit 1
+fi
+
+# THE PERCEPTION WEIGHTS SHIP INSIDE THE APP. One artifact, no first-run download, no third party,
+# and — the reason that actually decided it — the model is pinned to the release rather than to
+# whatever a remote repository points at today. `ModelConfiguration(id:)` resolves revision "main",
+# so a re-quantisation upstream would silently change perception behaviour for new users of an
+# already-shipped build. Weights that travel with the binary cannot do that.
+#
+# `MLXPerceptionProvider.bundledModelDirectory` looks exactly here, and finding it means no network
+# call is ever made — `loadModelContainer` only constructs a Downloader for the `.id` case.
+#
+# Staged by `make stage-model`, which refuses to stage weights whose LICENSE is absent, because
+# shipping them is redistribution. Kept out of git: 1.6 GB does not belong in every clone.
+MODEL_SRC="$ROOT/Vendor/PerceptionModel"
+if [ -d "$MODEL_SRC" ] && [ -f "$MODEL_SRC/config.json" ]; then
+  echo "▸ Bundling perception weights ($(du -sh "$MODEL_SRC" | cut -f1))…"
+  # -c asks for APFS clonefile: copy-on-write, so this is instant and costs no extra disk until
+  # codesign touches something. Falls back to a real copy on filesystems without it.
+  cp -Rc "$MODEL_SRC" "$APP/Contents/Resources/PerceptionModel" 2>/dev/null || \
+    cp -R "$MODEL_SRC" "$APP/Contents/Resources/PerceptionModel"
+elif [ "${KELVIN_SIGN_IDENTITY:--}" != "-" ]; then
+  # A RELEASE BUILD MUST BE SELF-CONTAINED. Without this guard, forgetting `make stage-model` would
+  # produce a signed, notarised app that looks correct, ships, and then reaches for Hugging Face on
+  # a user's machine — the exact behaviour this design exists to remove, discovered by a stranger.
+  echo "package-app.sh: no staged weights at $MODEL_SRC, and this is a signed build." >&2
+  echo "  Run 'make stage-model' first. A release must not depend on a download." >&2
+  exit 1
+else
+  echo "▸ No staged weights — this build will fetch them at runtime (dev builds only)."
+  echo "  Run 'make stage-model' to bundle them."
 fi
 # The .icns is still named for the product on disk; renaming the app means renaming that file
 # too. One `git mv`, and the rest of this script follows the constant.
@@ -207,5 +253,57 @@ if [ "$IDENTITY" != "-" ]; then
     echo "    Set KELVIN_NOTARY_PROFILE to notarise and staple in the same run."
   fi
 fi
+
+# The disk image — what a user actually downloads.
+#
+# Built AFTER the app has been notarised and stapled, and that order is the point: a stapled app
+# validates with NO network, so someone who drags it out of the image and opens it on a plane gets a
+# working app rather than a Gatekeeper failure. Build the image first and the app inside it can never
+# carry its own ticket, because a mounted image is read-only.
+#
+# An /Applications symlink makes the window drag-to-install, which is the convention every Mac user
+# already knows.
+#
+# zlib-level=1 rather than maximum: measured on this payload, 4-bit safetensors gave up ~16% however
+# hard they were squeezed, and level 1 reaches roughly the same place in a fraction of the time. There
+# is nothing to win by compressing high-entropy weights harder.
+if [ "${KELVIN_DMG:-1}" = "1" ] && command -v hdiutil >/dev/null; then
+  DMG="$OUT/$NAME-$VERSION.dmg"
+  STAGE="$OUT/.dmg-stage"
+  echo "▸ Building $DMG…"
+  rm -rf "$STAGE" "$DMG"; mkdir -p "$STAGE"
+  cp -Rc "$APP" "$STAGE/" 2>/dev/null || cp -R "$APP" "$STAGE/"
+  ln -s /Applications "$STAGE/Applications"
+  hdiutil create -quiet -volname "$NAME" -srcfolder "$STAGE" -ov \
+    -format UDZO -imagekey zlib-level=1 "$DMG"
+  rm -rf "$STAGE"
+
+  # The image is itself code-signable and worth signing: a downloaded, unsigned disk image can warn
+  # on mount even when the app inside is perfect.
+  if [ "$IDENTITY" != "-" ]; then
+    codesign --force --sign "$IDENTITY" --timestamp "$DMG"
+    if [ -n "$NOTARY_PROFILE" ]; then
+      # A SECOND submission, and there is no way around it for a bundled-weights app: the ticket for
+      # the app cannot cover the image that did not exist yet when it was issued. Apple's guidance is
+      # to notarise the image as well.
+      echo "▸ Notarising the disk image…"
+      if ! xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait; then
+        echo "package-app.sh: the disk image failed notarisation. For the reason:" >&2
+        echo "  xcrun notarytool log <submission-id> --keychain-profile $NOTARY_PROFILE" >&2
+        exit 1
+      fi
+      xcrun stapler staple "$DMG"
+      echo "▸ Disk image assessment:"
+      spctl -a -vvv -t open --context context:primary-signature "$DMG" 2>&1 | sed 's/^/    /' || true
+    fi
+  fi
+  echo "✓ $DMG ($(du -sh "$DMG" | cut -f1))"
+fi
 touch "$APP"   # nudge Finder/LaunchServices to refresh the icon
-echo "✓ $APP"
+SIZE="$(du -sh "$APP" | cut -f1)"
+echo "✓ $APP ($SIZE)"
+# GitHub caps a release asset at 2 GB. With the weights inside, the bundle is ~1.6 GB — fine today,
+# and the number to watch if the model is ever replaced with a larger one.
+case "$SIZE" in *G) [ "${SIZE%G}" -ge 2 ] 2>/dev/null && \
+  echo "  WARNING: over GitHub's 2 GB release-asset limit — this cannot be attached to a release" >&2 ;;
+esac
