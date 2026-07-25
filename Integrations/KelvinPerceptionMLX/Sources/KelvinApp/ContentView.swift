@@ -881,6 +881,74 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Resolve every flagged craft issue in one click.
+    ///
+    /// Not a loop over `applyFix`. The corrections pull against each other — `.flat` adds contrast
+    /// while `.crushedShadows` takes it out, `.blownHighlights` narrows the range that `.flat`
+    /// complains about — so run in sequence they trade the photograph back and forth, each one
+    /// reading as a success on its own metric while it undoes the last. The order, the rule for
+    /// which of a contradictory pair wins, and the end-to-end check that throws the whole excursion
+    /// away if the frame did not actually improve all live in `CraftFix.fixAll`, in Core, where they
+    /// are measured against the real renderer.
+    ///
+    /// ONE undo step: the settled state is assigned once, so the coalescing commit records a single
+    /// entry however many corrections the run applied.
+    func applyFixAll() {
+        guard !fixInProgress, let proxy = proxyCI, let recipe = activeRecipe else { return }
+        fixInProgress = true
+        statusMessage = "Working through the craft flags…"
+        let start = edit
+        let input = RenderInput(
+            recipe: recipe, proxy: proxy,
+            bitmaps: proxyMaskBitmaps.merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked })
+        Task.detached(priority: .userInitiated) {
+            let isPerson = SubjectMask.person(in: input.proxy) != nil
+            let run = try? CraftFix.fixAll(from: start, subjectIsPerson: isPerson) { g in
+                var recipe = input.recipe
+                recipe.global = g
+                let rendered = Renderer.render(input.proxy, with: recipe, maskBitmaps: input.bitmaps)
+                return CraftFix.Reading(stats: try ImageStatistics.compute(rendered),
+                                        face: FaceSkin.read(in: rendered))
+            }
+            await MainActor.run {
+                self.fixInProgress = false
+                guard let run else {
+                    self.statusMessage = "Couldn't measure this photo — nothing changed"
+                    return
+                }
+                if run.global != self.edit {
+                    self.edit = run.global
+                    self.onEdit()
+                }
+                self.statusMessage = Self.fixAllStatus(run)
+            }
+        }
+    }
+
+    /// What the run actually achieved, in the status line. It must never claim more than it did:
+    /// the flags it could not clear are still on screen with their own Fix buttons, and a run that
+    /// handed the photo back untouched says so rather than going quiet and looking successful.
+    private static func fixAllStatus(_ run: CraftFix.RunResult) -> String {
+        let total = run.resolved.count + run.remaining.count
+        switch run.outcome {
+        case .nothingToDo:
+            return "Nothing flagged — this frame is already clean"
+        case .allResolved:
+            return "Fixed all \(total) craft flag\(total == 1 ? "" : "s")"
+        case .partlyResolved where run.resolved.isEmpty:
+            return "Eased what it could · \(run.remaining.count) still flagged"
+        case .partlyResolved where run.deferred.count == run.remaining.count:
+            return "Fixed \(run.resolved.count) of \(total) · \(run.remaining.count) left alone — "
+                + "they pull against what was fixed"
+        case .partlyResolved:
+            return "Fixed \(run.resolved.count) of \(total) · \(run.remaining.count) still flagged"
+        case .nothingSafeToDo:
+            return "Left as it was — no automatic fix here without breaking something else"
+        case .reverted:
+            return "Left as it was — every fix cost the photo more than it bought"
+        }
+    }
+
     /// Find the subject mask, creating one if this is the first subject fix, and adjust it.
     /// Repeated fixes accumulate on the same mask rather than stacking up duplicates.
     private func adjustSubjectMask(_ change: (inout UserMaskVM) -> Void) {
@@ -1835,6 +1903,35 @@ struct ContentView: View {
             // out under the photograph the whole time a slider is moving.
             if !appState.activeCraftIssues.isEmpty {
                 VStack(alignment: .leading, spacing: 5) {
+                    // Only once there is more than one problem. With a single flag the button
+                    // beside it says exactly what will happen, and "Fix all" would be the same
+                    // click wearing a vaguer word.
+                    if appState.activeCraftIssues.count > 1 {
+                        HStack(spacing: 8) {
+                            Image(systemName: "checklist")
+                                .font(.system(size: 10)).foregroundColor(Theme.inkDim)
+                            Text("\(appState.activeCraftIssues.count) craft flags")
+                                .font(Theme.mono(10)).foregroundColor(Theme.inkDim)
+                            Spacer(minLength: 4)
+                            Button(action: { appState.applyFixAll() }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "wand.and.stars")
+                                        .font(.system(size: 9, weight: .semibold))
+                                    Text("Fix all").font(Theme.ui(10, .semibold))
+                                }
+                                .foregroundColor(Theme.base)
+                                .padding(.horizontal, 10).padding(.vertical, 3)
+                                .background(Capsule().fill(Theme.glow))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(appState.fixInProgress)
+                            .opacity(appState.fixInProgress ? 0.45 : 1)
+                            .animation(Motion.gated(Motion.quick, reduceMotion),
+                                       value: appState.fixInProgress)
+                            .help("Work through every flag in one step, worst damage first — "
+                                  + "clipping, then tone, then colour and skin")
+                        }
+                    }
                     ForEach(appState.activeCraftIssues, id: \.self) { issue in
                         HStack(spacing: 8) {
                             // Theme.warn, not red: a craft flag is a question for the photographer,

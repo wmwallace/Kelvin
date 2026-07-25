@@ -479,4 +479,274 @@ public enum CraftFix {
 
         return Result(global: accepted, passes: passes, outcome: outcome)
     }
+
+    // MARK: - Fix all
+    //
+    // One click that works through every flag on the board. The loop is the easy part; the reason
+    // this is here rather than a `for` loop in the view is that THE FIXES PULL AGAINST EACH OTHER.
+    //
+    //   • `.flat` adds contrast. `.crushedShadows` and `.shadowDetailLost` take contrast out and
+    //     lift the shadows. Run in sequence they undo each other, and each one still reads as a
+    //     success on the metric it was aimed at while it does it.
+    //   • `.blownHighlights` pulls the top of the range down, which narrows dynamic range — the
+    //     exact measurement `.flat` complains about. Fixing the clipping can hand you the flatness.
+    //   • `.skinOverSaturated` and `.skinAshy` are opposite ends of one number and should never both
+    //     be flagged; guarded anyway, because "should never" is how the pale pink toy happened.
+    //
+    // So a run is an ORDERED, RE-MEASURED sweep with three rules on top of the per-click brakes:
+    // an order that decides which of a contradictory pair wins, a yield rule so the loser never
+    // fights back, and a whole-run net that throws the entire excursion away if the photograph did
+    // not actually end up better than it started.
+
+    /// The order a run works in, hardest fact first, most interpretive last. Every position here is
+    /// a claim about which complaint should win when two of them disagree.
+    ///
+    ///  1. `.blownHighlights` — clipped highlights are destroyed detail, the only thing on this list
+    ///     that is objectively *gone* rather than badly presented. It also frees headroom that every
+    ///     later step (contrast, whites, saturation) spends, so recovering first means the rest are
+    ///     judged against a frame that is not already at the top of the range.
+    ///  2. `.crushedShadows`, then 3. `.shadowDetailLost` — the same argument at the other end.
+    ///     Crushed first because it is pixels pinned at zero, where `shadowDetailLost` is merely
+    ///     unreadably dark; and because they share a direction (shadows+, blacks+, contrast−), so
+    ///     clearing one usually clears the other and the re-measure catches that for free.
+    ///  4. `.flat` — global tone shaping, deliberately AFTER both clipping families, because it
+    ///     pushes the opposite way from all three and because flatness is the softest flag on the
+    ///     board: the evaluator itself calls a lifted, matte frame a *style* and keeps its penalty
+    ///     gentle. A style yields to lost detail.
+    ///  5. `.colorCast` — colour after tone. The neutralising white balance is computed from the
+    ///     chroma that is currently measured, and tone moves it (highlight recovery especially, which
+    ///     bites hardest on the warm channels). Computing white balance against a tone state we are
+    ///     about to change would over- or under-correct.
+    ///  6. `.skinHue`, then 7. `.skinOverSaturated` / `.skinAshy` — last, because they are the most
+    ///     interpretive numbers here and because they are corrections to a *residue*: skin hue moves
+    ///     `tint`, which the colour-cast fix also moves, so it has to read what the cast fix left
+    ///     rather than be overwritten by it.
+    ///
+    /// The subject family is absent on purpose — see `deferredForSubject`.
+    public static let fixAllOrder: [AestheticEvaluator.Issue] = [
+        .blownHighlights, .crushedShadows, .shadowDetailLost, .flat, .colorCast,
+        .skinHue, .skinOverSaturated, .skinAshy
+    ]
+
+    /// Issues that ask for the opposite move from `issue`. Antagonism is stated as data rather than
+    /// discovered by watching the numbers oscillate.
+    static func opposites(of issue: AestheticEvaluator.Issue) -> Set<AestheticEvaluator.Issue> {
+        switch issue {
+        case .flat:              return [.blownHighlights, .crushedShadows, .shadowDetailLost]
+        case .blownHighlights,
+             .crushedShadows,
+             .shadowDetailLost:  return [.flat]
+        case .skinOverSaturated: return [.skinAshy]
+        case .skinAshy:          return [.skinOverSaturated]
+        default:                 return []
+        }
+    }
+
+    /// The subject family never joins a run, and not because it was awkward to plumb through.
+    ///
+    /// A subject correction is ONE bounded step per click with no convergence loop behind it — the
+    /// evaluator's subject terms are read off a face box, not off the frame, and `converge`'s
+    /// evidence brake has nothing to weigh. Pressing those steps to a fixed point the way this run
+    /// presses the global ones would mean walking the mask to its ceiling (±2 EV, +30 contrast)
+    /// automatically, on somebody's face, without being asked. So the run leaves them, and the UI
+    /// keeps the per-issue Fix button that applies exactly one step.
+    static let deferredForSubject: Set<AestheticEvaluator.Issue> = [
+        .subjectFlat, .subjectTooDark, .subjectBlown
+    ]
+
+    /// Sweeps over the order. More than one because resolving one flag can make another's fix newly
+    /// viable (the colour-cast correction changes per-channel clipping, so a highlight fix that was
+    /// refused as harmful can become safe). Three is where chasing that stops being convergence.
+    public static let maxSweeps = 3
+    /// How many times one issue may be pressed within a run. `converge` is one click, and one click
+    /// deliberately keeps its first nudge whether or not it earns its place; the measured fixed
+    /// point for every audited fix arrives by the fourth click (see `CraftFixAuditTests`), so four
+    /// is "press this fix until it stops moving" and no further.
+    public static let maxRoundsPerIssue = 4
+    /// Total `converge` calls in one run, whatever the sweeps and rounds would allow. Each one
+    /// renders and measures the proxy up to four times, so this is the honest bound on the work a
+    /// single click can ask for.
+    public static let maxConverges = 16
+
+    /// One severity unit per issue: the distance from the flag's threshold to the point the
+    /// evaluator scores as unmistakably bad. Dividing by it puts a colour cast measured in Lab
+    /// units and blown highlights measured in frame fractions on one scale, which is what lets the
+    /// whole-run net say "less severe" across a mixed set of flags. Taken from `AestheticEvaluator`
+    /// itself — the `bad`/soft bounds of the very terms that raise each flag — not invented here.
+    static func severityScale(_ issue: AestheticEvaluator.Issue) -> Double? {
+        switch issue {
+        case .blownHighlights:   return 0.04    // flagged at 6% of the frame, scores 0 at 10%
+        case .crushedShadows:    return 0.03    // 5% → 8%
+        case .shadowDetailLost:  return 0.22    // 18% → 40%
+        case .flat:              return 0.20    // dynamic range 0.45 → 0.25, where tonalRange floors
+        case .colorCast:         return 10.0    // cast magnitude 22 → 32
+        case .skinOverSaturated: return 0.13    // saturation 0.75 → 0.88
+        case .skinAshy:          return 0.05    // 0.10 → 0.05
+        case .skinHue:           return 16.0    // the natural arc's soft bounds, 32 → 48 / 6 → 0
+        case .subjectFlat, .subjectTooDark, .subjectBlown: return nil
+        }
+    }
+
+    /// Total severity of everything currently flagged, in those units. A flag whose severity cannot
+    /// be measured (the subject family) counts as one whole unit, so it can neither be traded away
+    /// nor silently acquired.
+    static func severity(_ reading: Reading) -> Double {
+        reading.issues.reduce(0.0) { total, issue in
+            guard let scale = severityScale(issue), let excess = reading.excess(issue) else {
+                return total + 1
+            }
+            return total + excess / scale
+        }
+    }
+
+    /// Why a whole run ended the way it did.
+    public enum RunOutcome: String, Sendable, Equatable {
+        case nothingToDo        // the frame was already clean
+        case allResolved        // every flag the run took on is gone
+        case partlyResolved     // some cleared, some did not — the honest common case
+        case nothingSafeToDo    // every available move was refused; the original is returned
+        case reverted           // the run finished WORSE than it started and was thrown away
+    }
+
+    public struct RunResult: Sendable {
+        /// The state to apply. On `.reverted` and `.nothingSafeToDo` this is the untouched original.
+        public let global: GlobalAdjustments
+        /// Flagged at the start, gone at the end.
+        public let resolved: [AestheticEvaluator.Issue]
+        /// Flagged at the start and still flagged at the end.
+        public let remaining: [AestheticEvaluator.Issue]
+        /// The subset of `remaining` the run deliberately never attempted — the subject family, and
+        /// anything that yielded to its opposite. Reported separately so the UI can say "left alone"
+        /// rather than implying the fix was tried and failed.
+        public let deferred: [AestheticEvaluator.Issue]
+        /// `converge` calls made. Purely so tests can assert the work is bounded.
+        public let converges: Int
+        public let outcome: RunOutcome
+
+        public var changed: Bool { outcome == .allResolved || outcome == .partlyResolved }
+    }
+
+    /// Resolve every flagged craft issue in one go.
+    ///
+    /// `measure` renders a candidate state and reads it back, exactly as `converge` takes it; this
+    /// memoises it, because the sweep asks about the same state repeatedly and each answer costs a
+    /// render plus a face detection.
+    ///
+    /// THE WHOLE-RUN NET. Every individual pass is already refused if it clips colour or invents a
+    /// defect (`converge`'s third brake), but a *sequence* of individually-defensible passes can
+    /// still leave the photograph worse: each one is judged against the state IT started from, so a
+    /// slow drift has no single step to blame it on. The run is therefore measured end-to-end
+    /// against where it began and kept only if it is unambiguously better —
+    ///
+    ///   • no flag the photo did not already have,
+    ///   • no colour clipped that was not clipping before, and
+    ///   • strictly fewer flags, or the same flags at strictly lower total severity.
+    ///
+    /// Anything else and the whole excursion is discarded and the original returned. A run that
+    /// cannot improve the picture has to hand it back untouched, not hand back a mess.
+    public static func fixAll(
+        from start: GlobalAdjustments,
+        subjectIsPerson: Bool = true,
+        measure: (GlobalAdjustments) throws -> Reading
+    ) throws -> RunResult {
+        var cache: [(GlobalAdjustments, Reading)] = []
+        func read(_ g: GlobalAdjustments) throws -> Reading {
+            if let hit = cache.first(where: { $0.0 == g }) { return hit.1 }
+            let reading = try measure(g)
+            cache.append((g, reading))
+            return reading
+        }
+
+        let startReading = try read(start)
+        let startIssues = Set(startReading.issues)
+        func report(_ global: GlobalAdjustments, _ end: Reading,
+                    deferred: Set<AestheticEvaluator.Issue>, converges: Int,
+                    outcome: RunOutcome) -> RunResult {
+            let still = Set(end.issues).intersection(startIssues)
+            // Reported in the run's own order so the UI reads consistently, whatever order the
+            // evaluator happened to raise them in.
+            func ordered(_ s: Set<AestheticEvaluator.Issue>) -> [AestheticEvaluator.Issue] {
+                AestheticEvaluator.Issue.allCases.filter(s.contains)
+            }
+            return RunResult(global: global, resolved: ordered(startIssues.subtracting(still)),
+                             remaining: ordered(still),
+                             deferred: ordered(deferred.intersection(still)),
+                             converges: converges, outcome: outcome)
+        }
+
+        guard !startIssues.isEmpty else {
+            return report(start, startReading, deferred: [], converges: 0, outcome: .nothingToDo)
+        }
+
+        var current = start
+        var addressed: Set<AestheticEvaluator.Issue> = []
+        var deferred = deferredForSubject.intersection(startIssues)
+        var converges = 0
+
+        sweeps: for _ in 0..<maxSweeps {
+            var movedThisSweep = false
+            for (position, issue) in fixAllOrder.enumerated() {
+                // Only the board the user was shown. A flag that APPEARED during the run is never
+                // chased: chasing one is how a pair of opposites turns into an oscillation, and a
+                // pass that invents a flag has already been refused by the collateral brake, so
+                // anything new here arrived by a route this run should not be extending.
+                guard startIssues.contains(issue) else { continue }
+                guard !deferredForSubject.contains(issue) else { continue }
+
+                let now = try read(current)                  // NEVER a stale issue list
+                guard now.issues.contains(issue) else { continue }
+
+                // ANTAGONISM. Yield to an opposite that either has already been acted on this run,
+                // or outranks this one in the order and is still on the board. The first half stops
+                // us undoing work we just did; the second stops us pushing one way while the
+                // complaint that wins the argument is still unresolved. Because the order is fixed
+                // and total, exactly one of a contradictory pair can ever act — there is no
+                // configuration in which both yield and nothing happens.
+                let opposed = opposites(of: issue).contains { other in
+                    addressed.contains(other)
+                        || (position > (fixAllOrder.firstIndex(of: other) ?? Int.max)
+                            && now.issues.contains(other))
+                }
+                if opposed { deferred.insert(issue); continue }
+
+                // Press this fix to ITS fixed point, so that a second click of Fix all finds
+                // nothing left to move. One `converge` is one click of the per-issue button, and by
+                // design a click keeps its first nudge whether or not it earns its place; repeating
+                // until the state stops changing is what turns "a click" into "as far as this
+                // correction goes", bounded throughout by the per-parameter ceilings.
+                for _ in 0..<maxRoundsPerIssue {
+                    guard converges < maxConverges else { break sweeps }
+                    converges += 1
+                    let result = try converge(issue: issue, from: current,
+                                              subjectIsPerson: subjectIsPerson, measure: read)
+                    guard result.global != current else { break }
+                    current = result.global
+                    addressed.insert(issue)
+                    movedThisSweep = true
+                    if result.outcome == .resolved { break }
+                }
+            }
+            if !movedThisSweep { break }
+        }
+
+        guard current != start else {
+            return report(start, startReading, deferred: deferred, converges: converges,
+                          outcome: .nothingSafeToDo)
+        }
+
+        // THE WHOLE-RUN NET.
+        let endReading = try read(current)
+        let invented = Set(endReading.issues).subtracting(startIssues)
+        let addedColourClip = endReading.stats.saturationClip - startReading.stats.saturationClip
+        let fewer = endReading.issues.count < startReading.issues.count
+        let lessSevere = severity(endReading) < severity(startReading) - 1e-9
+        guard invented.isEmpty, addedColourClip <= maxAddedColourClip, fewer || lessSevere else {
+            return report(start, startReading, deferred: deferred, converges: converges,
+                          outcome: .reverted)
+        }
+
+        let unresolved = Set(endReading.issues).intersection(startIssues)
+        return report(current, endReading, deferred: deferred, converges: converges,
+                      outcome: unresolved.isEmpty ? .allResolved : .partlyResolved)
+    }
 }
