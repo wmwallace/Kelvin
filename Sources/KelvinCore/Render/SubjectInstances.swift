@@ -74,12 +74,17 @@ public enum SubjectInstances {
 
     /// The result of matching a fresh detection back onto a known set of instances.
     public struct Reidentified: Sendable {
-        /// Fresh masks keyed by the ORIGINAL instance's id, ready for `Renderer.render`.
-        public let bitmaps: [String: CIImage]
+        /// The instance now standing for each original id — the whole instance, not just its
+        /// pixels, because a caller re-keying stored masks needs the id and box this pass gave it
+        /// and should not have to identify the match back out of a bitmap to get them.
+        public let instances: [String: Instance]
         /// Ids that nothing in the fresh pass matched — the subject moved out of the frame, or
         /// segmentation simply found it this time and not that time. The caller must decide what
         /// to do; rendering with a silently missing mask drops the local edit without a word.
         public let unmatched: [String]
+
+        /// Fresh masks keyed by the ORIGINAL instance's id, ready for `Renderer.render`.
+        public var bitmaps: [String: CIImage] { instances.mapValues(\.mask) }
     }
 
     /// Two boxes are the same thing if they cover the same ground. Below this, they are not.
@@ -114,17 +119,17 @@ public enum SubjectInstances {
             return ($0.ref, $0.fresh) < ($1.ref, $1.fresh)
         }
 
-        var bitmaps: [String: CIImage] = [:]
+        var matched: [String: Instance] = [:]
         var usedReferences = Set<Int>(), usedFresh = Set<Int>()
         for pair in pairs {
             guard !usedReferences.contains(pair.ref), !usedFresh.contains(pair.fresh) else { continue }
             usedReferences.insert(pair.ref); usedFresh.insert(pair.fresh)
-            bitmaps[references[pair.ref].id] = fresh[pair.fresh].mask
+            matched[references[pair.ref].id] = fresh[pair.fresh]
         }
         let unmatched = references.enumerated()
             .filter { !usedReferences.contains($0.offset) }
             .map { $0.element.id }
-        return Reidentified(bitmaps: bitmaps, unmatched: unmatched)
+        return Reidentified(instances: matched, unmatched: unmatched)
     }
 
     /// Standard IoU on normalised boxes. Symmetric, unlike `overlap` below — here neither box is

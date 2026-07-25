@@ -191,7 +191,9 @@ final class AppState: ObservableObject {
     /// overrides on top, so an untouched mask keeps exactly what the engine chose.
     @Published var maskAdjustments: [String: [String: Double]] = [:]
     @Published var maskFeather: [String: Double] = [:]
+    @Published var maskTightness: [String: Double] = [:]
     @Published var maskInvert: [String: Bool] = [:]
+    @Published var showMaskOverlay: Bool = false
 
     /// Every local adjustment the renderer honours inside a mask, in the order a photographer
     /// works: light first, then colour. Keys must match `Renderer.applyMaskedAdjustments`.
@@ -229,6 +231,12 @@ final class AppState: ObservableObject {
                 set: { self.maskFeather[maskId] = $0 })
     }
 
+    func maskTightnessBinding(_ maskId: String) -> Binding<Double> {
+        Binding(get: { self.maskTightness[maskId]
+                        ?? self.baseMasks.first { $0.id == maskId }?.tightness ?? 0 },
+                set: { self.maskTightness[maskId] = $0 })
+    }
+
     func maskInvertBinding(_ maskId: String) -> Binding<Bool> {
         Binding(get: { self.maskInvert[maskId]
                         ?? self.baseMasks.first { $0.id == maskId }?.invert ?? false },
@@ -239,11 +247,84 @@ final class AppState: ObservableObject {
     func resetMask(_ maskId: String) {
         maskAdjustments.removeValue(forKey: maskId)
         maskFeather.removeValue(forKey: maskId)
+        maskTightness.removeValue(forKey: maskId)
         maskInvert.removeValue(forKey: maskId)
         onEdit()
     }
     /// Hand-added parametric gradient masks (radial / linear) — the user's own local edits.
     @Published var userMasks: [UserMaskVM] = []
+
+    /// Every separable subject Vision found in this photo — *this* person, *that* dog, the hillside
+    /// — each with its own mask, ready to be edited on its own. Empty is a real answer (a flat
+    /// landscape has no subject), not a failure.
+    @Published var subjectInstances: [SubjectInstances.Instance] = []
+    /// The instance the pointer is over in the list, outlined on the canvas. A row reading
+    /// "Person 2" tells you nothing about which person that is until you can see it.
+    @Published var highlightedInstanceId: String?
+
+    /// Instances that already have a mask, so the list can show which are in play and clicking one
+    /// again selects it rather than adding a duplicate.
+    var maskedInstanceIds: Set<String> {
+        Set(userMasks.compactMap { $0.kind == .instance ? $0.instanceId : nil })
+    }
+
+    /// Point saved per-subject masks back at the subjects in the CURRENT detection.
+    ///
+    /// A sidecar outlives the detection pass that made it. Reopen the photo and Vision runs again,
+    /// handing out fresh per-pass indices — so a saved mask on `person1` is a mask on nothing, and
+    /// the local edit the photographer saved comes back silently inert. The mask remembers where
+    /// its subject *was* instead, and that survives: match the stored box against this pass by
+    /// geometry and adopt whatever id it goes by now.
+    ///
+    /// A subject that cannot be found again keeps its old id rather than being deleted. The mask
+    /// renders as nothing, but it is still in the list with its settings intact, so a detection
+    /// that misses someone once does not destroy the work — reopening after it comes back finds
+    /// it again.
+    private func rekeyInstanceMasks() {
+        let saved = userMasks.enumerated().filter { $0.element.kind == .instance }
+        guard !saved.isEmpty, !subjectInstances.isEmpty else { return }
+        let references = saved.compactMap { entry -> SubjectInstances.Reference? in
+            guard let id = entry.element.instanceId, let box = entry.element.instanceBox else { return nil }
+            return SubjectInstances.Reference(id: id, kind: entry.element.instanceKind ?? .object,
+                                              boundingBox: box)
+        }
+        guard !references.isEmpty else { return }
+
+        let matched = SubjectInstances.reidentify(subjectInstances, as: references)
+        for (index, mask) in saved {
+            guard let oldId = mask.instanceId, let now = matched.instances[oldId] else { continue }
+            userMasks[index].instanceId = now.id
+            userMasks[index].instanceBox = now.boundingBox
+            userMasks[index].instanceKind = now.kind
+        }
+    }
+
+    /// Add (or re-select) the mask for one detected subject.
+    func addInstanceMask(_ instance: SubjectInstances.Instance) {
+        if let existing = userMasks.first(where: { $0.instanceId == instance.id }) {
+            selectedUserMaskId = existing.id
+            showMaskOverlay = true
+            onEdit()
+            return
+        }
+        var m = UserMaskVM(kind: .instance)
+        m.instanceId = instance.id
+        m.instanceLabel = instance.label
+        m.instanceBox = instance.boundingBox
+        m.instanceKind = instance.kind
+        // A visible starting nudge, like every other mask here: a new mask that changes nothing
+        // looks broken. Up for a subject (the usual reason to isolate one is that it is too dark),
+        // and gentle enough to be a starting point rather than a decision.
+        m.exposure = 0.3
+        userMasks.append(m)
+        selectedUserMaskId = m.id
+        showMaskOverlay = true
+        onEdit()
+    }
+
+    func adjustBrushRadius(by delta: Double) {
+        brushRadius = min(0.35, max(0.02, brushRadius + delta))
+    }
 
     /// Sensor dust/spots detected once on load (normalised → resolution-independent, so the same
     /// set heals the proxy preview, the full-res export, and every frame of a batch — dust sits at
@@ -568,6 +649,7 @@ final class AppState: ObservableObject {
         }
         edit = saved.global
         userMasks = saved.userMasks
+        rekeyInstanceMasks()
         maskEnabled = saved.maskEnabled
         maskStrength = saved.maskStrength
         straighten = saved.straighten
@@ -597,6 +679,7 @@ final class AppState: ObservableObject {
             originalPreviewImage: original.flatMap { $0.url == url ? $0.image : nil },
             perception: perception,
             candidates: candidates, proxyMaskBitmaps: proxyMaskBitmaps,
+            subjectInstances: subjectInstances,
             subjectLuma: subjectLuma, skyLuma: skyLuma,
             healSpots: healSpots, detectedSpotCount: detectedSpotCount,
             selectedCandidateId: selectedCandidateId, edit: edit, editBaseline: editBaseline,
@@ -620,6 +703,8 @@ final class AppState: ObservableObject {
         original = s.originalPreviewImage.map { TaggedPreview(url: s.url, image: $0) }
         perception = s.perception; candidates = s.candidates
         proxyMaskBitmaps = s.proxyMaskBitmaps
+        subjectInstances = s.subjectInstances
+        highlightedInstanceId = nil
         subjectLuma = s.subjectLuma; skyLuma = s.skyLuma
         healSpots = s.healSpots; detectedSpotCount = s.detectedSpotCount
         selectedCandidateId = s.selectedCandidateId
@@ -644,6 +729,7 @@ final class AppState: ObservableObject {
         activeRecipe = nil; active = nil; original = nil
         lastRenderedCI = nil; activeCraftIssues = []; lastCraftReading = nil; exhaustedFixes = []
         userMasks = []; paintingMaskId = nil; selectedUserMaskId = nil
+        subjectInstances = []; highlightedInstanceId = nil
         brushCache = [:]
         proxyMaskBitmaps = [:]; healSpots = []; detectedSpotCount = 0
         zoom = 1; pan = .zero; showingOriginal = false
@@ -775,6 +861,9 @@ final class AppState: ObservableObject {
         flags = FlagStore.flags(among: folderPhotos)
         capture = CaptureInfoReader.read(url: url)
         userMasks = []; paintingMaskId = nil; selectedUserMaskId = nil   // hand-drawn masks are per-photo
+        // The subjects belong to the photograph, so they go out with it. Left standing,
+        // the list would offer the last photo's people while this one decoded.
+        subjectInstances = []; highlightedInstanceId = nil
         zoom = 1; pan = .zero
         do {
             // DECODE OFF THE MAIN THREAD. Decoding a 60 MP RAW, materialising the proxy and
@@ -845,12 +934,24 @@ final class AppState: ObservableObject {
                 // a clean frame yields none. Off until the user opts in.
                 return MeasuredPhoto(stats: stats, masks: measured,
                                      dust: DustDetector.detect(in: proxy),
-                                     focus: FocusMeasure.read(proxy))
+                                     focus: FocusMeasure.read(proxy),
+                                     // Every separable subject, individually. `LocalMasks` above
+                                     // fuses them into one "subject" for the engine's own decisions
+                                     // (lift the person, defog the sky), which is right for a
+                                     // global judgement and wrong for editing: two people at
+                                     // different distances from the light want different amounts,
+                                     // and the merged mask can only give them the average.
+                                     instances: SubjectInstances.detect(in: proxy))
             }.value
             guard imageURL == url else { return }
 
             let stats = measurement.stats
+            self.subjectInstances = measurement.instances
+            // Each instance's bitmap goes in under its own id, so a mask naming that instance
+            // renders it. `LocalMasks`' merged "subject"/"sky" stay alongside — the engine's
+            // automatic local edits still use those.
             self.proxyMaskBitmaps = measurement.masks.bitmaps
+                .merging(measurement.instances.reduce(into: [:]) { $0[$1.id] = $1.mask }) { a, _ in a }
             self.subjectLuma = measurement.masks.subjectLuma
             self.skyLuma = measurement.masks.skyLuma
             let proxyMasks = measurement.masks.bitmaps
@@ -1390,6 +1491,7 @@ final class AppState: ObservableObject {
         if kind == .subject { m.exposure = 0.3 }
         userMasks.append(m)
         selectedUserMaskId = m.id                      // show its canvas handles
+        showMaskOverlay = true                         // auto-show mask overlay when adding a mask
         if kind == .brush { paintingMaskId = m.id }    // brush: start painting right away
         onEdit()
     }
@@ -1447,11 +1549,51 @@ final class AppState: ObservableObject {
             // Absent = untouched, so the engine's own values stand.
             if let edited = maskAdjustments[m.id] { m.adjustments = edited }
             if let f = maskFeather[m.id] { m.feather = f }
+            if let t = maskTightness[m.id] { m.tightness = t }
             if let inv = maskInvert[m.id] { m.invert = inv }
             return m
         }
         ms += userMasks.map { $0.toMask() }
         return ms.isEmpty ? nil : ms
+    }
+
+    private func activeSelectedMaskBitmap(extent: CGRect) -> (bitmap: CIImage, invert: Bool, feather: Double, tightness: Double)? {
+        let bitmaps = proxyMaskBitmaps.merging(brushBitmaps(extent: extent)) { _, baked in baked }
+        if let mid = selectedUserMaskId, let userMask = userMasks.first(where: { $0.id == mid }) {
+            let maskStruct = userMask.toMask()
+            var bitmap: CIImage? = nil
+            if let stamps = maskStruct.stamps, !stamps.isEmpty {
+                bitmap = bitmaps[maskStruct.id] ?? Renderer.brushMask(stamps, extent: extent)
+            } else if let shape = maskStruct.shape {
+                bitmap = Renderer.gradientMask(shape, extent: extent)
+            } else if let sel = maskStruct.selection, let cube = SelectionMask.makeData(sel) {
+                bitmap = (proxyCI ?? CIImage()).applyingFilter("CIColorCubeWithColorSpace", parameters: [
+                    "inputCubeDimension": SelectionMask.dimension,
+                    "inputCubeData": cube,
+                    "inputColorSpace": CGColorSpace(name: CGColorSpace.sRGB)!
+                ]).cropped(to: extent)
+            } else {
+                bitmap = bitmaps[maskStruct.id] ?? bitmaps[maskStruct.type]
+            }
+            if let b = bitmap {
+                return (b, maskStruct.invert, maskStruct.feather, maskStruct.tightness ?? 0)
+            }
+        }
+        if let firstBase = baseMaskIds.first(where: { maskEnabled[$0] ?? true }) {
+            if let b = proxyMaskBitmaps[firstBase] {
+                let invert = maskInvert[firstBase] ?? false
+                let feather = maskFeather[firstBase] ?? 0
+                let tightness = maskTightness[firstBase] ?? 0
+                return (b, invert, feather, tightness)
+            }
+        }
+        if let firstUser = userMasks.first {
+            let maskStruct = firstUser.toMask()
+            if let b = bitmaps[maskStruct.id] ?? bitmaps[maskStruct.type] {
+                return (b, maskStruct.invert, maskStruct.feather, maskStruct.tightness ?? 0)
+            }
+        }
+        return nil
     }
 
     /// The last rendered proxy (for the histogram + the debounced craft check).
@@ -1518,8 +1660,13 @@ final class AppState: ObservableObject {
         // Which photo these pixels are of. A render started before a photo switch can still land
         // after it; tagged, that frame is ignored instead of being shown under the new photo's name.
         let renderedURL = loadedURL
+        let showOverlay = showMaskOverlay
+        let overlayTarget = showOverlay ? activeSelectedMaskBitmap(extent: proxy.extent) : nil
         Task.detached(priority: .userInitiated) {
-            let rendered = Renderer.render(input.proxy, with: input.recipe, maskBitmaps: input.bitmaps)
+            var rendered = Renderer.render(input.proxy, with: input.recipe, maskBitmaps: input.bitmaps)
+            if let ov = overlayTarget {
+                rendered = Renderer.renderMaskOverlay(rendered, maskBitmap: ov.bitmap, invert: ov.invert, feather: ov.feather, tightness: ov.tightness, opacity: 0.6)
+            }
             let cg = ctx.createCGImage(rendered, from: rendered.extent)
             let out = RenderOutput(ci: rendered, cg: cg)
             await MainActor.run {
@@ -1568,13 +1715,45 @@ final class AppState: ObservableObject {
         Task { try? await store.record(pick: pick) }
     }
 
+    /// The mask bitmaps for a full-resolution render — the merged subject/sky pair, plus a mask for
+    /// every per-subject mask the recipe names.
+    ///
+    /// The per-subject part cannot simply re-detect and use what comes back. Instance ids are
+    /// Vision's per-pass indices: run the segmentation again at 60 MP instead of 1200 px and
+    /// `person0` may be a different person, or nobody. Trusting the id would export an edit landing
+    /// on the wrong face, in a file that looked right on screen the whole time. So the pass the
+    /// photographer actually edited against is handed forward as references, and the fresh
+    /// detection is matched back onto it by geometry.
+    ///
+    /// A subject that cannot be matched is *reported*, not papered over: its bitmap is absent, the
+    /// renderer skips that mask, and the status line says whose edit did not make it. Silently
+    /// dropping a local edit from an export is the failure worth avoiding here.
+    private func fullResolutionMaskBitmaps(for fullRes: CIImage) -> [String: CIImage] {
+        var bitmaps = LocalMasks.measure(in: fullRes).bitmaps
+        let wanted = Set(userMasks.compactMap { $0.kind == .instance ? $0.instanceId : nil })
+        guard !wanted.isEmpty else { return bitmaps }
+
+        let references = subjectInstances.filter { wanted.contains($0.id) }.map(\.reference)
+        let matched = SubjectInstances.reidentify(SubjectInstances.detect(in: fullRes),
+                                                  as: references)
+        bitmaps.merge(matched.bitmaps) { _, fresh in fresh }
+        if !matched.unmatched.isEmpty {
+            let names = matched.unmatched
+                .compactMap { id in userMasks.first { $0.instanceId == id }?.label }
+                .joined(separator: ", ")
+            statusMessage = "Couldn't find \(names) again at full size — that edit is not in the export"
+        }
+        return bitmaps
+    }
+
     func exportFullResolution(to exportURL: URL) async {
         guard let fullRes = fullResCI, let recipe = activeRecipe else { return }
         isProcessing = true
         statusMessage = "Rendering full resolution…"
         do {
             // Regenerate masks at full resolution so the local edits are crisp on export.
-            let masks = (recipe.masks?.isEmpty == false) ? LocalMasks.measure(in: fullRes).bitmaps : [:]
+            let masks = (recipe.masks?.isEmpty == false)
+                ? fullResolutionMaskBitmaps(for: fullRes) : [:]
             try ImageWriter.write(Renderer.render(fullRes, with: recipe, maskBitmaps: masks), to: exportURL)
             statusMessage = "Exported \(exportURL.lastPathComponent)"
             // Exporting is the one unambiguous signal of preference, so it's logged. NOTE: nothing
@@ -1756,6 +1935,8 @@ final class AppState: ObservableObject {
         let masks: LocalMasks.Measured
         let dust: [HealSpot]
         let focus: FocusMeasure.Reading
+        /// Each separable subject in the frame, for the mask list.
+        let instances: [SubjectInstances.Instance]
     }
 
     /// Shared with the background candidate build — a CIContext is thread-safe and expensive to
@@ -1876,6 +2057,12 @@ struct ContentView: View {
                         .keyboardShortcut("p", modifiers: [])
                     Button("") { appState.flagCurrentAndAdvance(.reject) }
                         .keyboardShortcut("x", modifiers: [])
+                    Button("") { appState.showMaskOverlay.toggle(); appState.onEdit() }
+                        .keyboardShortcut("o", modifiers: [])
+                    Button("") { appState.adjustBrushRadius(by: -0.02) }
+                        .keyboardShortcut("[", modifiers: [])
+                    Button("") { appState.adjustBrushRadius(by: 0.02) }
+                        .keyboardShortcut("]", modifiers: [])
                     Button("") { Task { await appState.advance(by: 1) } }
                         .keyboardShortcut(.rightArrow, modifiers: [])
                     Button("") { Task { await appState.advance(by: -1) } }
@@ -2035,6 +2222,7 @@ struct ContentView: View {
                         .onEnded { _ in zoomStart = appState.zoom })
                     // Draggable handles for the selected radial / graduated mask.
                     .overlay { maskCanvasOverlay(in: geo.size) }
+                    .overlay { subjectHighlightOverlay(in: geo.size) }
                     // Double-click to fit.
                     .onTapGesture(count: 2) { appState.resetZoom(); zoomStart = 1 }
                 }
@@ -2084,6 +2272,17 @@ struct ContentView: View {
             .background(Capsule().fill(Theme.glow.opacity(0.9))).padding(30)
     }
 
+    /// Which subject the pointer is over in the mask list, outlined on the photo. "Person 2" names
+    /// nobody until you can see which one it is, and picking the wrong row means an edit landing on
+    /// the wrong face.
+    @ViewBuilder
+    private func subjectHighlightOverlay(in container: CGSize) -> some View {
+        if !appState.showingOriginal, let id = appState.highlightedInstanceId,
+           let instance = appState.subjectInstances.first(where: { $0.id == id }) {
+            SubjectHighlight(instance: instance, imageFrame: appState.imageRect(in: container))
+        }
+    }
+
     /// On-canvas handles for the selected radial / graduated mask — drag directly on the image to
     /// place, size, and rotate the mask instead of nudging sliders.
     @ViewBuilder
@@ -2117,6 +2316,13 @@ struct ContentView: View {
                 handle(at: CGPoint(x: center.x + dir.x * 54, y: center.y + dir.y * 54), small: true) {
                     appState.rotateLinear(mid, handleAt: $0, in: rect)
                 }
+            case .instance:
+                // No handles — the shape is the subject's, not something to drag. But show WHICH
+                // subject: the sliders below say "Exposure", and on a frame with three people
+                // there is otherwise nothing on screen saying whose.
+                if let instance = appState.subjectInstances.first(where: { $0.id == m.instanceId }) {
+                    SubjectHighlight(instance: instance, imageFrame: rect)
+                }
             case .brush, .colorRange, .luminance, .skin, .background, .subject:
                 EmptyView()
             }
@@ -2140,6 +2346,23 @@ struct ContentView: View {
                 Spacer()
                 // Zoom control (pinch or double-click also work).
                 HStack(spacing: 6) {
+                    Button(action: { appState.showMaskOverlay.toggle(); appState.onEdit() }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: appState.showMaskOverlay ? "eye.fill" : "eye")
+                                .font(.system(size: 10))
+                            Text("Overlay")
+                                .font(Theme.ui(10, appState.showMaskOverlay ? .semibold : .regular))
+                        }
+                        .foregroundColor(appState.showMaskOverlay ? Theme.glow : Theme.inkDim)
+                        .padding(.horizontal, 7).padding(.vertical, 3)
+                        .background(
+                            Capsule().fill(appState.showMaskOverlay ? Theme.glow.opacity(0.15) : Theme.surface2)
+                                .overlay(Capsule().stroke(appState.showMaskOverlay ? Theme.glow.opacity(0.6) : Theme.hairline, lineWidth: 1))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .help("Toggle Mask Overlay (O)")
+
                     Button(action: { appState.setZoom(appState.zoom - 0.5); zoomStart = appState.zoom }) {
                         Image(systemName: "minus.magnifyingglass").foregroundColor(Theme.inkDim)
                     }.buttonStyle(.plain)
@@ -2523,6 +2746,16 @@ struct ContentView: View {
 
                 CollapsibleSection("Masks", icon: "circle.dashed", trailing: appState.maskCountLabel) {
                 VStack(spacing: 12) {
+                    // The subjects Kelvin found, first — before the shapes you have to draw
+                    // yourself. Picking a thing out of a list is the cheap path and it should be
+                    // the one you meet first; the geometry below is the fallback for when the
+                    // segmentation has not found what you meant.
+                    if !appState.subjectInstances.isEmpty {
+                        SubjectList(instances: appState.subjectInstances,
+                                    maskedIds: appState.maskedInstanceIds,
+                                    highlighted: $appState.highlightedInstanceId,
+                                    onPick: appState.addInstanceMask)
+                    }
                     // Auto-detected masks (subject / sky): toggle + strength.
                     ForEach(appState.baseMaskIds, id: \.self) { mid in
                         MaskControl(
@@ -2535,6 +2768,7 @@ struct ContentView: View {
                             maskId: mid,
                             adjustment: { key in appState.maskAdjustmentBinding(mid, key) },
                             feather: appState.maskFeatherBinding(mid),
+                            tightness: appState.maskTightnessBinding(mid),
                             invert: appState.maskInvertBinding(mid),
                             onReset: { appState.resetMask(mid) })
                     }
@@ -3091,7 +3325,7 @@ struct EditSnapshot: Equatable {
 
 struct UserMaskVM: Identifiable, Equatable, Codable {
     enum Kind: String, Codable {
-        case radial, linear, brush, colorRange, luminance, skin, background, subject
+        case radial, linear, brush, colorRange, luminance, skin, background, subject, instance
     }
     var id = UUID()
     var kind: Kind
@@ -3099,6 +3333,65 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
     var stamps: [BrushStamp] = []                       // brush only
     var selCenter = 0.0, selRange = 0.1, selSoftness = 0.1   // colour / luminance / skin selection
     var exposure = 0.0, contrast = 0.0, saturation = 0.0
+    var tightness = 0.0
+    var feather = 0.0
+    var invert = false
+    /// `.instance` only: which detected subject this mask is for. The renderer looks the bitmap up
+    /// under this id, and the export path matches it back to a fresh full-resolution detection —
+    /// see `SubjectInstances.reidentify`, because the id is a per-pass index and means nothing on
+    /// its own. Optional (and absent from older sidecars) so decoding an edit saved before
+    /// per-subject masks existed still works.
+    var instanceId: String?
+    /// The label as it was when the mask was made ("Person 2", "Cat"). Stored rather than looked
+    /// up so an edit reopened after a detection that came back slightly differently still says
+    /// what the photographer thought they were editing.
+    var instanceLabel: String?
+    /// WHERE the subject was, normalised, when the mask was made — the part of its identity that
+    /// survives a sidecar. The id does not: reopen the photo and the segmentation runs again with
+    /// fresh per-pass indices, so a saved mask keyed only by id comes back pointing at nobody. The
+    /// box is what `rekeyInstanceMasks` matches on to find the same subject again.
+    var instanceBox: CGRect?
+    /// Kind at the time, for the same reason — it tie-breaks the match.
+    var instanceKind: SubjectInstances.Kind?
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, cx, cy, radius, angle, softness, stamps, selCenter, selRange, selSoftness
+        case exposure, contrast, saturation, instanceId, instanceLabel, instanceBox, instanceKind
+        case tightness, feather, invert
+    }
+
+    init(id: UUID = UUID(), kind: Kind, cx: Double = 0.5, cy: Double = 0.5, radius: Double = 0.35, angle: Double = 0.0, softness: Double = 0.35, stamps: [BrushStamp] = [], selCenter: Double = 0.0, selRange: Double = 0.1, selSoftness: Double = 0.1, exposure: Double = 0.0, contrast: Double = 0.0, saturation: Double = 0.0, instanceId: String? = nil, instanceLabel: String? = nil, instanceBox: CGRect? = nil, instanceKind: SubjectInstances.Kind? = nil, tightness: Double = 0.0, feather: Double = 0.0, invert: Bool = false) {
+        self.id = id; self.kind = kind; self.cx = cx; self.cy = cy; self.radius = radius; self.angle = angle; self.softness = softness
+        self.stamps = stamps; self.selCenter = selCenter; self.selRange = selRange; self.selSoftness = selSoftness
+        self.exposure = exposure; self.contrast = contrast; self.saturation = saturation
+        self.instanceId = instanceId; self.instanceLabel = instanceLabel; self.instanceBox = instanceBox; self.instanceKind = instanceKind
+        self.tightness = tightness; self.feather = feather; self.invert = invert
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        kind = try c.decode(Kind.self, forKey: .kind)
+        cx = try c.decodeIfPresent(Double.self, forKey: .cx) ?? 0.5
+        cy = try c.decodeIfPresent(Double.self, forKey: .cy) ?? 0.5
+        radius = try c.decodeIfPresent(Double.self, forKey: .radius) ?? 0.35
+        angle = try c.decodeIfPresent(Double.self, forKey: .angle) ?? 0.0
+        softness = try c.decodeIfPresent(Double.self, forKey: .softness) ?? 0.35
+        stamps = try c.decodeIfPresent([BrushStamp].self, forKey: .stamps) ?? []
+        selCenter = try c.decodeIfPresent(Double.self, forKey: .selCenter) ?? 0.0
+        selRange = try c.decodeIfPresent(Double.self, forKey: .selRange) ?? 0.1
+        selSoftness = try c.decodeIfPresent(Double.self, forKey: .selSoftness) ?? 0.1
+        exposure = try c.decodeIfPresent(Double.self, forKey: .exposure) ?? 0.0
+        contrast = try c.decodeIfPresent(Double.self, forKey: .contrast) ?? 0.0
+        saturation = try c.decodeIfPresent(Double.self, forKey: .saturation) ?? 0.0
+        instanceId = try c.decodeIfPresent(String.self, forKey: .instanceId)
+        instanceLabel = try c.decodeIfPresent(String.self, forKey: .instanceLabel)
+        instanceBox = try c.decodeIfPresent(CGRect.self, forKey: .instanceBox)
+        instanceKind = try c.decodeIfPresent(SubjectInstances.Kind.self, forKey: .instanceKind)
+        tightness = try c.decodeIfPresent(Double.self, forKey: .tightness) ?? 0.0
+        feather = try c.decodeIfPresent(Double.self, forKey: .feather) ?? 0.0
+        invert = try c.decodeIfPresent(Bool.self, forKey: .invert) ?? false
+    }
 
     var label: String {
         switch kind {
@@ -3106,6 +3399,7 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
         case .colorRange: return "Colour range"; case .luminance: return "Luminance"; case .skin: return "Skin"
         case .background: return "Background"
         case .subject: return "Subject"
+        case .instance: return instanceLabel ?? "Subject"
         }
     }
     var hasCanvasHandles: Bool { kind == .radial || kind == .linear }
@@ -3115,31 +3409,40 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
         if exposure != 0 { adj["exposure_ev"] = exposure }
         if contrast != 0 { adj["contrast"] = contrast }
         if saturation != 0 { adj["saturation"] = saturation }
+        let f = feather
+        let t = tightness
+        let inv = invert
         switch kind {
         case .brush:
-            return Mask(id: id.uuidString, type: "brush", source: "brush", invert: false,
-                        feather: 0, opacity: 1, adjustments: adj, stamps: stamps)
+            return Mask(id: id.uuidString, type: "brush", source: "brush", invert: inv,
+                        feather: f, opacity: 1, adjustments: adj, stamps: stamps, tightness: t)
         case .radial, .linear:
             let sk: MaskShape.Kind = kind == .radial ? .radial : .linear
-            return Mask(id: id.uuidString, type: sk.rawValue, source: "gradient", invert: false,
-                        feather: 0, opacity: 1, adjustments: adj,
-                        shape: MaskShape(kind: sk, cx: cx, cy: cy, radius: radius, angle: angle, softness: softness))
+            return Mask(id: id.uuidString, type: sk.rawValue, source: "gradient", invert: inv,
+                        feather: f, opacity: 1, adjustments: adj,
+                        shape: MaskShape(kind: sk, cx: cx, cy: cy, radius: radius, angle: angle, softness: softness), tightness: t)
         case .colorRange, .luminance:
             let k: MaskSelection.Kind = kind == .colorRange ? .color : .luminance
-            return Mask(id: id.uuidString, type: k.rawValue, source: "selection", invert: false,
-                        feather: 0, opacity: 1, adjustments: adj,
-                        selection: MaskSelection(kind: k, center: selCenter, range: selRange, softness: selSoftness))
+            return Mask(id: id.uuidString, type: k.rawValue, source: "selection", invert: inv,
+                        feather: f, opacity: 1, adjustments: adj,
+                        selection: MaskSelection(kind: k, center: selCenter, range: selRange, softness: selSoftness), tightness: t)
         case .skin:
-            return Mask(id: id.uuidString, type: "skin", source: "skin", invert: false,
-                        feather: 0, opacity: 1, adjustments: adj,
-                        selection: MaskSelection(kind: .color, center: selCenter, range: selRange, softness: selSoftness))
+            return Mask(id: id.uuidString, type: "skin", source: "skin", invert: inv,
+                        feather: f, opacity: 1, adjustments: adj,
+                        selection: MaskSelection(kind: .color, center: selCenter, range: selRange, softness: selSoftness), tightness: t)
         case .background:
-            // type "subject" so the renderer finds the person bitmap; invert → everything else.
-            return Mask(id: id.uuidString, type: "subject", source: "segmentation", invert: true,
-                        feather: 20, opacity: 1, adjustments: adj)
+            let finalInvert = inv ? false : true
+            let finalFeather = f != 0 ? f : 20
+            return Mask(id: id.uuidString, type: "subject", source: "segmentation", invert: finalInvert,
+                        feather: finalFeather, opacity: 1, adjustments: adj, tightness: t)
         case .subject:
-            return Mask(id: id.uuidString, type: "subject", source: "segmentation", invert: false,
-                        feather: 30, opacity: 1, adjustments: adj)
+            let finalFeather = f != 0 ? f : 30
+            return Mask(id: id.uuidString, type: "subject", source: "segmentation", invert: inv,
+                        feather: finalFeather, opacity: 1, adjustments: adj, tightness: t)
+        case .instance:
+            let finalFeather = f != 0 ? f : 30
+            return Mask(id: instanceId ?? id.uuidString, type: "instance", source: "segmentation",
+                        invert: inv, feather: finalFeather, opacity: 1, adjustments: adj, tightness: t)
         }
     }
 }
@@ -3159,7 +3462,7 @@ struct UserMaskEditor: View {
     /// Skin and Background are built from the person segmentation — flag it when there isn't one,
     /// so the mask isn't just quietly inert.
     private var needsPersonButHasNone: Bool {
-(mask.kind == .skin || mask.kind == .background || mask.kind == .subject) && !hasPerson
+        (mask.kind == .skin || mask.kind == .background || mask.kind == .subject) && !hasPerson
     }
 
     var body: some View {
@@ -3235,12 +3538,16 @@ struct UserMaskEditor: View {
             case .subject:
                 Text("The detected person — lift, model, or recover them without touching the scene.")
                     .font(Theme.mono(9)).foregroundColor(Theme.inkDim).fixedSize(horizontal: false, vertical: true)
+            case .instance:
+                Text("Just this one — everything else in the frame is untouched.")
+                    .font(Theme.mono(9)).foregroundColor(Theme.inkDim).fixedSize(horizontal: false, vertical: true)
             }
 
             Rectangle().fill(Theme.hairline).frame(height: 1)
             ToneSlider(label: "Exposure", value: $mask.exposure, range: -3...3, step: 0.05, unit: " EV", onChange: onChange, identity: .exposure)
             ToneSlider(label: "Contrast", value: $mask.contrast, range: -100...100, step: 1, unit: "", onChange: onChange, identity: .contrast)
             ToneSlider(label: "Saturation", value: $mask.saturation, range: -100...100, step: 1, unit: "", onChange: onChange, identity: .saturation(hue: nil))
+            ToneSlider(label: "Tightness", value: $mask.tightness, range: 0...100, step: 1, unit: "", onChange: onChange)
         }
         .padding(11)
         .background(
@@ -3266,6 +3573,7 @@ struct MaskControl: View {
     var maskId: String? = nil
     var adjustment: ((String) -> Binding<Double>)? = nil
     var feather: Binding<Double>? = nil
+    var tightness: Binding<Double>? = nil
     var invert: Binding<Bool>? = nil
     var onReset: (() -> Void)? = nil
     /// Folded by default. A subject mask usually needs nothing beyond the strength Kelvin chose,
@@ -3324,6 +3632,10 @@ struct MaskControl: View {
                             }
                             if let feather {
                                 ToneSlider(label: "Feather", value: feather, range: 0...100,
+                                           step: 1, unit: "", onChange: onChange)
+                            }
+                            if let tightness {
+                                ToneSlider(label: "Tightness", value: tightness, range: 0...100,
                                            step: 1, unit: "", onChange: onChange)
                             }
                             if let invert {

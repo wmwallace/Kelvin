@@ -90,6 +90,11 @@ struct PhotoSession {
     let perception: Perception?
     let candidates: [CandidateViewModel]
     let proxyMaskBitmaps: [String: CIImage]
+    /// The separable subjects found in this frame. Cached with everything else because the mask
+    /// list is per-photo: without it, switching away and back leaves the previous photograph's
+    /// people listed under this one — and detection is a Vision pass, far too slow to redo on
+    /// every switch when the whole point of this cache is that coming back is instant.
+    let subjectInstances: [SubjectInstances.Instance]
     let subjectLuma: Double?
     let skyLuma: Double?
     let healSpots: [HealSpot]

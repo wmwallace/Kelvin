@@ -93,4 +93,31 @@ final class MaskAdjustmentTests: XCTestCase {
         XCTAssertLessThan(try differs(neutral, inverted), 0.5,
                           "inverting a whole-frame mask should leave the frame alone")
     }
+
+    /// Tightness sharpens mask edge transitions, changing the result when applied to soft edges.
+    func testTightnessChangesMaskEdgeContrast() throws {
+        let mask = Mask(id: "radial", type: "radial", source: "gradient", invert: false,
+                        feather: 0, opacity: 1, adjustments: ["exposure_ev": 1.0],
+                        shape: MaskShape(kind: .radial, cx: 0.5, cy: 0.5, radius: 0.3, softness: 0.4),
+                        tightness: 0)
+        let maskTight = Mask(id: "radial", type: "radial", source: "gradient", invert: false,
+                             feather: 0, opacity: 1, adjustments: ["exposure_ev": 1.0],
+                             shape: MaskShape(kind: .radial, cx: 0.5, cy: 0.5, radius: 0.3, softness: 0.4),
+                             tightness: 60)
+        let r1 = Renderer.render(base(), with: Recipe(schemaVersion: 1, id: nil, label: nil, provenance: nil,
+                                                       global: .neutral, curve: nil, hsl: nil, masks: [mask],
+                                                       detail: nil, geometry: nil))
+        let r2 = Renderer.render(base(), with: Recipe(schemaVersion: 1, id: nil, label: nil, provenance: nil,
+                                                       global: .neutral, curve: nil, hsl: nil, masks: [maskTight],
+                                                       detail: nil, geometry: nil))
+        XCTAssertGreaterThan(try differs(r1, r2), 0.5, "Tightness should sharpen mask transition")
+    }
+
+    /// Mask overlay rendering composites a red visualization overlay over affected areas.
+    func testRenderMaskOverlayProducesRedOverlay() throws {
+        let baseImage = base()
+        let maskImage = fullMask()
+        let overlay = Renderer.renderMaskOverlay(baseImage, maskBitmap: maskImage, opacity: 0.6)
+        XCTAssertGreaterThan(try differs(baseImage, overlay), 2.0, "Mask overlay should visually alter image with red tint")
+    }
 }
