@@ -151,7 +151,8 @@ public enum BatchApply {
                     let bitmaps = recipe.masks?.isEmpty == false
                         ? LocalMasks.measure(in: image).bitmaps : [:]
                     let rendered = Renderer.render(image, with: recipe, maskBitmaps: bitmaps)
-                    try ImageWriter.write(rendered, to: out, format: destination.format)
+                    try ImageWriter.write(rendered, to: out, format: destination.format,
+                                          metadata: destination.metadata)
                     items.append(.written(source: url, to: out))
                 } catch {
                     items.append(.failed(source: url, message: "\(error)"))

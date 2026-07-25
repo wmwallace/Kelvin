@@ -320,7 +320,7 @@ any earlier comparison recorded elsewhere should be distrusted.
 
 ## D-browse-1 — One "Group by" control, not two grouping menus
 
-**Decided with the owner, July 2026. Not yet built.**
+**Decided with the owner, July 2026. Built — see "As built" at the end of this entry.**
 
 Two independent passes now produce groupings of a shoot, and they are complementary rather than
 competing:
@@ -349,3 +349,113 @@ Constraints for whoever builds it:
 - Residue groups (`isResidue`) are always last and need their own heading — "No date", "No location".
 - Headings are the app's to format; Core does no localisation on purpose.
 - Grouping assumes the shoot arrives in capture order.
+
+### As built
+
+One menu in the filmstrip header, beside the sort menu, labelled with the current lens. Five
+positions, exactly as decided. The four decisions the build had to make on top of the above:
+
+- **A run is a column, not an interleaved row.** Heading above its own thumbnails, a rule between
+  runs. Headings inline in one long row leave nothing marking where a group ends.
+- **A lone frame gets no heading under Burst or Similar.** A shoot of 437 frames produces a few
+  hundred runs of one, and labelling each of them buries the runs that are actually a burst. Day and
+  Place always carry a heading: a day with one frame in it is still that day.
+- **Place is headed with coordinates** ("50.4°N, 4.1°W"), not a place name. Reverse geocoding is a
+  network call and this app makes none. One decimal is ~11 km — enough to tell two venues apart
+  without pretending to precision the heading is not for.
+- **Similar holds unmeasured frames back** in a trailing "Not measured yet" run rather than
+  scattering them as singletons, because "no fingerprint yet" is not the claim "this frame is
+  unique". Choosing the lens starts the triage scan that produces the fingerprints, since asking for
+  the lens is asking for the measurement.
+
+Place also falls back to "None" if the EXIF read lands and the folder turns out to have no positions
+at all — the lens was chosen for a different folder, and leaving it on would partition the shoot into
+one run called "No location", which reads as a broken control rather than as files without GPS.
+
+**Found while building it:** `AppState.triage` was declared, `@Published`, and never written to. The
+folder scan called a focus-only helper, so every verdict Core had been taught to produce — the
+concerns *and* the near-duplicate fingerprints — was discarded before it reached the window, and
+nothing read the dictionary either. The Similar lens had nothing to group on. The scan now stores the
+verdict and publishes the focus reading out of it, which is what "triage rides the focus scan" was
+supposed to mean.
+
+---
+
+## D-export-1 — What travels out inside an exported file
+
+**Decided with the owner, 25 July 2026. Built.**
+
+Exports re-embedded the source photograph's **GPS fix and the camera body's serial number**, and so
+did every frame of a batch. Not by design — `CIImage(contentsOf:)` fills `properties` from the file,
+that dictionary survives the whole filter chain, and `writeJPEGRepresentation` encodes it again. The
+PNG path does the same through an `eXIf` chunk. Nothing in the UI mentioned it.
+
+This contradicted the app's own reasoning elsewhere: it refuses to draw an inline map because
+"MapKit renders by fetching tiles from Apple… a location is the most sensitive single field in the
+file". An export that silently republished that field made the refusal decorative.
+
+**Decided: a toggle in the export panel, defaulting to OFF — metadata travels unless you say
+otherwise.** That is what every other editor does, and a photographer exporting for a client usually
+wants the camera, lens, date and exposure to survive. What was missing was any way to say no, not the
+default itself. The toggle is persisted, because stripping location is a property of how someone
+works rather than of one file.
+
+`ImageWriter.MetadataPolicy` is the seam, and `.withoutLocation` removes the GPS dictionary plus
+`BodySerialNumber`, `CameraOwnerName` and `LensSerialNumber` — the fields that identify a *body* and
+an *owner* rather than describe a photograph. Make and Model stay: "shot on an A7" is a photographic
+fact, and a serial that appears in every frame you have ever exported is a tracking key.
+
+Done on `properties` rather than by rewriting the written file, so the encode still happens exactly
+once — a metadata edit must not cost a second generation of JPEG loss. `ExportMetadataTests` reads
+every assertion back off the file through ImageIO, including that the default still carries GPS: a
+privacy claim nobody measured is not a claim, and pinning the default means changing it later is a
+deliberate act with a failing test attached.
+
+---
+
+## D-model-4 — Ship the weights in the bundle, do not fetch them
+
+**Decided with the owner, 25 July 2026. Loading path built; bundle assembly still to do.**
+
+The perception layer downloaded ~**1.6 GB** (measured, not the ~2–3 GB the code comments claimed)
+from huggingface.co on first use: unannounced, and failing *silently* to "Model unavailable —
+conservative read" when the network was not there. So a photographer on a plane got quietly worse
+edits, from an app whose first promise is "no cloud, no account, no upload".
+
+**Decided: bundle the weights inside the app and update them with the app.** This removes the request
+rather than making it politer, and it makes the promise literally true instead of nearly true.
+
+- **Licence.** Apache-2.0 §4 permits redistribution in object form, commercially, inside a closed
+  application — provided the licence text travels with the weights, notices are retained, and
+  modification (here: 4-bit quantisation, already stated by mlx-community) is declared.
+- **Updates: Sparkle with binary deltas.** The weights do not change between most releases, so a
+  delta ships the code only — a few MB against 1.7 GB. A full download happens when the model itself
+  changes, which is when it is honest to pay for one.
+- **Loading.** `ModelConfiguration(directory:)` resolves straight to a path; `loadModelContainer`
+  only reaches for a `Downloader` in the `.id` case, so a bundled model means *zero* network calls,
+  not cached ones. Order is: `KELVIN_MODEL_PATH` (a local directory, for testing), then the bundled
+  directory, then a repo id — so `KELVIN_MODEL` still downloads for an A/B, which is what it is for.
+- **Not in git.** 1.6 GB does not belong in every clone. `scripts/stage-model.sh` assembles
+  `Vendor/PerceptionModel` (gitignored) from the Hugging Face cache at package time.
+
+### Licence verified against the source, 25 July 2026
+
+The gap is closed. What was checked, so nobody has to take the card's word for it again:
+
+- `mlx-community/Qwen3.5-2B-MLX-4bit` **ships no `LICENSE` file** — the fetch 404s. Its card
+  frontmatter and the HF API both declare `license: apache-2.0`, with `base_model: Qwen/Qwen3.5-2B`.
+- `Qwen/Qwen3.5-2B` (upstream) **does** publish a `LICENSE`: 11,544 bytes of the genuine "Apache
+  License, Version 2.0, January 2004" text, with **zero** occurrences of non-commercial, research-only
+  or comparable restriction. That file is now staged beside the weights.
+- **No upstream `NOTICE`** exists (probed; not published), so Apache §4(d) has nothing to require.
+- The model card is staged too, as the record of the modification Apache §4(b) asks to be stated —
+  it documents the 4-bit `mlx_vlm convert` quantisation.
+
+For contrast, and as the reason this is written down: `Qwen/Qwen2.5-VL-3B-Instruct`, the previous
+default, declares `license_name: qwen-research` and its `LICENSE` opens "Qwen RESEARCH LICENSE
+AGREEMENT". Those weights have been **deleted from the local cache** (2.9 GB) rather than left
+sitting where a `KELVIN_MODEL=` experiment could reach for them.
+
+Verified end to end: with `HF_HOME` pointed at an empty directory and `HF_HUB_OFFLINE=1`, a full
+`kelvin-perceive` run completed in 26 s against the staged directory — so the bundled path genuinely
+loads from disk and cannot be silently falling back to a cache or a download.

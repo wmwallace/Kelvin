@@ -45,6 +45,18 @@ public enum FocusMeasure {
         public var isSoft: Bool { measurable && acuity < softThreshold }
         /// Bad enough that the frame is not worth editing.
         public var isUnusable: Bool { measurable && acuity < unusableThreshold }
+
+        /// Public so a caller can test what it does WITH a reading without producing one.
+        ///
+        /// The app decides things from these — which frame of a burst is the sharpest, what the strip
+        /// badges — and those rules were untestable while the only way to obtain a `Reading` was to
+        /// measure an image, because a synthetic image that lands on a chosen acuity is not something
+        /// you can write down. Constructing readings is not a way to fake a measurement: nothing
+        /// persists them, and the thresholds above still belong to this type alone.
+        public init(acuity: Double, measurable: Bool) {
+            self.acuity = acuity
+            self.measurable = measurable
+        }
     }
 
     /// Calibrated by measuring real photographs and progressively blurred copies of them.

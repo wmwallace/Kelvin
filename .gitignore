@@ -25,6 +25,9 @@ build/
 *.safetensors
 /corpus/
 /models/
+# Weights staged for bundling by scripts/stage-model.sh. 1.6 GB belongs in the release bundle,
+# assembled at package time — not in the history of every clone.
+/Vendor/
 
 # Editor cruft
 *.swp

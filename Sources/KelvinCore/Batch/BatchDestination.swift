@@ -80,13 +80,19 @@ extension BatchApply {
         public var directory: URL
         public var onCollision: OnCollision
         public var format: ImageWriter.Format
+        /// What of the source files' metadata the written copies carry. Lives on the destination
+        /// beside `format` because it describes how output is written, and because a batch is where
+        /// it matters most: one setting decides it for several hundred files at once.
+        public var metadata: ImageWriter.MetadataPolicy
 
         public init(directory: URL,
                     onCollision: OnCollision = .uniqueSuffix,
-                    format: ImageWriter.Format = .png) {
+                    format: ImageWriter.Format = .png,
+                    metadata: ImageWriter.MetadataPolicy = .asShot) {
             self.directory = directory
             self.onCollision = onCollision
             self.format = format
+            self.metadata = metadata
         }
 
         /// Create the folder if it is missing, and refuse the configurations that could destroy

@@ -29,6 +29,29 @@ public enum ImageWriter {
         }
     }
 
+    /// What of the original file's metadata travels into the export.
+    ///
+    /// This exists because it turned out not to be a choice at all. `CIImage(contentsOf:)` populates
+    /// `properties` from the source file, that dictionary survives the entire filter chain, and
+    /// `writeJPEGRepresentation` writes it back out — so every export carried the photograph's GPS
+    /// fix and the camera body's serial number, and a batch wrote them into every frame it produced.
+    /// Nothing said so anywhere.
+    ///
+    /// The app already refuses to draw an inline map because "a location is the most sensitive single
+    /// field in the file"; an export that silently republishes that field contradicted the reasoning.
+    ///
+    /// `asShot` remains the DEFAULT, deliberately: metadata travelling with a photograph is what
+    /// every other editor does, and a photographer who exports for a client usually wants the camera,
+    /// lens, date and exposure settings to survive. What was missing was the ability to say no.
+    public enum MetadataPolicy: Sendable, Equatable {
+        /// Everything the source file recorded, GPS and serial included.
+        case asShot
+        /// Everything except where it was taken and which body took it. Camera, lens, date and
+        /// exposure settings still travel — those are the fields a photographer wants kept, and
+        /// stripping them wholesale would make the export less useful without making it more private.
+        case withoutLocation
+    }
+
     public enum Error: Swift.Error, CustomStringConvertible {
         case encodingFailed(URL)
         case rasterFailed
@@ -58,8 +81,10 @@ public enum ImageWriter {
 
     static let outputColorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
 
-    public static func write(_ image: CIImage, to url: URL, format: Format? = nil) throws {
+    public static func write(_ image: CIImage, to url: URL, format: Format? = nil,
+                            metadata: MetadataPolicy = .asShot) throws {
         let fmt = format ?? Format.inferred(from: url)
+        let image = metadata == .asShot ? image : scrubbed(image)
         do {
             switch fmt {
             case .jpeg(let quality):
@@ -84,6 +109,36 @@ public enum ImageWriter {
         } catch {
             throw Error.encodingFailed(url)
         }
+    }
+
+    /// The same image with the position and the body's identity taken out of its metadata.
+    ///
+    /// Works on `CIImage.properties` rather than on the written file, because that dictionary is what
+    /// the writer reads: `settingProperties` replaces it, and whatever is not in it is not encoded.
+    /// Rewriting the file afterwards would mean decoding and re-encoding what was just written —
+    /// a second generation of JPEG loss for a metadata edit.
+    ///
+    /// GPS goes as a whole dictionary. The serial numbers go individually, because they sit in the
+    /// EXIF dictionary among the fields that must survive — shutter, aperture, ISO, focal length, the
+    /// capture date. `BodySerialNumber` identifies the camera that took every frame you have ever
+    /// exported, which makes it a tracking key across a body of work rather than a photographic fact.
+    static func scrubbed(_ image: CIImage) -> CIImage {
+        var properties = image.properties
+        properties.removeValue(forKey: kCGImagePropertyGPSDictionary as String)
+
+        let identityKeys = [kCGImagePropertyExifBodySerialNumber as String,
+                            kCGImagePropertyExifCameraOwnerName as String,
+                            kCGImagePropertyExifLensSerialNumber as String]
+        for dictionaryKey in [kCGImagePropertyExifDictionary as String,
+                              kCGImagePropertyExifAuxDictionary as String] {
+            guard var exif = properties[dictionaryKey] as? [String: Any] else { continue }
+            for key in identityKeys { exif.removeValue(forKey: key) }
+            properties[dictionaryKey] = exif
+        }
+        // TIFF carries Make and Model, which stay — "shot on a Sony A7" is a photographic fact, not
+        // an identifier. It can also carry a copy of the artist/copyright fields, which stay for the
+        // same reason: a photographer who filled those in wants them travelling.
+        return image.settingProperties(properties)
     }
 
     /// Rasterize to raw RGBA8 bytes over the image's extent. Deterministic; used by tests

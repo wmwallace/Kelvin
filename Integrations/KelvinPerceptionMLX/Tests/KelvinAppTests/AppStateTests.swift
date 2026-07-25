@@ -71,6 +71,148 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(s.visiblePhotos, [urls[0], urls[2], urls[3], urls[5]])
     }
 
+    // MARK: Grouping — one control, one axis (D-browse-1)
+
+    /// Minutes apart, as a shoot's EXIF would read.
+    private func at(_ minutes: Double) -> Date {
+        Date(timeIntervalSinceReferenceDate: 500_000_000 + minutes * 60)
+    }
+
+    /// No grouping is a FLAT strip, not one group holding the shoot. The distinction is the whole
+    /// reason this is optional: a single bucket would have the view draw a heading over everything.
+    func testUngroupedIsAFlatStripRatherThanOneGroup() {
+        let s = state(with: [url("a.ARW"), url("b.ARW")])
+        XCTAssertNil(s.stripGroups)
+    }
+
+    /// Grouping partitions: every frame on screen appears in exactly one run, so the count in the
+    /// header still describes what you are looking at.
+    func testEveryVisibleFrameLandsInExactlyOneRun() {
+        let urls = (1...5).map { url("_DSC000\($0).ARW") }
+        let s = state(with: urls)
+        s.captureIndex = .init(dates: [urls[0]: at(0), urls[1]: at(1), urls[2]: at(600),
+                                       urls[3]: at(601)])   // urls[4] undated on purpose
+
+        for lens in [AppState.StripGrouping.day, .burst] {
+            s.stripGrouping = lens
+            let grouped = (s.stripGroups ?? []).flatMap(\.urls)
+            XCTAssertEqual(grouped.count, urls.count, "\(lens.label): every frame drawn once")
+            XCTAssertEqual(Set(grouped), Set(urls), "\(lens.label): and it is the same frames")
+        }
+    }
+
+    /// Frames the grouping cannot place go last, under their own heading. "No date" is a true
+    /// statement about the files; mixing them into the first day would invent a time for them.
+    func testFramesWithNoDateAreTheLastRunAndSayWhy() throws {
+        let dated = url("dated.ARW"), undated = url("undated.ARW")
+        let s = state(with: [dated, undated])
+        s.captureIndex = .init(dates: [dated: at(0)])
+        s.stripGrouping = .day
+
+        let groups = try XCTUnwrap(s.stripGroups)
+        XCTAssertEqual(groups.count, 2)
+        XCTAssertEqual(groups.last?.urls, [undated])
+        XCTAssertEqual(groups.last?.heading, "No date")
+    }
+
+    /// A lone frame is not a burst. Heading every unrepeated frame would put several hundred labels
+    /// on a shoot and bury the runs that are actually a burst.
+    func testALoneFrameIsNotLabelledABurst() {
+        let a = url("a.ARW"), b = url("b.ARW"), alone = url("c.ARW")
+        let s = state(with: [a, b, alone])
+        s.captureIndex = .init(dates: [a: at(0), b: at(0.02), alone: at(30)])
+        s.stripGrouping = .burst
+
+        let groups = s.stripGroups ?? []
+        XCTAssertEqual(groups.count, 2)
+        XCTAssertEqual(groups.first?.urls.count, 2)
+        XCTAssertNotNil(groups.first?.heading, "two frames two seconds apart are a burst")
+        XCTAssertNil(groups.last?.heading, "one frame half an hour later is not")
+    }
+
+    /// Place needs positions, and most folders have none — a camera without GPS records nothing at
+    /// all. The control has to be able to say so rather than offer a lens that cannot answer.
+    func testPlaceIsUnavailableWithoutPositions() {
+        let a = url("a.ARW")
+        let s = state(with: [a])
+        s.captureIndex = .init(dates: [a: at(0)])
+        XCTAssertFalse(s.canGroupByPlace)
+
+        s.captureIndex = .init(dates: [a: at(0)],
+                               locations: [a: GeoPoint(latitude: 50.4, longitude: -4.1)])
+        XCTAssertTrue(s.canGroupByPlace)
+    }
+
+    /// Grouping by place reads the anchor out as coordinates, because naming a place would mean a
+    /// network call and this app does not make any.
+    func testPlaceRunsAreHeadedWithCoordinates() {
+        let a = url("a.ARW")
+        let s = state(with: [a])
+        s.captureIndex = .init(dates: [a: at(0)],
+                               locations: [a: GeoPoint(latitude: 50.37, longitude: -4.14)])
+        s.stripGrouping = .place
+        XCTAssertEqual(s.stripGroups?.first?.heading, "50.4°N, 4.1°W")
+    }
+
+    /// "Not measured yet" is not "unique". Until the scan has fingerprinted a frame, the near
+    /// duplicate lens knows nothing about it, and a singleton run would claim the opposite.
+    func testUnmeasuredFramesAreHeldBackRatherThanCalledUnique() {
+        let urls = (1...3).map { url("_DSC000\($0).ARW") }
+        let s = state(with: urls)
+        s.stripGrouping = .similar
+
+        let groups = s.stripGroups ?? []
+        XCTAssertEqual(groups.count, 1)
+        XCTAssertEqual(groups.first?.heading, "Not measured yet")
+        XCTAssertEqual(groups.first?.urls.count, 3)
+    }
+
+    /// The point of paying for the scan: in a run of near-identical frames, say which one measured
+    /// sharpest. One mark per run, and only where there is a choice to make.
+    func testTheSharpestFrameOfEachBurstIsMarked() {
+        let urls = (1...4).map { url("_DSC000\($0).ARW") }
+        let s = state(with: urls)
+        // Three frames in one burst, a fourth half an hour later on its own.
+        s.captureIndex = .init(dates: [urls[0]: at(0), urls[1]: at(0.03), urls[2]: at(0.06),
+                                       urls[3]: at(30)])
+        s.focus = [urls[0]: .init(acuity: 4.1, measurable: true),
+                   urls[1]: .init(acuity: 6.8, measurable: true),
+                   urls[2]: .init(acuity: 3.2, measurable: true),
+                   urls[3]: .init(acuity: 9.9, measurable: true)]
+        s.stripGrouping = .burst
+
+        XCTAssertEqual(s.sharpestInRun, [urls[1]],
+                       "the sharpest of the three, and nothing for the frame that is alone")
+    }
+
+    /// A frame with no edges to judge — a plain sky, a studio backdrop — has no acuity to compare, and
+    /// a run of those has no sharpest frame. Silence rather than an arbitrary pick.
+    func testAnUnmeasurableRunIsNotMarkedAtAll() {
+        let a = url("a.ARW"), b = url("b.ARW")
+        let s = state(with: [a, b])
+        s.captureIndex = .init(dates: [a: at(0), b: at(0.03)])
+        s.focus = [a: .init(acuity: 0, measurable: false), b: .init(acuity: 0, measurable: false)]
+        s.stripGrouping = .burst
+
+        XCTAssertTrue(s.sharpestInRun.isEmpty)
+    }
+
+    /// Only where the question makes sense. The sharpest frame of a whole afternoon answers nothing —
+    /// the mark exists to help choose between frames of the same picture.
+    func testSharpestIsNotOfferedForDayOrPlaceGroupings() {
+        let urls = (1...3).map { url("_DSC000\($0).ARW") }
+        let s = state(with: urls)
+        s.captureIndex = .init(dates: [urls[0]: at(0), urls[1]: at(0.03), urls[2]: at(0.06)])
+        s.focus = Dictionary(uniqueKeysWithValues: urls.enumerated().map {
+            ($0.element, FocusMeasure.Reading(acuity: Double($0.offset) + 1, measurable: true))
+        })
+
+        s.stripGrouping = .day
+        XCTAssertTrue(s.sharpestInRun.isEmpty)
+        s.stripGrouping = .none
+        XCTAssertTrue(s.sharpestInRun.isEmpty)
+    }
+
     // MARK: New masks
 
     /// A new mask arrives with a visible adjustment already dialled in. A mask that changes nothing
@@ -122,6 +264,52 @@ final class AppStateTests: XCTestCase {
         s.removeUserMask(id)
         XCTAssertTrue(s.userMasks.isEmpty)
         XCTAssertNil(s.paintingMaskId)
+    }
+
+    /// The reported bug, as a rule: putting a mask's selection down must not cost you the mask.
+    ///
+    /// Everything the canvas draws for the selected mask — a subject's outline, a gradient's dashed
+    /// guide — is drawn for as long as it is selected, and selecting used to be one-way. So the only
+    /// control that cleared the annotation was the trash, and the edits went with it.
+    func testAMaskCanBePutDownWithoutLosingItsEdits() throws {
+        let s = AppState()
+        s.addUserMask(.radial)
+        let mask = try XCTUnwrap(s.userMasks.last)
+        s.userMasks[0].exposure = 0.8
+
+        s.toggleMaskSelection(mask.id)
+        XCTAssertNil(s.selectedMask, "clicking the eye of the selected mask puts it down")
+        XCTAssertEqual(s.userMasks.count, 1, "and the mask is still there")
+        XCTAssertEqual(s.userMasks[0].exposure, 0.8, "with the edits made to it")
+
+        s.toggleMaskSelection(mask.id)
+        XCTAssertEqual(s.selectedUserMaskId, mask.id, "and it comes back")
+    }
+
+    /// Selecting a different mask is a move, not a toggle — the second click on a mask that was
+    /// never selected must select it rather than clearing the panel.
+    func testPuttingOneMaskDownIsNotConfusedWithPickingAnother() {
+        let s = AppState()
+        s.addUserMask(.radial); s.addUserMask(.linear)
+        let ids = s.userMasks.map(\.id)
+
+        s.toggleMaskSelection(ids[0])
+        XCTAssertEqual(s.selectedUserMaskId, ids[0])
+        s.toggleMaskSelection(ids[0])
+        XCTAssertNil(s.selectedMask)
+    }
+
+    /// With nothing selected the overlay draws nothing, so an armed brush would be laying stamps
+    /// into a mask the canvas has stopped showing. Putting the mask down puts the brush down.
+    func testPuttingABrushDownStopsPainting() {
+        let s = AppState()
+        s.addUserMask(.brush)
+        let id = s.userMasks[0].id
+        XCTAssertEqual(s.paintingMaskId, id)
+
+        s.toggleMaskSelection(id)
+        XCTAssertNil(s.paintingMaskId)
+        XCTAssertEqual(s.userMasks.count, 1, "the strokes are not the casualty of hiding them")
     }
 
     // MARK: Mask order

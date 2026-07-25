@@ -435,30 +435,36 @@ final class AppState: ObservableObject {
     @Published var photoSort: PhotoSortKey = .captureTime { didSet { reorderFolderPhotos() } }
     @Published var photoSortReversed = false { didSet { reorderFolderPhotos() } }
 
-    /// `DateTimeOriginal` per photo for the folder named by `captureDatesFolder`. Empty until the
-    /// background read lands, which `PhotoOrder.sorted` treats as "nothing is dated" — so the
-    /// strip shows filename order in the meantime rather than an empty or jumping list.
-    private var captureDates: [URL: Date] = [:]
-    /// Which directory `captureDates` describes. One folder at a time, which is how a shoot is
+    /// When and where each photo in `captureIndexFolder` was taken. Empty until the background read
+    /// lands, which `PhotoOrder.sorted` treats as "nothing is dated" — so the strip shows filename
+    /// order in the meantime rather than an empty or jumping list.
+    ///
+    /// One index rather than a dates dictionary, because grouping by place needs the positions and
+    /// they come out of the SAME header read. Reading the folder twice to get them separately would
+    /// double the slowest part of opening a shoot.
+    /// Written by `loadCaptureIndex` and by tests that need a folder with known dates and positions;
+    /// nothing else should assign it.
+    @Published var captureIndex = PhotoOrder.CaptureIndex()
+    /// Which directory `captureIndex` describes. One folder at a time, which is how a shoot is
     /// worked: opening every frame of a 437-shot folder must not re-read 437 EXIF headers each
     /// time. Leaving for another folder and coming back costs one re-read, which is the price of
     /// not carrying an unbounded cache of dates for folders nobody is looking at.
-    private var captureDatesFolder: URL?
-    private var captureDateTask: Task<Void, Never>?
+    private var captureIndexFolder: URL?
+    private var captureIndexTask: Task<Void, Never>?
     /// True while the read is in flight, so the strip's sort control can say the order is not
     /// settled yet instead of appearing to have sorted wrongly.
-    @Published private(set) var captureDatesPending = false
+    @Published private(set) var captureInfoPending = false
 
     /// Whether the order on screen is still provisional. Only true under capture-time sort — the
     /// read also runs when you are sorting by name (so switching later is instant), but a name
     /// sort is not waiting on it and must not display as though it were.
-    var sortOrderPending: Bool { captureDatesPending && photoSort == .captureTime }
+    var sortOrderPending: Bool { captureInfoPending && photoSort == .captureTime }
 
     /// Put `folderPhotos` back in the order the controls currently ask for. Cheap — a sort of a
     /// few hundred URLs against an in-memory dictionary, no file access.
     private func reorderFolderPhotos() {
         folderPhotos = PhotoOrder.sorted(folderPhotos, by: photoSort,
-                                         reversed: photoSortReversed, captureDates: captureDates)
+                                         reversed: photoSortReversed, captureDates: captureIndex.dates)
     }
 
     /// The per-file work a filmstrip needs — capture times, which photos carry edits, which are
@@ -473,7 +479,7 @@ final class AppState: ObservableObject {
             return
         }
         pendingFolderDetail = nil
-        loadCaptureDates(for: folder, photos: photos)
+        loadCaptureIndex(for: folder, photos: photos)
         editedURLs.formUnion(EditStore.edited(among: photos))
         flags = FlagStore.flags(among: photos)
     }
@@ -486,36 +492,57 @@ final class AppState: ObservableObject {
     func filmstripDidExpand() {
         guard let pending = pendingFolderDetail else { return }
         pendingFolderDetail = nil
-        loadCaptureDates(for: pending.folder, photos: pending.photos)
+        loadCaptureIndex(for: pending.folder, photos: pending.photos)
         editedURLs.formUnion(EditStore.edited(among: pending.photos))
         flags = FlagStore.flags(among: pending.photos)
     }
 
-    /// Read the capture times for a folder, **off the main thread**, and re-sort when they arrive.
+    /// Read when and where each frame was taken, **off the main thread**, and re-sort when it lands.
     ///
     /// An EXIF read is a header read, not a decode, so it is cheap per file — but 437 files is 437
     /// file opens, and this codebase has twice put the window on the floor by doing per-file work
     /// on the main thread (thumbnails once decoded whole RAWs during view layout and the window
     /// never appeared). So: never on the main thread, never blocking the open, and the strip is
     /// usable in filename order throughout.
-    private func loadCaptureDates(for folder: URL, photos: [URL]) {
-        guard captureDatesFolder != folder else { return }      // already have this folder
-        captureDateTask?.cancel()
-        captureDatesFolder = folder
-        captureDates = [:]
-        captureDatesPending = true
-        captureDateTask = Task { [weak self] in
-            let dates = await Task.detached(priority: .utility) {
-                PhotoOrder.captureDates(for: photos)
+    private func loadCaptureIndex(for folder: URL, photos: [URL]) {
+        guard captureIndexFolder != folder else { return }      // already have this folder
+        captureIndexTask?.cancel()
+        captureIndexFolder = folder
+        captureIndex = PhotoOrder.CaptureIndex()
+        captureInfoPending = true
+        // The one place that knows the shoot has changed, so it is where everything keyed to the
+        // OLD shoot is let go of.
+        //
+        // The scan is the expensive one: 8½ minutes of decoding on a 437-frame RAW folder, which
+        // used to carry on regardless and hold the progress flag that stops the next folder's scan
+        // from ever starting. The dictionaries are cheap each but unbounded across a session — the
+        // thumbnail cache is ~68 KB a frame, so five shoots is ~150 MB of 160 px previews for
+        // folders nobody has open, and it was never cleared anywhere.
+        scanTask?.cancel()
+        focusScanProgress = nil
+        let keep = Set(photos)
+        thumbnails = thumbnails.filter { keep.contains($0.key) }
+        focus = focus.filter { keep.contains($0.key) }
+        triage = triage.filter { keep.contains($0.key) }
+        captureIndexTask = Task { [weak self] in
+            let index = await Task.detached(priority: .utility) {
+                PhotoOrder.captureIndex(for: photos)
             }.value
             guard !Task.isCancelled, let self else { return }
             // Guard against a folder switch that started while this read was running — a late
             // result must not re-sort the strip you are looking at now using another folder's
             // dates.
-            guard self.captureDatesFolder == folder else { return }
-            self.captureDates = dates
-            self.captureDatesPending = false
+            guard self.captureIndexFolder == folder else { return }
+            self.captureIndex = index
+            self.captureInfoPending = false
             self.reorderFolderPhotos()
+            // A folder with no positions in it cannot be grouped by place, and leaving the lens
+            // selected would partition the shoot into one group called "No location" — which looks
+            // like the grouping is broken rather than like the files have no GPS. The menu says why
+            // the choice is unavailable; the strip goes back to flat.
+            if self.stripGrouping == .place, !index.hasAnyLocation {
+                self.stripGrouping = .none
+            }
         }
     }
 
@@ -552,6 +579,204 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: Grouping — how the strip is partitioned
+    //
+    // ONE control, ONE axis. Two passes in Core partition a shoot and they are complementary rather
+    // than competing: `PhotoOrder.grouped` by when and where (day / burst / place, from one EXIF
+    // header read), `PhotoTriage.groups` by what the picture looks like (a 64-bit difference hash
+    // plus a time signal, from the triage scan).
+    //
+    // Surfacing both as separate menus would be worse than either. "How is the strip organised" is
+    // ONE question, and a photographer who has picked "by day" and then meets a second, orthogonal
+    // grouping control has to hold two partitions in their head to predict what they will see. So
+    // similarity is a PEER of the metadata lenses — None / Burst / Day / Place / Similar — and not a
+    // second dimension over them. See docs/DECISIONS.md, D-browse-1, including why the nested
+    // version was rejected despite being strictly more expressive.
+
+    /// The lens the strip is read through.
+    enum StripGrouping: String, CaseIterable, Hashable {
+        case none, burst, day, place, similar
+
+        /// Short, for the control's own label.
+        var label: String {
+            switch self {
+            case .none:    return "None"
+            case .burst:   return "Burst"
+            case .day:     return "Day"
+            case .place:   return "Place"
+            case .similar: return "Similar"
+            }
+        }
+
+        /// Spelled out, for the menu — where there is room to say what the lens actually does.
+        var longLabel: String {
+            switch self {
+            case .none:    return "No grouping"
+            case .burst:   return "Bursts"
+            case .day:     return "Capture day"
+            case .place:   return "Place"
+            case .similar: return "Similar pictures"
+            }
+        }
+
+        /// The Core lens, where there is one. `nil` for the two cases Core does not own: no grouping
+        /// at all, and similarity — which comes from the triage scan rather than the EXIF index.
+        var coreKey: PhotoOrder.PhotoGroupKey? {
+            switch self {
+            case .burst:   return .burst
+            case .day:     return .day
+            case .place:   return .location
+            case .none, .similar: return nil
+            }
+        }
+    }
+
+    @Published var stripGrouping: StripGrouping = .none {
+        didSet {
+            // Similarity needs fingerprints, and the fingerprints come out of the scan the "Check
+            // focus" button already runs — one pass, one 1200 px proxy per frame, both readings.
+            // So asking for the lens IS asking for the measurement. The alternative is a menu item
+            // that appears to do nothing on any folder nobody happens to have scanned yet, which is
+            // indistinguishable from a broken control. Idempotent, and a no-op once the folder is
+            // measured.
+            if stripGrouping == .similar { scanFocus() }
+        }
+    }
+
+    /// Whether grouping by place can say anything. False for most folders — a camera without GPS
+    /// records no position at all — and false while the header read is still in flight, when the
+    /// honest answer is "not yet" rather than "everything is in one place".
+    var canGroupByPlace: Bool { captureIndex.hasAnyLocation }
+
+    /// A run of the strip drawn under one heading.
+    struct StripGroup: Identifiable, Equatable {
+        let id: String
+        /// `nil` draws no heading. A lone frame is not a burst and not a cluster of alike pictures,
+        /// and heading every singleton would bury the runs that ARE one under a row of labels. Day
+        /// and Place always have one: a day with a single frame in it is still that day.
+        let heading: String?
+        /// The second line — a count, a time span, a position. Never load-bearing on its own.
+        let detail: String?
+        let urls: [URL]
+    }
+
+    /// `visiblePhotos`, partitioned by the current lens.
+    ///
+    /// `nil` under `.none`, deliberately: a flat strip is a different rendering, not a grouping with
+    /// one bucket — the same reason `PhotoGroupKey` carries no `.none` case. Modelling it as one
+    /// bucket would make the view unwrap a heading it must not draw.
+    var stripGroups: [StripGroup]? {
+        guard stripGrouping != .none else { return nil }
+        let photos = visiblePhotos
+        guard !photos.isEmpty else { return [] }
+
+        if stripGrouping == .similar { return similarGroups(photos) }
+        guard let key = stripGrouping.coreKey else { return nil }
+        // Groups and their members arrive in FINAL order — residue last, the strip's reverse already
+        // applied. Do not re-sort them here.
+        return PhotoOrder.grouped(photos, by: key, index: captureIndex,
+                                  reversed: photoSortReversed)
+            .map { group in
+                StripGroup(id: group.id,
+                           heading: heading(for: group),
+                           detail: detail(for: group),
+                           urls: group.urls)
+            }
+    }
+
+    /// Near-duplicates, from the fingerprints the scan produced.
+    ///
+    /// Unmeasured frames are a residue group at the end rather than singletons scattered through the
+    /// strip, because "no fingerprint yet" is not the same claim as "this picture is unique" and the
+    /// two must not read alike. The group empties itself as the scan lands.
+    private func similarGroups(_ photos: [URL]) -> [StripGroup] {
+        // In CAPTURE order, not strip order: `PhotoTriage.groups` is order-dependent by construction
+        // — a different order seeds different groups — and it documents capture order as its
+        // contract, because that makes the seed the first frame of a burst and it is what the time
+        // half of its rule assumes. Reversing the strip must change the order runs are SHOWN in,
+        // never which frames are in a run together.
+        let chronological = PhotoOrder.sorted(photos, by: .captureTime, captureDates: captureIndex.dates)
+        let frames = chronological.compactMap { url -> PhotoTriage.Frame? in
+            guard let signature = triage[url]?.signature else { return nil }
+            return PhotoTriage.Frame(url: url, signature: signature, captured: captureIndex.dates[url])
+        }
+        let unmeasured = chronological.filter { triage[$0] == nil }
+
+        var groups = PhotoTriage.groups(frames).map { urls in
+            StripGroup(id: "similar:\(urls.first?.path ?? "")",
+                       heading: urls.count > 1 ? "\(urls.count) alike" : nil,
+                       detail: nil,
+                       urls: urls)
+        }
+        if photoSortReversed { groups.reverse() }
+        if !unmeasured.isEmpty {
+            groups.append(StripGroup(id: "similar:unmeasured",
+                                     heading: "Not measured yet",
+                                     detail: "\(unmeasured.count) \(unmeasured.count == 1 ? "frame" : "frames")",
+                                     urls: unmeasured))
+        }
+        return groups
+    }
+
+    /// Headings are the app's to format — Core does no localisation on purpose.
+    private func heading(for group: PhotoOrder.PhotoGroup) -> String? {
+        if group.isResidue {
+            switch group.kind {
+            case .day, .burst: return "No date"
+            case .location:    return "No location"
+            }
+        }
+        switch group.kind {
+        case .day:
+            guard let start = group.start else { return nil }
+            return DateFormatter.localizedString(from: start, dateStyle: .full, timeStyle: .none)
+        case .burst:
+            // A run of one is not a burst. Saying so for every unrepeated frame in a shoot would be
+            // several hundred headings, and the runs worth seeing would be lost among them.
+            guard group.count > 1, let start = group.start else { return nil }
+            return Self.timeOfDay.string(from: start)
+        case .location:
+            guard let anchor = group.anchor else { return nil }
+            // Coordinates, not a place name. Reverse geocoding is a network call, and this app does
+            // not make network calls (non-negotiable: everything runs on-device). Degrees with one
+            // decimal place is about 11 km — enough to tell two venues apart, and it does not
+            // pretend to a precision the heading is not for.
+            return Self.coordinates(anchor)
+        }
+    }
+
+    private func detail(for group: PhotoOrder.PhotoGroup) -> String? {
+        let frames = "\(group.count) \(group.count == 1 ? "frame" : "frames")"
+        guard !group.isResidue else { return frames }
+        switch group.kind {
+        case .day, .location:
+            return frames
+        case .burst:
+            guard group.count > 1 else { return nil }
+            // The span, so a six-frame run over two seconds reads differently from one over a
+            // minute. Whole seconds: EXIF records the shutter to the second, so a decimal here
+            // would be inventing resolution the file does not have.
+            guard let duration = group.duration, duration >= 1 else { return frames }
+            return "\(frames) · \(Int(duration.rounded()))s"
+        }
+    }
+
+    /// Shared, because a `DateFormatter` is expensive to build and these are formatted per heading
+    /// during view layout.
+    private static let timeOfDay: DateFormatter = {
+        let f = DateFormatter()
+        f.timeStyle = .short
+        f.dateStyle = .none
+        return f
+    }()
+
+    /// "50.4°N, 4.1°W" — hemisphere letters rather than signs, which is how a position is read.
+    static func coordinates(_ point: GeoPoint) -> String {
+        let lat = String(format: "%.1f°%@", abs(point.latitude), point.latitude >= 0 ? "N" : "S")
+        let lon = String(format: "%.1f°%@", abs(point.longitude), point.longitude >= 0 ? "E" : "W")
+        return "\(lat), \(lon)"
+    }
+
     // MARK: Focus review
     //
     // Soft frames are SURFACED, never acted on. The measurement is good but not infallible, and an
@@ -574,9 +799,72 @@ final class AppState: ObservableObject {
     /// from the culling work is that photos are flagged for review, never auto-rejected, "so you
     /// can discover false positives" — and the pass that produces these deleted four of its own
     /// seven proposed verdicts after they fired on perfectly good photographs.
+    ///
+    /// This was declared, published, and never written to: the scan called a focus-only helper, so
+    /// every verdict Core had been taught to produce was discarded before it reached the window.
+    /// Nothing read the dictionary either, so it cost nothing and did nothing — the same shape as
+    /// the dead `onFlag` the audit found, and it is why the near-duplicate grouping had no
+    /// fingerprints to group on.
     @Published var triage: [URL: PhotoTriage.Verdict] = [:]
 
     var softCount: Int { folderPhotos.filter { focus[$0]?.isSoft == true }.count }
+
+    /// What else the scan noticed about a frame, beyond sharpness: a frame so dark or so bright that
+    /// most of it carries no detail. Focus concerns are excluded because the soft badge and the Focus
+    /// filter already say that, and saying it twice in two glyphs on one thumbnail is noise.
+    ///
+    /// These fire on almost nothing by design — every threshold sits past the most extreme frame in
+    /// 836 of the owner's real photographs — so a badge here means something unusual, which is
+    /// exactly what makes it worth drawing.
+    func exposureConcerns(for url: URL) -> [PhotoTriage.Concern] {
+        (triage[url]?.concerns ?? []).filter { $0 != .softFocus && $0 != .outOfFocus }
+    }
+
+    /// The scan's findings for one frame, in words, for the strip's tooltip. The measurement travels
+    /// with the flag on purpose: an automatic judgement you cannot see the number behind is one you
+    /// can neither trust nor argue with.
+    func scanNote(for url: URL) -> String? {
+        guard let verdict = triage[url] else { return nil }
+        var parts: [String] = []
+        if verdict.focus.measurable {
+            parts.append(String(format: "acuity %.1f", verdict.focus.acuity))
+        }
+        parts.append(contentsOf: verdict.concerns.map(\.message))
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// The sharpest frame of each run the strip is currently showing, where the run has more than one
+    /// frame in it.
+    ///
+    /// This is the whole point of paying for the scan. Culling a burst is one question — "which of
+    /// these six is the one" — and sharpness is the part of that question a machine can answer, on a
+    /// measurement already taken. It stays a MARKER: nothing is flagged, hidden or rejected on the
+    /// strength of it, because the sharpest frame of a run is not always the keeper (the one where
+    /// the subject's eyes are open usually beats it) and a pass that decided for you would be wrong
+    /// in exactly the cases you care most about.
+    ///
+    /// Only under Burst and Similar. Under Day or Place a "sharpest" is the sharpest frame of a whole
+    /// afternoon, which answers no question anyone was asking.
+    var sharpestInRun: Set<URL> {
+        guard stripGrouping == .burst || stripGrouping == .similar,
+              let groups = stripGroups else { return [] }
+        var picks: Set<URL> = []
+        for group in groups where group.urls.count > 1 {
+            let measured = group.urls.compactMap { url -> (URL, Double)? in
+                guard let reading = focus[url], reading.measurable else { return nil }
+                return (url, reading.acuity)
+            }
+            // Two frames of one pose can measure identically to the last decimal; `max(by:)` would
+            // pick whichever the array order happens to put last. Ties go to the earlier frame, so
+            // the mark does not move about between renders.
+            guard let best = measured.max(by: { $0.1 < $1.1 }), measured.count > 1 else { continue }
+            picks.insert(measured.first(where: { $0.1 == best.1 })?.0 ?? best.0)
+        }
+        return picks
+    }
+
+    /// The scan, held so leaving the folder can stop it. See `scanFocus` for why that matters.
+    private var scanTask: Task<Void, Never>?
 
     /// Measure every frame in the folder, newest results published as they arrive so the strip
     /// fills in progressively rather than freezing until the end.
@@ -588,10 +876,24 @@ final class AppState: ObservableObject {
 
         // Only the ones not already read — the scan used to walk every frame in the folder and skip
         // them one at a time, which made the progress bar lie about how much work was left.
-        let pending = photos.filter { focus[$0] == nil }
+        //
+        // Keyed on the VERDICT, not on `focus`. Opening a photograph measures its focus as part of
+        // the edit path, and that path produces no fingerprint — so skipping frames that merely have
+        // a focus reading would leave whichever frames you had opened with no signature, and the
+        // near-duplicate grouping silently missing exactly the pictures you had been working on.
+        let pending = photos.filter { triage[$0] == nil }
         guard !pending.isEmpty else { focusScanProgress = nil; return }
 
-        Task { [weak self] in
+        // HELD AND CANCELLABLE, because this pass is minutes long and it was neither.
+        //
+        // The measured cost is ~1170 ms per RAW frame; across a 437-frame folder that is 8½ minutes
+        // of decoding. Nothing stored the task and nothing cancelled it, so leaving for another
+        // folder left all of it running — four cores decoding frames nobody is looking at, each
+        // in-flight task holding a 1200 px proxy. Worse, `focusScanProgress` is the re-entry guard,
+        // so the new folder's scan (and the Similar lens, which asks for one) silently did nothing
+        // until the abandoned one drained.
+        scanTask?.cancel()
+        scanTask = Task { [weak self] in
             var done = 0
             // SEVERAL AT ONCE. This was one photo at a time, and on a folder of large frames that
             // is minutes: the cost is dominated by decoding, and decoding one file leaves nine
@@ -605,17 +907,30 @@ final class AppState: ObservableObject {
             // Bounded rather than unbounded. Each task can hold a decoded frame, and a folder of
             // 60 MP files would otherwise try to hold all of them at once.
             let limit = min(4, max(2, ProcessInfo.processInfo.activeProcessorCount - 2))
-            await withTaskGroup(of: (URL, FocusMeasure.Reading?).self) { group in
+            await withTaskGroup(of: (URL, PhotoTriage.Verdict?).self) { group in
                 var next = 0
                 func start() {
                     guard next < pending.count else { return }
                     let url = pending[next]; next += 1
-                    group.addTask(priority: .utility) { (url, AppState.readFocus(url)) }
+                    group.addTask(priority: .utility) { (url, PhotoTriage.read(url: url)) }
                 }
                 for _ in 0..<min(limit, pending.count) { start() }
-                for await (url, reading) in group {
+                for await (url, verdict) in group {
                     guard let self else { return }
-                    if let reading { self.focus[url] = reading }
+                    // Cancellation is checked where the work is HANDED OUT as well as where it
+                    // lands: `group.cancelAll()` stops the queue from issuing more decodes, which is
+                    // the expensive half. The already-measured frames are kept — a verdict is a
+                    // verdict whether or not you stayed to watch it arrive.
+                    if Task.isCancelled { group.cancelAll(); break }
+                    if let verdict {
+                        self.triage[url] = verdict
+                        // The focus reading rides INSIDE the verdict — same 1200 px proxy, same
+                        // `FocusMeasure.read`. Published separately as well because `softCount`, the
+                        // Focus filter and the strip's soft badge all key off this dictionary, and a
+                        // measurement moving house is not a reason to make three working things
+                        // reach through a verdict for it.
+                        self.focus[url] = verdict.focus
+                    }
                     done += 1
                     self.focusScanProgress = Double(done) / Double(pending.count)
                     start()          // keep `limit` in flight until the queue is empty
@@ -625,22 +940,32 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// One photo's focus reading, off the main actor.
+    // `readFocus` lived here and is gone: `PhotoTriage.read(url:)` does the same proxy-first decode
+    // (ImageIO's decode-to-size where there is one, a real decode for RAW, materialised once) and
+    // returns the focus reading inside a verdict. Two copies of the scan's decode path is how the
+    // 1200 px proxy the soft/unusable thresholds were calibrated against quietly becomes two
+    // different proxies.
+
+    // MARK: What leaves the app
+
+    /// Whether an export takes the photograph's position and the camera body's serial out with it.
     ///
-    /// Prefers the ImageIO proxy, which decodes straight to 1200 px instead of decoding the whole
-    /// frame to throw 98% of it away — on a 60 MP JPEG that is 2017 ms against 120 ms, and the scan
-    /// is almost entirely decode.
+    /// OFF by default, which is the owner's call and matches every other editor: metadata travelling
+    /// with a photograph is the convention, and a photographer exporting for a client usually wants
+    /// the camera, lens, date and exposure to survive. What was missing was any way to say no — the
+    /// GPS fix and `BodySerialNumber` were re-encoded into every export and every batch frame, with
+    /// nothing anywhere saying so.
     ///
-    /// The thresholds were calibrated against the Lanczos proxy, so the two were compared before
-    /// this was allowed: across five real photographs the ImageIO proxy reads 1–3% lower acuity
-    /// (4.940→4.799, 4.700→4.657, 7.814→7.676, 3.700→3.585, 5.499→5.342) and agrees on every
-    /// soft/not-soft verdict. A consistent 2% is not nothing — a frame sitting within 2% of the
-    /// soft threshold could flip — but such a frame is genuinely borderline, and the flag is a
-    /// prompt to review rather than a decision. RAW has no fast path and keeps the real decode.
-    nonisolated static func readFocus(_ url: URL) -> FocusMeasure.Reading? {
-        if let fast = PerceptionProxy.fromFile(url, maxEdge: 1200) { return FocusMeasure.read(fast) }
-        guard let full = try? ImageDecoder.decode(url: url) else { return nil }
-        return FocusMeasure.read(materialiseShared(PerceptionProxy.downsample(full, maxEdge: 1200)))
+    /// Persisted, because it is a property of how you work rather than of one export. A photographer
+    /// who strips location does it every time, and asking them to remember a checkbox per file is how
+    /// the one that matters gets missed.
+    @Published var stripLocationOnExport = UserDefaults.standard.bool(forKey: AppState.stripLocationKey) {
+        didSet { UserDefaults.standard.set(stripLocationOnExport, forKey: AppState.stripLocationKey) }
+    }
+    static let stripLocationKey = "export.stripLocation"
+
+    var exportMetadata: ImageWriter.MetadataPolicy {
+        stripLocationOnExport ? .withoutLocation : .asShot
     }
 
     var keeperCount: Int { folderPhotos.filter { flags[$0] == .keep }.count }
@@ -1002,7 +1327,7 @@ final class AppState: ObservableObject {
         imageURL = url
         let siblings = PhotoBrowser.siblings(of: url).filter { !dismissedURLs.contains($0) || $0 == url }
         folderPhotos = PhotoOrder.sorted(siblings, by: photoSort,
-                                         reversed: photoSortReversed, captureDates: captureDates)
+                                         reversed: photoSortReversed, captureDates: captureIndex.dates)
         // THE REST OF THE FOLDER IS NOT READ UNTIL YOU ASK TO SEE IT.
         //
         // Reported as "it automatically opens every single photo in the folder", and that was
@@ -1264,6 +1589,16 @@ final class AppState: ObservableObject {
         guard !fixInProgress, let proxy = proxyCI, let recipe = activeRecipe else { return }
         fixInProgress = true
         let start = edit
+        // WHICH PHOTOGRAPH THIS RUN IS ABOUT, captured before the work starts.
+        //
+        // `CraftFix.converge` renders and measures the proxy once per pass, so it runs for seconds.
+        // Every landing site in this file that assigns edit state has to say which photo it was
+        // measuring — `loadPhoto` guards three times, renders carry a `renderedURL` — and these fix
+        // paths were the ones that did not. Click Fix, arrow to the next frame, and photo A's
+        // converged exposure and contrast were written onto photo B and then persisted by
+        // `scheduleCommit`. Silent, plausible, and wrong: exactly the bug the sessions cache was
+        // built to stop.
+        let photo = imageURL
         let input = RenderInput(
             recipe: recipe, proxy: proxy,
             bitmaps: proxyMaskBitmaps.merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked })
@@ -1281,7 +1616,10 @@ final class AppState: ObservableObject {
                                         face: FaceSkin.read(in: rendered))
             }.global
             await MainActor.run {
+                // Cleared even when the result is discarded, or the Fix buttons stay wedged on the
+                // photograph you moved to.
                 self.fixInProgress = false
+                guard self.imageURL == photo else { return }
                 guard let settled, settled != self.edit else { return }
                 self.edit = settled
                 self.onEdit()
@@ -1306,6 +1644,7 @@ final class AppState: ObservableObject {
         fixInProgress = true
         statusMessage = "Working through the craft flags…"
         let start = edit
+        let photo = imageURL            // see `applyFix`: this run belongs to one photograph
         let input = RenderInput(
             recipe: recipe, proxy: proxy,
             bitmaps: proxyMaskBitmaps.merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked })
@@ -1320,6 +1659,7 @@ final class AppState: ObservableObject {
             }
             await MainActor.run {
                 self.fixInProgress = false
+                guard self.imageURL == photo else { return }
                 guard let run else {
                     self.statusMessage = "Couldn't measure this photo — nothing changed"
                     return
@@ -1394,6 +1734,9 @@ final class AppState: ObservableObject {
                                           contrast: existing?.contrast ?? 0)
         let others = (recipe.masks ?? []).filter { $0.id != maskId.uuidString }
         fixInProgress = true
+        // See `applyFix`. This one lands via `adjustSubjectMask`, so without the guard it writes a
+        // converged subject exposure into whichever photograph's mask stack happens to be open.
+        let photo = imageURL
         let input = RenderInput(
             recipe: recipe, proxy: proxy,
             bitmaps: proxyMaskBitmaps.merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked })
@@ -1412,6 +1755,7 @@ final class AppState: ObservableObject {
             }
             await MainActor.run {
                 self.fixInProgress = false
+                guard self.imageURL == photo else { return }
                 guard let settled else {
                     self.statusMessage = "Couldn't measure this photo — nothing changed"
                     return
@@ -1518,11 +1862,12 @@ final class AppState: ObservableObject {
         // shorter, so it read as the button being slow rather than as the window being blocked.
         guard let proxy = proxyCI else { return }
         let input = ImageBox(image: proxy)
+        let photo = imageURL            // see `applyFix`: a horizon belongs to one photograph
         Task { [weak self] in
             let deg = await Task.detached(priority: .userInitiated) {
                 HorizonDetector.levelingAngle(in: input.image)
             }.value
-            guard let self, let deg else { return }
+            guard let self, let deg, self.imageURL == photo else { return }
             self.straighten = min(15, max(-15, deg))
             self.onEdit()
         }
@@ -1619,6 +1964,31 @@ final class AppState: ObservableObject {
     var selectedUserMaskId: UUID? {
         get { if case .user(let id) = selectedMask { return id } else { return nil } }
         set { selectedMask = newValue.map { .user($0) } }
+    }
+
+    /// Show me this mask — or, if it is already the one being shown, put the selection down.
+    ///
+    /// The other half of the same reported bug. Selecting a hand-drawn mask assigned
+    /// unconditionally, so a selection could be moved to another mask but never cleared, and
+    /// everything the canvas draws for the selected mask (a subject's outline, a gradient's
+    /// handles) stayed until the mask was DELETED. Reaching for the trash to dismiss an annotation
+    /// is how a photographer loses the adjustments they just made.
+    ///
+    /// Auto masks have toggled since the day they became selectable, for this exact reason. This is
+    /// the same rule for the other half of the panel.
+    func toggleMaskSelection(_ id: UUID) {
+        if selectedUserMaskId == id {
+            selectedMask = nil
+            // With nothing selected the overlay draws nothing, so a still-armed brush would be
+            // painting strokes the canvas has stopped showing. Putting the mask down puts the
+            // brush down.
+            if paintingMaskId == id { paintingMaskId = nil }
+        } else {
+            selectedUserMaskId = id
+        }
+        // Rebuilds the render, which is what chooses the overlay bitmap. Without it the red stays
+        // on the mask that is no longer selected.
+        onEdit()
     }
 
     // MARK: Canvas coordinate mapping (view ⇄ normalised image space)
@@ -2033,7 +2403,8 @@ final class AppState: ObservableObject {
         let references = subjectInstances.filter { inst in
             userMasks.contains { $0.kind == .instance && $0.instanceId == inst.id }
         }.map(\.reference)
-        let input = ExportInput(fullRes: fullRes, recipe: recipe, url: exportURL)
+        let input = ExportInput(fullRes: fullRes, recipe: recipe, url: exportURL,
+                                metadata: exportMetadata)
 
         let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
             do {
@@ -2048,7 +2419,7 @@ final class AppState: ObservableObject {
                 }
                 try ImageWriter.write(
                     Renderer.render(input.fullRes, with: input.recipe, maskBitmaps: bitmaps),
-                    to: input.url)
+                    to: input.url, metadata: input.metadata)
                 return .success(())
             } catch { return .failure(error) }
         }.value
@@ -2075,6 +2446,7 @@ final class AppState: ObservableObject {
         let fullRes: CIImage
         let recipe: Recipe
         let url: URL
+        let metadata: ImageWriter.MetadataPolicy
     }
 
     /// Apply the chosen *look* across a folder with per-photo intelligence: the style is held
@@ -2102,7 +2474,8 @@ final class AppState: ObservableObject {
             // /tmp-vs-/private/tmp spelling cannot sneak past it.
             let destination = BatchApply.Destination(directory: outputDir,
                                                      onCollision: .uniqueSuffix,
-                                                     format: .jpeg(quality: 0.97))
+                                                     format: .jpeg(quality: 0.97),
+                                                     metadata: exportMetadata)
             try destination.prepare(sources: files)
 
             var items: [BatchApply.Outcome.Item] = []
@@ -2671,8 +3044,14 @@ struct ContentView: View {
                                   softCount: appState.softCount,
                                   scanProgress: appState.focusScanProgress,
                                   onScanFocus: appState.scanFocus,
+                                  sharpest: appState.sharpestInRun,
+                                  exposureConcerns: appState.exposureConcerns(for:),
+                                  scanNote: appState.scanNote(for:),
                                   sortKey: $appState.photoSort,
                                   sortReversed: $appState.photoSortReversed,
+                                  grouping: $appState.stripGrouping,
+                                  groups: appState.stripGroups,
+                                  canGroupByPlace: appState.canGroupByPlace,
                                   sortPending: appState.sortOrderPending,
                                   onExpand: appState.filmstripDidExpand)
                 }
@@ -2756,7 +3135,17 @@ struct ContentView: View {
                 // No handles — the shape is the subject's, not something to drag. But show WHICH
                 // subject: the sliders below say "Exposure", and on a frame with three people
                 // there is otherwise nothing on screen saying whose.
-                if let instance = appState.subjectInstances.first(where: { $0.id == m.instanceId }) {
+                //
+                // GATED ON THE OVERLAY TOGGLE, and that is the fix for a real complaint: this box
+                // used to be drawn for as long as the mask was selected, with nothing anywhere
+                // that would put it away. The Overlay button (O) hid the red and left the box
+                // sitting on the photograph, so the only control that removed it was the mask's
+                // trash can — which takes the edits with it. The box is a label saying where the
+                // mask falls, exactly like the red is, so it belongs to the same switch. The
+                // radial and linear guides above are deliberately NOT gated: those are handles you
+                // drag, and hiding a control is a different thing from hiding an annotation.
+                if appState.showMaskOverlay,
+                   let instance = appState.subjectInstances.first(where: { $0.id == m.instanceId }) {
                     SubjectHighlight(instance: instance, imageFrame: rect,
                                      normToView: { appState.normToView($0, $1, in: rect) })
                 }
@@ -3259,6 +3648,7 @@ struct ContentView: View {
                             // chooses the overlay bitmap — without it the red stayed on the
                             // previously selected mask until you happened to nudge a slider.
                             onSelect: { appState.selectedUserMaskId = m.id; appState.onEdit() },
+                            onToggleSelected: { appState.toggleMaskSelection(m.id) },
                             isPainting: appState.paintingMaskId == m.id,
                             togglePaint: { appState.paintingMaskId = (appState.paintingMaskId == m.id) ? nil : m.id },
                             clearStrokes: { appState.clearStrokes(m.id) },
@@ -3443,6 +3833,13 @@ struct ContentView: View {
         panel.allowedContentTypes = [.jpeg, .png]
         // Suggest a name that says what the photo IS — still fully editable in the panel.
         panel.nameFieldStringValue = appState.suggestedExportName()
+        // The one thing about an export that is not visible in the file you get back.
+        //
+        // In the panel rather than in the sidebar, because it is a property of THIS export and the
+        // moment you are deciding it is the moment you are choosing where the file goes. It also
+        // covers the batch, which writes hundreds of files from the same setting — so the checkbox
+        // that says what travels has to be somewhere you meet before either.
+        panel.accessoryView = NSHostingView(rootView: ExportOptions(appState: appState))
         if panel.runModal() == .OK, let url = panel.url {
             Task { await appState.exportFullResolution(to: url) }
         }
@@ -4089,6 +4486,10 @@ struct UserMaskEditor: View {
     let onDelete: () -> Void
     var isSelected = false
     var onSelect: () -> Void = {}
+    /// Select-or-deselect, for the eye in the header. Separate from `onSelect` on purpose: the card
+    /// tap must only ever select, so that clicking around inside a card cannot put its selection
+    /// down by accident.
+    var onToggleSelected: () -> Void = {}
     var isPainting = false
     var togglePaint: () -> Void = {}
     var clearStrokes: () -> Void = {}
@@ -4123,6 +4524,20 @@ struct UserMaskEditor: View {
                     Text("editing on canvas").font(Theme.mono(9)).foregroundColor(Theme.glow)
                 }
                 Spacer()
+                // The off switch, next to the trash rather than instead of it. Same glyph, same
+                // help text and same behaviour as the auto masks' eye: click to show where this
+                // mask falls, click again to put it away. Tapping the card selects but never
+                // deselects — a click that lands on the card's padding should not silently undo
+                // your selection — so the deliberate "put it down" gesture needs its own button,
+                // and it needs to be the thing you find when you are reaching for the trash.
+                Button(action: onToggleSelected) {
+                    Image(systemName: isSelected ? "eye.fill" : "eye")
+                        .font(.system(size: 11))
+                        .foregroundColor(isSelected ? Theme.glow : Theme.inkFaint)
+                }
+                .buttonStyle(.plain)
+                .help(isSelected ? "Stop showing this mask on the photo (keeps its edits)"
+                                 : "Show where this mask falls")
                 // Which mask sits on top of which. Composites in array order, so this changes the
                 // picture, not just the list.
                 Button(action: onMoveUp) {

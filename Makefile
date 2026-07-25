@@ -12,7 +12,7 @@ BUILD_PATH ?= $(TMPDIR)kelvin-build
 SWIFT := swift
 SWIFTFLAGS := --scratch-path "$(BUILD_PATH)"
 
-.PHONY: build test release clean bin eval render
+.PHONY: build test release clean bin eval render app open stage-model app-staged
 
 build:
 	$(SWIFT) build $(SWIFTFLAGS)
@@ -48,3 +48,14 @@ app:
 #   make open PHOTO=~/Pictures/shoot/_DSC0001.ARW
 open:
 	cd Integrations/KelvinPerceptionMLX && KELVIN_DEMO_IMAGE="$(PHOTO)" $(SWIFT) run kelvin-app
+
+# Stage the perception weights for bundling into the app (see D-model-4). Refuses to stage weights
+# whose licence file is not present, because bundling them is redistribution.
+stage-model:
+	scripts/stage-model.sh
+
+# Run against the staged weights instead of the Hugging Face cache — the same path a shipped bundle
+# takes, so "does it load from disk" is testable before there is a bundle.
+app-staged: stage-model
+	cd Integrations/KelvinPerceptionMLX && \
+	  KELVIN_MODEL_PATH="$(PWD)/Vendor/PerceptionModel" $(SWIFT) run kelvin-app

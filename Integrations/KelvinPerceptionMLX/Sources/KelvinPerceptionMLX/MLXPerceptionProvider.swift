@@ -12,9 +12,14 @@ import MLXHuggingFace
 import HuggingFace
 import Tokenizers
 
-/// The real perception backend: a small on-device VLM (Qwen2.5-VL-3B, 4-bit) reading a photo
+/// The real perception backend: a small on-device VLM (see `defaultModelID`, 4-bit) reading a photo
 /// and returning `KelvinCore.Perception`. Conforms to the `PerceptionProvider` seam, so the
 /// engine and eval harness depend on the protocol, never on MLX.
+///
+/// Deliberately does NOT name the model here. This line said "Qwen2.5-VL-3B" for the life of the
+/// file, including after the default changed — and a comment naming a model is exactly how the
+/// research-licence mistake in D-model-3 survived review. One constant states which model; every
+/// other mention points at it.
 ///
 /// It emits **only** categorical judgments — the prompt forbids numbers and the engine
 /// computes every parameter from measured statistics (CLAUDE.md non-negotiable #1). Reliability
@@ -71,6 +76,40 @@ public actor MLXPerceptionProvider: PerceptionProvider {
         self.maxTokens = maxTokens
     }
 
+    /// The weights that ship INSIDE the app, if they are there.
+    ///
+    /// Bundling is the decided direction (D-model-4) and this is the half that makes it work.
+    /// `ModelConfiguration(directory:)` resolves straight to a path — `loadModelContainer` switches on
+    /// the identifier and only reaches for a `Downloader` in the `.id` case — so a bundled model means
+    /// the app makes no network request at all, rather than one that usually hits a cache.
+    ///
+    /// That matters beyond convenience. The perception layer was fetching ~1.6 GB from huggingface.co
+    /// on first use, unannounced, from an app whose first promise is "no cloud, no account, no
+    /// upload", and failing SILENTLY to a conservative read if the network was not there — so a
+    /// photographer on a plane got worse edits and was never told why.
+    ///
+    /// Apache-2.0 permits shipping the weights (§4: redistribution in object form, commercially),
+    /// provided the licence and any NOTICE travel with them. `scripts/stage-model.sh` is what puts
+    /// them in place and it refuses to stage weights whose licence files are missing.
+    private static var bundledModelDirectory: URL? {
+        guard let resources = Bundle.main.resourceURL else { return nil }
+        let directory = resources.appendingPathComponent("PerceptionModel", isDirectory: true)
+        // `config.json` rather than the directory's existence: an empty or half-copied folder must
+        // fall through to the download rather than fail the load with a confusing decoder error.
+        guard FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("config.json").path) else { return nil }
+        return directory
+    }
+
+    /// A local model directory named by the environment, for running against weights that are not the
+    /// bundled ones without assembling an app. The id-based `KELVIN_MODEL` still works and still
+    /// downloads; this is its offline twin.
+    private static var overrideModelDirectory: URL? {
+        guard let path = ProcessInfo.processInfo.environment["KELVIN_MODEL_PATH"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty else { return nil }
+        return URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
+    }
+
     /// Which model this provider is actually running — worth surfacing when comparing two.
     ///
     /// `nonisolated` because it is the immutable id the actor was built with, not state: a caller
@@ -97,13 +136,34 @@ public actor MLXPerceptionProvider: PerceptionProvider {
         return try PerceptionParser.parse(raw)
     }
 
-    /// Load the model container once (first call downloads ~2–3 GB from Hugging Face and
-    /// compiles the graph) and cache it for subsequent images.
+    /// Load the model container once and cache it for subsequent images.
+    ///
+    /// Local first, download second. A `KELVIN_MODEL` naming a different repo wins over the bundled
+    /// weights, because the only reason to set it is to run something other than what shipped.
     private func loadedContainer() async throws -> ModelContainer {
         if let container { return container }
-        let configuration = ModelConfiguration(id: modelID)
+        let configuration: ModelConfiguration
+        if let directory = Self.overrideModelDirectory {
+            configuration = ModelConfiguration(directory: directory)
+        } else if modelID == Self.defaultModelID, let directory = Self.bundledModelDirectory {
+            configuration = ModelConfiguration(directory: directory)
+        } else {
+            // The remaining path, and the only one that touches the network: a repo id with nothing
+            // local to satisfy it. Reached during development and by a build with no staged weights.
+            configuration = ModelConfiguration(id: modelID)
+        }
         let loaded = try await #huggingFaceLoadModelContainer(configuration: configuration)
         container = loaded
         return loaded
+    }
+
+    /// Whether this provider will read from disk or from the network — so the app can say which,
+    /// instead of a silent pause on a first run.
+    ///
+    /// `nonisolated` for the same reason `activeModelID` is: a caller reporting what is about to
+    /// happen must not have to await the actor that is doing it.
+    public nonisolated var loadsFromDisk: Bool {
+        Self.overrideModelDirectory != nil
+            || (modelID == Self.defaultModelID && Self.bundledModelDirectory != nil)
     }
 }

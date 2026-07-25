@@ -158,8 +158,22 @@ struct FilmstripView: View {
     var softCount: Int = 0
     var scanProgress: Double? = nil
     var onScanFocus: () -> Void = {}
+    /// The sharpest frame of each run of more than one, when the strip is grouped into bursts or
+    /// near-duplicates. Advisory: it marks, it never decides.
+    var sharpest: Set<URL> = []
+    /// What else the scan noticed — a frame with no readable detail left at either end of the tone
+    /// range. Focus is excluded; the soft badge already covers it.
+    var exposureConcerns: (URL) -> [PhotoTriage.Concern] = { _ in [] }
+    /// The scan's readings for one frame, in words, for the tooltip.
+    var scanNote: (URL) -> String? = { _ in nil }
     @Binding var sortKey: PhotoSortKey
     @Binding var sortReversed: Bool
+    /// How the strip is partitioned, and the runs to draw. `nil` groups is a flat strip — not one
+    /// group holding everything, which would make this view draw a heading over the whole shoot.
+    @Binding var grouping: AppState.StripGrouping
+    var groups: [AppState.StripGroup]? = nil
+    /// False when nothing in the folder carries a position, which is most folders.
+    var canGroupByPlace: Bool = false
     /// True while the EXIF pass is still running, so the header can say the order is provisional
     /// rather than let the strip silently rearrange under the pointer.
     var sortPending: Bool = false
@@ -240,11 +254,20 @@ struct FilmstripView: View {
                 // No glyph here, unlike the sidebar. Measured, this header row already comes to
                 // 575 pt against a 580 pt pane at the window's minimum width, so an icon buys a
                 // truncated Picker rather than a faster read.
+                //
+                // "Scan" rather than "Check focus", because the pass stopped being about focus: one
+                // 1200 px proxy per frame now yields the sharpness reading, the exposure extremes,
+                // and the fingerprint the Similar grouping and the sharpest-of-run marker are built
+                // on. The old label undersold it to the point where it read as doing nothing.
                 Button(action: onScanFocus) {
-                    Text("Check focus").font(Theme.mono(9)).foregroundColor(Theme.inkDim)
+                    Text("Scan shoot").font(Theme.mono(9)).foregroundColor(Theme.inkDim)
                 }
                 .buttonStyle(.plain)
-                .help("Measure every frame and flag the soft ones for review")
+                .help("""
+                      Measure every frame once: sharpness, exposure extremes, and which frames are \
+                      near-duplicates of each other. Nothing is flagged or discarded — the findings \
+                      are surfaced for you to look at.
+                      """)
             }
 
             Spacer()
@@ -260,6 +283,7 @@ struct FilmstripView: View {
             .frame(width: 220)
             .controlSize(.small)
 
+            groupControl
             sortControl
         }
         .padding(.horizontal, 14)
@@ -310,13 +334,62 @@ struct FilmstripView: View {
               : "Sort the shoot by \(sortKey.longLabel.lowercased())")
     }
 
+    /// How the strip is partitioned. ONE control on ONE axis — None / Burst / Day / Place / Similar
+    /// — rather than a metadata grouping and a separate near-duplicate grouping that a photographer
+    /// would have to combine in their head. See docs/DECISIONS.md, D-browse-1.
+    ///
+    /// A menu for the same reason the sort is one: there is already a segmented control in this row,
+    /// and a second one beside it reads as a single control with more positions. The label says the
+    /// current lens, so the strip is never partitioned by something you cannot see.
+    private var groupControl: some View {
+        Menu {
+            Picker("Group by", selection: $grouping) {
+                ForEach(AppState.StripGrouping.allCases, id: \.self) { key in
+                    // Place is dropped from the choices when the folder carries no position at all.
+                    if key != .place || canGroupByPlace {
+                        Text(key.longLabel).tag(key)
+                    }
+                }
+            }
+            .pickerStyle(.inline)
+            if !canGroupByPlace {
+                Divider()
+                // Present and unavailable, with the reason. A choice that silently does not exist
+                // reads as a missing feature; one that says "no position recorded" tells you
+                // something true about your files. Most folders are this case — a camera without
+                // GPS records no position, and the phone in your pocket is the exception.
+                Button("Place — no location in these files") {}
+                    .disabled(true)
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: grouping == .none ? "rectangle.grid.1x2" : "square.stack.3d.down.right.fill")
+                    .font(.system(size: 8, weight: .bold))
+                Text(grouping == .none ? "Group" : grouping.label).font(Theme.mono(9))
+            }
+            .foregroundColor(grouping == .none ? Theme.inkDim : Theme.glow)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(grouping == .none
+              ? "Group the shoot into bursts, days, places, or near-duplicates"
+              : "Grouped by \(grouping.longLabel.lowercased()) — click to change")
+    }
+
     private var strip: some View {
         Group {
             ScrollViewReader { proxy in
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(photos, id: \.self) { url in
-                            cell(url).id(url)
+                    Group {
+                        if let groups {
+                            groupedRuns(groups)
+                        } else {
+                            HStack(spacing: 8) {
+                                ForEach(photos, id: \.self) { url in
+                                    cell(url).id(url)
+                                }
+                            }
                         }
                     }
                     .padding(.horizontal, 14)
@@ -340,6 +413,56 @@ struct FilmstripView: View {
                 }
             }
         }
+    }
+
+    /// The shoot as headed runs, still one horizontal scroll. A run is a column — its heading above
+    /// its own thumbnails — because the alternative (headings interleaved in the same row) leaves
+    /// nothing marking where one group ends and the next begins.
+    private func groupedRuns(_ groups: [AppState.StripGroup]) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            ForEach(groups) { group in
+                // A rule between runs, not around them: the boundary is the information, and a box
+                // per group would put 300 borders on screen for a shoot of near-duplicates.
+                if group.id != groups.first?.id {
+                    Divider().frame(height: 62)
+                }
+                VStack(alignment: .leading, spacing: 5) {
+                    heading(for: group)
+                    HStack(spacing: 8) {
+                        ForEach(group.urls, id: \.self) { url in
+                            cell(url).id(url)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func heading(for group: AppState.StripGroup) -> some View {
+        // The row is reserved whether or not this group has a heading, so a strip of mixed headed
+        // and unheaded runs — which is every Similar and every Burst grouping, since a lone frame
+        // gets no label — keeps its thumbnails on one line instead of stepping up and down.
+        HStack(spacing: 5) {
+            if let text = group.heading {
+                Text(text.uppercased())
+                    .font(Theme.mono(9, .semibold)).tracking(1)
+                    .foregroundColor(Theme.inkDim)
+                    .lineLimit(1)
+                if let detail = group.detail {
+                    Text(detail)
+                        .font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
+                        .lineLimit(1)
+                }
+            }
+        }
+        // FIXED SIZE, and it is not cosmetic: inside a horizontal `ScrollView` the available width is
+        // shared out among the runs, and `Text` accepts whatever it is offered. Without this the
+        // headings truncated to "9:14… 3 fra…" while the thumbnails beneath them — which have fixed
+        // frames and cannot compress — stayed the size they were. A heading that says "3 fra…" is
+        // worse than no heading: it is a label you have to guess at.
+        .fixedSize()
+        .frame(height: 11, alignment: .leading)
     }
 
     private func cell(_ url: URL) -> some View {
@@ -366,13 +489,40 @@ struct FilmstripView: View {
                 .overlay(alignment: .bottomTrailing) {
                     // Soft is a QUESTION, not a decision — a marker you look at, in a different
                     // colour and corner from the keep/reject flags so the two are never confused.
-                    if softURLs.contains(url) {
-                        Image(systemName: "eye.trianglebadge.exclamationmark")
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundColor(Theme.warn)
+                    // The tone concern sits beside it in the same language, and fires on almost
+                    // nothing: every threshold behind it is past the most extreme frame in 836 real
+                    // photographs, so a triangle here means genuinely unusual.
+                    HStack(spacing: 2) {
+                        if !exposureConcerns(url).isEmpty {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundColor(Theme.warn)
+                                .padding(3)
+                                .background(Circle().fill(Theme.base.opacity(0.85)))
+                        }
+                        if softURLs.contains(url) {
+                            Image(systemName: "eye.trianglebadge.exclamationmark")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundColor(Theme.warn)
+                                .padding(3)
+                                .background(Circle().fill(Theme.base.opacity(0.85)))
+                        }
+                    }
+                    .padding(3)
+                }
+                // The sharpest frame of this run. Top-LEFT: every other corner is taken (flags
+                // bottom-left, warnings bottom-right, the edited dot and the dismiss button
+                // top-right), and a marker that moves depending on what else is on the thumbnail is
+                // a marker you cannot scan a strip for.
+                .overlay(alignment: .topLeading) {
+                    if sharpest.contains(url) {
+                        Image(systemName: "scope")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(Theme.glow)
                             .padding(3)
                             .background(Circle().fill(Theme.base.opacity(0.85)))
                             .padding(3)
+                            .help("Sharpest frame in this run — measured, not chosen")
                     }
                 }
                 .overlay(alignment: .bottomLeading) {
@@ -449,7 +599,39 @@ struct FilmstripView: View {
         .animation(Motion.gated(Motion.quick, reduceMotion), value: isCurrent)
         .animation(Motion.gated(Motion.quick, reduceMotion), value: hovered == url)
         .onHover { hovered = $0 ? url : (hovered == url ? nil : hovered) }
-        .help(url.lastPathComponent)
+        // The filename, and what the scan measured if it has been past. The number travels with the
+        // flag deliberately: an automatic judgement with no visible measurement behind it is one you
+        // can neither check nor disagree with.
+        .help(scanNote(url).map { "\(url.lastPathComponent) — \($0)" } ?? url.lastPathComponent)
+    }
+}
+
+/// The save panel's accessory: what travels out with the file.
+///
+/// One checkbox, and it is deliberately not a list of metadata fields. The choice a photographer
+/// actually makes is "does this file say where I was" — the camera, the lens, the date and the
+/// exposure are photographic facts they want kept, and offering them as separate switches would turn
+/// one decision into five and make the important one easy to miss.
+struct ExportOptions: View {
+    @ObservedObject var appState: AppState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(isOn: $appState.stripLocationOnExport) {
+                Text("Remove location and camera serial")
+            }
+            // The consequence of each state, spelled out, because the whole reason this control
+            // exists is that the previous behaviour was invisible.
+            Text(appState.stripLocationOnExport
+                 ? "Camera, lens, date and exposure still travel with the file."
+                 : "The file will carry where the photo was taken and which body took it.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .frame(width: 420, alignment: .leading)
     }
 }
 
