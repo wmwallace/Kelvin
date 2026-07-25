@@ -287,6 +287,19 @@ final class AppState: ObservableObject {
     /// "Person 2" tells you nothing about which person that is until you can see it.
     @Published var highlightedInstanceId: String?
 
+    /// True while the pointer is over the Repair controls, which draws a ring around every detected
+    /// spot on the photograph.
+    ///
+    /// Dust spots are a few pixels across and the whole difficulty is that you cannot see them at
+    /// preview size — so a toggle you switch on and cannot verify is a toggle you have to take on
+    /// faith. Hover rather than a switch, for two reasons: it is the pattern the subject list
+    /// already uses (hover a row, see which person it means), and rings over a photograph are
+    /// clutter for every second you are not asking the question.
+    ///
+    /// Deliberately NOT a before/after: the app already has one. Hold to compare shows the frame
+    /// with the spots back, which answers "what did it change". This answers "what did it find".
+    @Published var showingRepairSpots = false
+
     /// Instances that already have a mask, so the list can show which are in play and clicking one
     /// again selects it rather than adding a duplicate.
     var maskedInstanceIds: Set<String> {
@@ -357,7 +370,8 @@ final class AppState: ObservableObject {
     /// Sensor dust/spots detected once on load (normalised → resolution-independent, so the same
     /// set heals the proxy preview, the full-res export, and every frame of a batch — dust sits at
     /// a fixed sensor position across a whole shoot).
-    private var healSpots: [HealSpot] = []
+    /// Readable so the canvas can ring them on hover; still only written here.
+    private(set) var healSpots: [HealSpot] = []
     @Published var detectedSpotCount = 0
     /// Opt-in: dust removal is off by default so a clean frame is never touched, and the user
     /// decides when a spot is dust versus real detail.
@@ -2251,18 +2265,45 @@ final class AppState: ObservableObject {
         guard framedX >= 0, framedX <= 1, framedY >= 0, framedY <= 1 else { return }
         let (nx, ny) = viewToNorm(loc, in: rect)
         guard nx >= 0, nx <= 1, ny >= 0, ny <= 1 else { return }
-        // Throttle: skip if the last stamp is closer than ~⅓ of the brush radius. Scale by zoom so
-        // the stroke stays smooth when zoomed in (a screen-inch covers less of the image).
+        // Spacing between dabs: about a third of the brush radius, so consecutive stamps overlap
+        // heavily and their soft edges union into one continuous shape. Scaled by zoom, since a
+        // screen-inch covers less of the image the further in you are.
         let minStep = brushRadius * 0.33 / max(1, zoom)
-        if let last = userMasks[idx].stamps.last {
-            let dx = last.x - nx, dy = last.y - ny
-            if (dx * dx + dy * dy).squareRoot() < minStep { return }
-        }
+
         // Round to 4 decimals: sub-pixel even on a 9504 px export, and it keeps the sidecar (and
         // every undo snapshot) compact — stamps are the one recipe field that grows with use.
         func r4(_ v: Double) -> Double { (v * 10_000).rounded() / 10_000 }
-        userMasks[idx].stamps.append(
-            BrushStamp(x: r4(nx), y: r4(ny), radius: r4(brushRadius), hardness: 0.6))
+        func stamp(_ x: Double, _ y: Double) {
+            userMasks[idx].stamps.append(
+                BrushStamp(x: r4(x), y: r4(y), radius: r4(brushRadius), hardness: 0.6))
+        }
+
+        guard let last = userMasks[idx].stamps.last else {
+            stamp(nx, ny); onEdit(); return
+        }
+
+        // THE STROKE IS INTERPOLATED, and this is what "the brush adds rough dots" was. A drag
+        // gesture reports a position per screen refresh, so a quick stroke can travel several brush
+        // widths between two reports. The old code stamped only where the pointer WAS and threw away
+        // anything closer than one step — which correctly avoided piling dabs on one spot, and did
+        // nothing at all about the gaps between distant ones. Paint slowly and it looked continuous;
+        // paint at any speed and it was a row of discs.
+        //
+        // So walk the line from the previous dab to this one, placing a dab every step. The throttle
+        // survives as the first case below: nearer than one step, there is nothing to add.
+        let dx = nx - last.x, dy = ny - last.y
+        let distance = (dx * dx + dy * dy).squareRoot()
+        if distance < minStep { return }
+
+        // Bounded. A pointer that jumps the width of the image — a stylus lifted and set down, or a
+        // window dragged across a second display — must not enqueue thousands of dabs and stall the
+        // bake. Past the cap the stroke is left broken, which is honest and recoverable, where a
+        // frozen app is neither.
+        let steps = min(64, max(1, Int((distance / minStep).rounded(.down))))
+        for i in 1...steps {
+            let t = Double(i) / Double(steps)
+            stamp(last.x + dx * t, last.y + dy * t)
+        }
         onEdit()
     }
 
@@ -3339,6 +3380,28 @@ struct ContentView: View {
         }
     }
 
+    /// Every detected dust spot, ringed, while the pointer is over the Repair controls.
+    @ViewBuilder
+    private func repairSpotOverlay(in container: CGSize) -> some View {
+        if appState.showingRepairSpots, !appState.showingOriginal, !appState.healSpots.isEmpty {
+            let rect = appState.imageRect(in: container)
+            ZStack(alignment: .topLeading) {
+                ForEach(Array(appState.healSpots.enumerated()), id: \.offset) { _, spot in
+                    // A RING, not a disc: the point is to see the spot inside it and judge whether
+                    // it is dust or a bird. Filling it would hide the only evidence.
+                    let centre = appState.normToView(spot.x, spot.y, in: rect)
+                    let radius = max(9, spot.radius * min(rect.width, rect.height) * 2.2)
+                    Circle()
+                        .stroke(Theme.glow.opacity(0.9), lineWidth: 1.5)
+                        .frame(width: radius * 2, height: radius * 2)
+                        .position(centre)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .allowsHitTesting(false)
+        }
+    }
+
     /// On-canvas handles for the selected radial / graduated mask — drag directly on the image to
     /// place, size, and rotate the mask instead of nudging sliders.
     @ViewBuilder
@@ -3980,6 +4043,13 @@ struct ContentView: View {
                 }
                 .toggleStyle(.switch).tint(Theme.glow)
                 .disabled(appState.detectedSpotCount == 0)
+                // Hovering the control rings every spot it would patch. Nothing to switch on, and
+                // nothing left on the photograph once the pointer moves away.
+                .onHover { appState.showingRepairSpots = $0 && appState.detectedSpotCount > 0 }
+                if appState.detectedSpotCount > 0 {
+                    Text("Hover to see where they are · hold Compare to see them back")
+                        .font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
+                }
                 }
 
                 // Last: a record of the photograph, not a control reached for mid-edit.
