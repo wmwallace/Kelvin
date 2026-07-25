@@ -147,8 +147,17 @@ echo "▸ Code-signing (${IDENTITY})…"
 # Not `|| true`: this used to swallow its own exit code, so a bundle that failed to sign was
 # reported as "✓" and only announced itself later as a launch failure.
 while IFS= read -r nested; do
-  codesign "${SIGN_OPTS[@]}" "$nested" >/dev/null 2>&1 || {
-    echo "package-app.sh: failed to sign nested bundle $nested" >&2; exit 1; }
+  # Output NOT swallowed. An earlier version of this loop sent codesign's stderr to /dev/null and
+  # reported only "failed to sign nested bundle", which hid the actual cause — the first use of a
+  # newly installed private key raises a Keychain prompt, and while that dialog sits unanswered
+  # codesign simply blocks, then fails. The message that explains it is the one codesign prints.
+  if ! codesign "${SIGN_OPTS[@]}" "$nested"; then
+    echo "package-app.sh: failed to sign nested bundle $nested" >&2
+    echo "  If this hung first: look for a Keychain dialog and choose Always Allow." >&2
+    echo "  In CI there is nobody to click it — import the .p12 into a temporary keychain and run" >&2
+    echo "  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k <pw> <keychain>" >&2
+    exit 1
+  fi
 done < <(find "$APP/Contents/Resources" -maxdepth 1 -name "*.bundle" -type d)
 
 if ! codesign "${SIGN_OPTS[@]}" "$APP"; then
