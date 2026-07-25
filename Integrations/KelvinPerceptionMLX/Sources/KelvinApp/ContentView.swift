@@ -881,13 +881,22 @@ final class AppState: ObservableObject {
                 // larger so zooming shows more detail, but not so large that live rendering slows
                 // down (1200px balances zoom detail against snappy sliders). Masks build from it,
                 // so they stay aligned when zoomed.
-                let perceptionProxy = PerceptionProxy.downsample(fullRes)
+                let perceptionProxy = PerceptionProxy.fromFile(url, matching: fullRes.extent)
+                    ?? PerceptionProxy.downsample(fullRes)
                 // MATERIALISE the edit proxy. `downsample` returns a *lazy* CIImage — a filter
                 // graph over the full-resolution original — so every later measurement (mask
                 // coverage, subject luma, dust scan, histogram) silently re-renders all 60
                 // megapixels again. Rendering once here means everything downstream works on real
                 // 1200 px pixels.
-                let proxy = Self.materialiseShared(PerceptionProxy.downsample(fullRes, maxEdge: 1200))
+                //
+                // Better still, for anything that is not RAW, is never to decode the full frame:
+                // ImageIO can decode a JPEG straight to the size we want. Profiled on a 9504×6336
+                // frame, the proxy went 2017 ms -> 120 ms, which was the single largest cost in
+                // opening a photo. RAW keeps the real decode — see `PerceptionProxy.fromFile` for
+                // why taking the camera's embedded preview would be wrong rather than merely
+                // faster.
+                let proxy = PerceptionProxy.fromFile(url, maxEdge: 1200, matching: fullRes.extent)
+                    ?? Self.materialiseShared(PerceptionProxy.downsample(fullRes, maxEdge: 1200))
                 return DecodedPhoto(fullRes: fullRes, perceptionProxy: perceptionProxy,
                                     proxy: proxy, originalPreview: Self.ciToNSImageShared(proxy),
                                     imageId: id)
@@ -923,26 +932,26 @@ final class AppState: ObservableObject {
             // Also off the main thread: the statistics pass, Vision's person/sky segmentation and
             // the dust scan each render the proxy, and together they were the second-biggest block
             // on the main thread after decode.
+            // ...and CONCURRENTLY, because none of these reads another's output. Profiled on three
+            // real photographs they ran 825–1019 ms end to end as a sequence, dominated by subject
+            // instances (623–703 ms) with the segmentation, dust and focus passes waiting behind
+            // it for no reason. Run together, the block costs about what its slowest member costs.
+            //
+            // `async let` rather than a task group: the set is fixed and each result has a
+            // different type, so a group would mean erasing them into an enum and matching them
+            // back out to gain nothing.
             let measurement = try await Task.detached(priority: .userInitiated) { () throws -> MeasuredPhoto in
+                async let masks = LocalMasks.measure(in: proxy)
+                async let instances = SubjectInstances.detect(in: proxy)
+                async let dust = DustDetector.detect(in: proxy)
+                async let focus = FocusMeasure.read(proxy)
+
                 let sampleBytes = try ImageMetrics.sample(proxy)
                 let stats = ImageStatistics.compute(from: sampleBytes)
-                // Subject + sky masks (for local edits). Generated on the proxy for fast previews;
-                // the measured region brightness tells the engine whether to lift the subject or
-                // defog the sky.
-                let measured = LocalMasks.measure(in: proxy)
-                // Scan for sensor dust once (normalised coords reused everywhere). Conservative —
-                // a clean frame yields none. Off until the user opts in.
-                return MeasuredPhoto(stats: stats, masks: measured,
-                                     dust: DustDetector.detect(in: proxy),
-                                     focus: FocusMeasure.read(proxy),
-                                     // Every separable subject, individually. `LocalMasks` above
-                                     // fuses them into one "subject" for the engine's own decisions
-                                     // (lift the person, defog the sky), which is right for a
-                                     // global judgement and wrong for editing: two people at
-                                     // different distances from the light want different amounts,
-                                     // and the merged mask can only give them the average.
-                                     instances: SubjectInstances.detect(in: proxy))
+                return await MeasuredPhoto(stats: stats, masks: masks, dust: dust,
+                                           focus: focus, instances: instances)
             }.value
+
             guard imageURL == url else { return }
 
             let stats = measurement.stats

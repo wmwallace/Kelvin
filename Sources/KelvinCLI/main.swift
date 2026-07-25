@@ -380,6 +380,141 @@ case "bench":
         }
     } catch { fail("\(error)") }
 
+case "bench-load":
+    // Where does the time between "I picked a photo" and "here are your candidates" actually go?
+    //
+    // `bench` above measures an interactive frame, which is the cost of DRAGGING a slider. This
+    // measures the cost of OPENING a photo, which is the wait a user actually complains about, and
+    // it is a different pipeline: decode, proxy, statistics, four independent Vision/Core Image
+    // passes, then eight candidate renders each scored.
+    //
+    // Written because a performance proposal arrived with per-subsystem speedup figures and no
+    // measurements. Every real performance problem this app has had was work happening in the wrong
+    // PLACE (full RAW decodes during view layout; decode on the MainActor), not work being too
+    // slow — so the useful question is which stages dominate and which are independent of each
+    // other, not which could be rewritten in Metal.
+    do {
+        let rest = Array(arguments.dropFirst())
+        guard let inPath = value(for: "--in", in: rest) else { fail("bench-load requires --in") }
+        let url = URL(fileURLWithPath: inPath)
+
+        func time<T>(_ label: String, _ body: () throws -> T) rethrows -> T {
+            let start = Date()
+            let out = try body()
+            print(String(format: "  %-30@ %7.1f ms", label as NSString,
+                         Date().timeIntervalSince(start) * 1000))
+            return out
+        }
+
+        print("Load-path profile — \(url.lastPathComponent)")
+        let full = try time("decode") { try ImageDecoder.decode(url: url) }
+        print(String(format: "    (%.0f×%.0f)", full.extent.width, full.extent.height))
+
+        // `ImageDecoder.decode` returns a LAZY CIImage — it reads the header and builds a recipe
+        // for producing pixels, it does not produce them. So the "decode" figure above is setup,
+        // and whichever stage first asks for pixels pays for the real decode. Forcing it here
+        // separates "the file is slow to decode" from "downsampling is slow", which are different
+        // problems with different fixes.
+        let ctx = CIContext(options: [.cacheIntermediates: true])
+        _ = time("first pixels (real decode)") {
+            ctx.createCGImage(full, from: CGRect(x: 0, y: 0, width: 64, height: 64))
+        }
+        let proxy = time("proxy 1200px (materialised)") { () -> CIImage in
+            let lazy = PerceptionProxy.downsample(full, maxEdge: 1200)
+            guard let cg = ctx.createCGImage(lazy, from: lazy.extent) else { return lazy }
+            return CIImage(cgImage: cg)
+        }
+        _ = time("proxy 768px (perception)") { () -> CIImage in
+            let lazy = PerceptionProxy.downsample(full, maxEdge: 768)
+            guard let cg = ctx.createCGImage(lazy, from: lazy.extent) else { return lazy }
+            return CIImage(cgImage: cg)
+        }
+
+        // The alternative: ask ImageIO to decode STRAIGHT to the size we want. A JPEG can be
+        // scaled during entropy decoding, so this never materialises the full frame at all —
+        // where `downsample` renders every full-resolution pixel and then throws almost all of
+        // them away. The filmstrip already loads thumbnails this way.
+        _ = time("proxy via ImageIO subsampled") { () -> CGImage? in
+            guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+            return CGImageSourceCreateThumbnailAtIndex(src, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: 1200,
+                kCGImageSourceCreateThumbnailWithTransform: true
+            ] as CFDictionary)
+        }
+
+        if rest.contains("--sweep-width") {
+            for w in [7000.0, 8000.0, 8192.0, 8193.0, 8500.0, 9000.0, full.extent.width]
+            where w <= full.extent.width {
+                let crop = full.cropped(to: CGRect(x: 0, y: 0, width: w, height: full.extent.height))
+                _ = time("  width \(Int(w)) -> 1200px") { () -> CGImage? in
+                    let p = PerceptionProxy.downsample(crop, maxEdge: 1200)
+                    return ctx.createCGImage(p, from: p.extent)
+                }
+            }
+        }
+
+        let stats = try time("statistics") { try ImageStatistics.compute(proxy) }
+        // None of these four reads another's output, which is the whole point of measuring them
+        // one at a time and then together.
+        //
+        // MEASURED IN SEPARATE PROCESSES (`--only seq` / `--only par`), because running both in
+        // one run flatters whichever goes second: Vision loads its models on first use and Core
+        // Image caches the proxy, so the second block is timed against a machine the first block
+        // warmed up. Measured that way the concurrent block came out at 141 ms against a 1163 ms
+        // sequential sum, an "8× win" that was mostly just being second.
+        let only = value(for: "--only", in: rest)
+        if only != "par" {
+            _ = time("  masks (subject + sky)") { LocalMasks.measure(in: proxy) }
+            _ = time("  subject instances") { SubjectInstances.detect(in: proxy) }
+            _ = time("  dust scan") { DustDetector.detect(in: proxy) }
+            _ = time("  focus measure") { FocusMeasure.read(proxy) }
+            _ = time("  face skin") { FaceSkin.read(in: proxy) }
+        }
+        if only != "seq" {
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var done = 0
+        time("  ALL FOUR concurrently") {
+            for work in [{ _ = LocalMasks.measure(in: proxy) },
+                         { _ = SubjectInstances.detect(in: proxy) },
+                         { _ = DustDetector.detect(in: proxy) },
+                         { _ = FocusMeasure.read(proxy) }] {
+                group.enter()
+                DispatchQueue.global(qos: .userInitiated).async {
+                    work()
+                    lock.lock(); done += 1; lock.unlock()
+                    group.leave()
+                }
+            }
+            group.wait()
+        }
+        }
+
+        let recipes = time("candidate recipes (engine)") {
+            // The app's conservative fallback read — the perception content does not matter for a
+            // timing measurement, only that the engine runs its full path.
+            let perception = Perception(
+                scene: .other,
+                subject: Perception.Subject(present: false, type: .none, count: .none, placement: .center),
+                lighting: Perception.Lighting(condition: .indoorDaylight, direction: .diffuse,
+                                              contrastRange: .normal),
+                problems: [], intent: .natural, confidence: 0.3)
+            return RecipeEngine.candidates(perception: perception, statistics: stats,
+                                    subjectLuma: nil, skyLuma: nil, iso: ExifReader.iso(url: url))
+        }
+        print("    (\(recipes.count) candidates)")
+        _ = time("render + score all candidates") { () -> Int in
+            var kept = 0
+            for r in recipes {
+                let out = Renderer.render(proxy, with: r, maskBitmaps: [:])
+                if AestheticEvaluator.score(rendered: out) != nil { kept += 1 }
+            }
+            return kept
+        }
+        _ = time("EXIF header read") { ExifReader.iso(url: url) }
+    } catch { fail("\(error)") }
+
 case "fuse":
     // Experimental: single-image exposure fusion (Mertens). Compare against the untouched frame.
     let rest = Array(arguments.dropFirst())
