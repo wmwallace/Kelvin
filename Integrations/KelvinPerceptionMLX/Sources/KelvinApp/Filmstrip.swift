@@ -100,6 +100,22 @@ struct PhotoSession {
     let healSpots: [HealSpot]
     let detectedSpotCount: Int
 
+    /// What the camera recorded. Cached with the rest because `restore` puts a photo back WITHOUT
+    /// re-reading it — so without this field, coming back to photo A showed A's pixels under B's
+    /// camera, lens, shutter, ISO, capture date and map link. Plausible, silent, and wrong.
+    var capture: CaptureInfo
+    /// The look applied to THIS photo. Also absent before, and it carried the black-and-white
+    /// conversion with it: apply Mono to B, click back to A, and A rendered monochrome while its
+    /// own saved edit knew nothing about it.
+    var activeLookId: String?
+    /// Per-mask overrides. The auto masks are keyed by literal strings ("subject", "sky"), so they
+    /// collide across every photo in the folder — pull the sky down two stops on A and B's sky
+    /// came back two stops down too, slider and all.
+    var maskAdjustments: [String: [String: Double]]
+    var maskFeather: [String: Double]
+    var maskTightness: [String: Double]
+    var maskInvert: [String: Bool]
+
     // The edit itself.
     var selectedCandidateId: String?
     var edit: GlobalAdjustments
@@ -116,6 +132,10 @@ struct PhotoSession {
     /// "edited" dot in the strip.
     var isEdited: Bool {
         edit != editBaseline || !userMasks.isEmpty || straighten != 0 || !hsl.isEmpty || removeDust
+            || activeLookId != nil
+            || !maskAdjustments.isEmpty || !maskFeather.isEmpty
+            || !maskTightness.isEmpty || !maskInvert.isEmpty
+            || !maskEnabled.isEmpty || !maskStrength.isEmpty
     }
 }
 

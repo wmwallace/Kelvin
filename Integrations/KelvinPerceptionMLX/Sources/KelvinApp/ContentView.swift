@@ -723,10 +723,39 @@ final class AppState: ObservableObject {
     /// has reset back to the candidate — otherwise a stale file would keep resurrecting an edit
     /// they undid.
     private func persistEdit(for url: URL) {
-        let touched = edit != editBaseline || !userMasks.isEmpty || straighten != 0
-            || !hsl.isEmpty || removeDust
-        if touched { EditStore.save(currentSavedEdit(), for: url) }
+        if isTouched { EditStore.save(currentSavedEdit(), for: url) }
         else { EditStore.remove(for: url) }
+    }
+
+    /// Has this photograph been edited at all — the ONE definition, used everywhere.
+    ///
+    /// This test existed in three places, written out longhand each time, and every copy omitted
+    /// the same things: the mask panel's dictionaries and the active look. Two consequences, and
+    /// the second is the bad one.
+    ///
+    /// Turn off the sky mask, or change its strength, or adjust it, and the photo did not count as
+    /// edited — so no dot in the strip, and nothing saved. Then, because `persistEdit` takes the
+    /// other branch when untouched, reverting the globals while KEEPING a mask change did not
+    /// merely fail to save: it called `EditStore.remove` and deleted the sidecar that was already
+    /// on disk.
+    ///
+    /// One property, so the next thing added to the edit surface has one place to be declared
+    /// rather than three places to be forgotten.
+    var isTouched: Bool {
+        edit != editBaseline
+            || !userMasks.isEmpty
+            || straighten != 0
+            || !hsl.isEmpty
+            || removeDust
+            || activeLookId != nil
+            || !maskAdjustments.isEmpty
+            || !maskFeather.isEmpty
+            || !maskTightness.isEmpty
+            || !maskInvert.isEmpty
+            // Explicitly-set enable/strength: a mask switched OFF is an edit, and an untouched
+            // photo has no entries here at all.
+            || !maskEnabled.isEmpty
+            || !maskStrength.isEmpty
     }
 
     /// Restore a saved edit onto the freshly-generated candidates.
@@ -769,6 +798,9 @@ final class AppState: ObservableObject {
             subjectInstances: subjectInstances,
             subjectLuma: subjectLuma, skyLuma: skyLuma,
             healSpots: healSpots, detectedSpotCount: detectedSpotCount,
+            capture: capture, activeLookId: activeLookId,
+            maskAdjustments: maskAdjustments, maskFeather: maskFeather,
+            maskTightness: maskTightness, maskInvert: maskInvert,
             selectedCandidateId: selectedCandidateId, edit: edit, editBaseline: editBaseline,
             baseMasks: baseMasks, maskEnabled: maskEnabled, maskStrength: maskStrength,
             userMasks: userMasks, straighten: straighten, hsl: hsl, removeDust: removeDust)
@@ -794,6 +826,12 @@ final class AppState: ObservableObject {
         highlightedInstanceId = nil
         subjectLuma = s.subjectLuma; skyLuma = s.skyLuma
         healSpots = s.healSpots; detectedSpotCount = s.detectedSpotCount
+        // Restored, not left standing. Every one of these was previously carried over from
+        // whichever photo happened to be open before.
+        capture = s.capture
+        activeLookId = s.activeLookId
+        maskAdjustments = s.maskAdjustments; maskFeather = s.maskFeather
+        maskTightness = s.maskTightness; maskInvert = s.maskInvert
         selectedCandidateId = s.selectedCandidateId
         edit = s.edit; editBaseline = s.editBaseline
         baseMasks = s.baseMasks; maskEnabled = s.maskEnabled; maskStrength = s.maskStrength
@@ -1491,9 +1529,7 @@ final class AppState: ObservableObject {
             // Keep the filmstrip's "edited" dot honest as you work, not just on switch, and put
             // the edit on disk so quitting the app doesn't throw the work away.
             if let url = self.imageURL {
-                let touched = self.edit != self.editBaseline || !self.userMasks.isEmpty
-                    || self.straighten != 0 || !self.hsl.isEmpty || self.removeDust
-                if touched { self.editedURLs.insert(url) } else { self.editedURLs.remove(url) }
+                if self.isTouched { self.editedURLs.insert(url) } else { self.editedURLs.remove(url) }
                 self.persistEdit(for: url)
             }
         }
@@ -1907,11 +1943,45 @@ final class AppState: ObservableObject {
         guard let fullRes = fullResCI, let recipe = activeRecipe else { return }
         isProcessing = true
         statusMessage = "Rendering full resolution…"
-        do {
-            // Regenerate masks at full resolution so the local edits are crisp on export.
-            let masks = (recipe.masks?.isEmpty == false)
-                ? fullResolutionMaskBitmaps(for: fullRes) : [:]
-            try ImageWriter.write(Renderer.render(fullRes, with: recipe, maskBitmaps: masks), to: exportURL)
+        // OFF THE MAIN ACTOR. `AppState` is `@MainActor`, and `async` does NOT move work off an
+        // actor — an async method on a main-actor type runs on the main thread until it awaits
+        // something that hops. So this ran a full-resolution render, an `ImageWriter.write`, and —
+        // via `fullResolutionMaskBitmaps` — TWO 60-megapixel Vision passes, all on the thread
+        // drawing the window. The app was frozen for the entire export, including the
+        // "Rendering full resolution…" message, which could not paint.
+        //
+        // This is the third instance of a failure mode this codebase has documented twice
+        // already: thumbnails decoding whole RAWs during view layout, and decode on the MainActor.
+        // The pattern is always the same and always looks like correct code.
+        //
+        // The bitmaps are still computed on the detached side, because that is where the Vision
+        // passes are, and they are the expensive part.
+        let masksNeeded = recipe.masks?.isEmpty == false
+        let references = subjectInstances.filter { inst in
+            userMasks.contains { $0.kind == .instance && $0.instanceId == inst.id }
+        }.map(\.reference)
+        let input = ExportInput(fullRes: fullRes, recipe: recipe, url: exportURL)
+
+        let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
+            do {
+                var bitmaps: [String: CIImage] = [:]
+                if masksNeeded {
+                    bitmaps = LocalMasks.measure(in: input.fullRes).bitmaps
+                    if !references.isEmpty {
+                        let matched = SubjectInstances.reidentify(
+                            SubjectInstances.detect(in: input.fullRes), as: references)
+                        bitmaps.merge(matched.bitmaps) { _, fresh in fresh }
+                    }
+                }
+                try ImageWriter.write(
+                    Renderer.render(input.fullRes, with: input.recipe, maskBitmaps: bitmaps),
+                    to: input.url)
+                return .success(())
+            } catch { return .failure(error) }
+        }.value
+
+        switch result {
+        case .success:
             statusMessage = "Exported \(exportURL.lastPathComponent)"
             // Exporting is the one unambiguous signal of preference, so it's logged. NOTE: nothing
             // currently reads this back — candidates are generated fresh per photo, by design (the
@@ -1919,10 +1989,19 @@ final class AppState: ObservableObject {
             // that decision can be revisited with real data; it is not a live learning loop, and
             // the UI must not claim otherwise.
             recordCurrentPick()
-        } catch {
-            statusMessage = "Export failed — \(error.localizedDescription)"
+        case .failure(let error):
+            statusMessage = "Export failed — \(error)"
         }
         isProcessing = false
+    }
+
+    /// Everything a detached export needs, boxed so it can cross the actor boundary. `CIImage` and
+    /// `Recipe` are safe to read from another thread here — the box exists to say so explicitly
+    /// rather than to launder a race.
+    private struct ExportInput: @unchecked Sendable {
+        let fullRes: CIImage
+        let recipe: Recipe
+        let url: URL
     }
 
     /// Apply the chosen *look* across a folder with per-photo intelligence: the style is held
@@ -3677,6 +3756,17 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
         tightness = try c.decodeIfPresent(Double.self, forKey: .tightness) ?? 0.0
         feather = try c.decodeIfPresent(Double.self, forKey: .feather) ?? 0.0
         invert = try c.decodeIfPresent(Bool.self, forKey: .invert) ?? false
+        // The decoder is HAND-WRITTEN, so adding a key to `CodingKeys` fixes encoding and leaves
+        // decoding still ignoring it — the file grows the field and nothing reads it back. Both
+        // halves or neither.
+        shadows = try c.decodeIfPresent(Double.self, forKey: .shadows) ?? 0.0
+        highlights = try c.decodeIfPresent(Double.self, forKey: .highlights) ?? 0.0
+        vibrance = try c.decodeIfPresent(Double.self, forKey: .vibrance) ?? 0.0
+        name = try c.decodeIfPresent(String.self, forKey: .name)
+        refinement = try c.decodeIfPresent(Refinement.self, forKey: .refinement) ?? .none
+        refineCenter = try c.decodeIfPresent(Double.self, forKey: .refineCenter) ?? 0.06
+        refineRange = try c.decodeIfPresent(Double.self, forKey: .refineRange) ?? 0.12
+        refineSoftness = try c.decodeIfPresent(Double.self, forKey: .refineSoftness) ?? 0.06
     }
 
     var label: String {
@@ -3766,10 +3856,16 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
         case .skin:
             // NOT a kind any more — the subject region, narrowed to skin hues. Identical pixels to
             // the old bespoke path; it is just said in the general vocabulary now.
+            //
+            // `ref` wins when the user has set one. The editor shows the REFINE picker on every
+            // kind, and this case used to ignore it and build a colour selection from the legacy
+            // skin fields regardless — so choosing "Light" on a skin mask silently gave you a
+            // colour narrowing instead. Worse than a dead control: the picture changed, just not
+            // in the way that was asked for.
             return Mask(id: id.uuidString, type: "subject", source: "segmentation", invert: inv,
                         feather: f, opacity: 1, adjustments: adj, tightness: t,
-                        refine: MaskSelection(kind: .color, center: selCenter,
-                                              range: selRange, softness: selSoftness))
+                        refine: ref ?? MaskSelection(kind: .color, center: selCenter,
+                                                     range: selRange, softness: selSoftness))
         case .background:
             // Also not a kind: the subject region, inverted. `invert` was always the modifier
             // doing the work — this case existed only to set it for you.
