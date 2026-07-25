@@ -71,6 +71,33 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(s.visiblePhotos, [urls[0], urls[2], urls[3], urls[5]])
     }
 
+    /// Opening one photograph lists its folder, and that is the right default — the strip is what
+    /// culling, Batch apply and the arrow keys all operate on. But it was a surprise to the person
+    /// it happened to, so it is now a stated choice, and the status line says what it did.
+    func testTheFolderNoteReportsWhatWasActuallyLoaded() {
+        let urls = (1...4).map { url("_DSC000\($0).ARW") }
+        let s = state(with: urls)
+        s.imageURL = urls[0]
+        XCTAssertTrue(s.statusNote.contains("3 more photos"), "got: \(s.statusNote)")
+
+        // One sibling reads as "photo", not "photos" — the kind of detail that makes copy look
+        // written rather than generated.
+        let two = state(with: [urls[0], urls[1]])
+        XCTAssertTrue(two.statusNote.contains("1 more photo in"), "got: \(two.statusNote)")
+
+        // Nothing to say when there is nothing else there, so it says nothing.
+        XCTAssertEqual(state(with: [urls[0]]).statusNote, "")
+    }
+
+    /// With the setting off, the note must not claim a folder was listed — and nothing should be.
+    func testOptingOutOfTheFolderSaysNothingAboutIt() {
+        let urls = (1...3).map { url("_DSC000\($0).ARW") }
+        let s = state(with: urls)
+        s.includeFolderOnOpen = false
+        XCTAssertEqual(s.statusNote, "")
+        s.includeFolderOnOpen = true   // leave the shared default as it was found
+    }
+
     // MARK: Grouping — one control, one axis (D-browse-1)
 
     /// Minutes apart, as a shoot's EXIF would read.

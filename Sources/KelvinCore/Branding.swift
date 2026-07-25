@@ -58,4 +58,22 @@ public enum Branding {
     /// File extension for recipe sidecars (no leading dot). Expensive to change once
     /// sidecars exist in the wild, so it lives here from commit one.
     public static let sidecarExtension = "kelvin"
+
+    // MARK: Where to send someone
+    //
+    // Here rather than in the views, for the same reason the display name is: a URL repeated in
+    // four places is a URL that will be wrong in three of them. These open in the user's browser
+    // when clicked — the app itself never fetches them.
+
+    public static let repositoryURL = "https://github.com/wmwallace/Kelvin"
+    public static let releasesURL = repositoryURL + "/releases"
+    public static let issuesURL = repositoryURL + "/issues"
+    public static let licenceName = "AGPL-3.0-only"
+
+    /// Where "Support development" points, once there is somewhere to point.
+    ///
+    /// `nil` on purpose, and the settings pane hides the whole section while it is nil — an empty
+    /// "Sponsors" heading in a pre-alpha app reads as unfinished, and it would be the first thing
+    /// in a screenshot. Set it when sponsorship actually exists; nothing else needs to change.
+    public static let sponsorURL: String? = nil
 }

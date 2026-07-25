@@ -42,6 +42,24 @@ struct KelvinApp: App {
                     .keyboardShortcut("w", modifiers: [.command, .shift])
                     .disabled(appState.imageURL == nil)
             }
+            // The Help menu was empty, which is where people look before they look anywhere else.
+            CommandGroup(replacing: .help) {
+                Button("\(Branding.displayName) on GitHub") { open(Branding.repositoryURL) }
+                Button("Report a Bug…") { NSWorkspace.shared.open(AppInfo.bugReportURL) }
+            }
         }
+
+        // ⌘, did nothing before this. Two preferences were already being remembered between
+        // launches — whether opening a photo lists its folder, and whether an export carries the
+        // photograph's location — and both were reachable only from inside a file panel, which is
+        // to say only while you were busy doing something else.
+        Settings {
+            SettingsView(appState: appState)
+        }
+    }
+
+    private func open(_ string: String) {
+        guard let url = URL(string: string) else { return }
+        NSWorkspace.shared.open(url)
     }
 }

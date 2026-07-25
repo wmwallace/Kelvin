@@ -606,6 +606,36 @@ struct FilmstripView: View {
     }
 }
 
+/// The Open panel's accessory: whether the rest of the shoot comes too.
+///
+/// This exists because the behaviour was reported as a surprise. Opening one photograph also listed
+/// its folder in the strip, which is the right default — culling, Batch apply and the arrow keys all
+/// work on the strip, so an editor that opens exactly one file makes all three useless — but nothing
+/// anywhere said it would happen, and unannounced helpfulness reads as an app doing what it likes.
+///
+/// A checkbox rather than a dialog: the choice is a property of how someone works, so it is asked
+/// once, in the place they are already making the decision, and remembered.
+struct OpenOptions: View {
+    @ObservedObject var appState: AppState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(isOn: $appState.includeFolderOnOpen) {
+                Text("Include the rest of the folder")
+            }
+            Text(appState.includeFolderOnOpen
+                 ? "The other photos are listed in the strip below. Nothing is read from them until the strip is open."
+                 : "Only the photo you pick — no filmstrip, no arrow keys. Batch apply is unaffected; it asks for its own folder.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .frame(width: 460, alignment: .leading)
+    }
+}
+
 /// The save panel's accessory: what travels out with the file.
 ///
 /// One checkbox, and it is deliberately not a list of metadata fields. The choice a photographer

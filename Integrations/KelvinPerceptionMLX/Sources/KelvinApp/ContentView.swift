@@ -364,7 +364,7 @@ final class AppState: ObservableObject {
     @Published var removeDust = false { didSet { updateActiveRecipe() } }
 
     @Published var isProcessing = false
-    @Published var statusMessage = "Drop a photo to read the light."
+    @Published var statusMessage = "Drop a photo or a folder to read the light."
     @Published var batchOutcome: BatchApply.Outcome?
     @Published var showBatchSheet = false
 
@@ -968,6 +968,23 @@ final class AppState: ObservableObject {
         stripLocationOnExport ? .withoutLocation : .asShot
     }
 
+    /// Whether opening ONE photograph also lists the rest of its folder in the strip.
+    ///
+    /// On by default, because a shoot is the unit of work here — culling, batch apply and the arrow
+    /// keys all operate on the strip, and an editor that opens exactly one file makes all three
+    /// useless. But it was never stated anywhere, so opening a single frame and watching a folder
+    /// appear read as the app doing something it had not been asked to do. Reported exactly that way.
+    ///
+    /// Now it is a choice, surfaced in the Open panel and remembered. Applies to drops as well as the
+    /// panel: it is a statement about how someone works, not about one gesture.
+    ///
+    /// Note this only governs LISTING. Nothing in the folder is read — no EXIF, no sidecars, no
+    /// thumbnails — until the strip is unfolded; see `loadFolderDetailIfVisible`.
+    @Published var includeFolderOnOpen = UserDefaults.standard.object(forKey: AppState.includeFolderKey) as? Bool ?? true {
+        didSet { UserDefaults.standard.set(includeFolderOnOpen, forKey: AppState.includeFolderKey) }
+    }
+    static let includeFolderKey = "open.includeFolder"
+
     var keeperCount: Int { folderPhotos.filter { flags[$0] == .keep }.count }
     var rejectCount: Int { folderPhotos.filter { flags[$0] == .reject }.count }
 
@@ -1204,7 +1221,7 @@ final class AppState: ObservableObject {
         brushCache = [:]
         proxyMaskBitmaps = [:]; healSpots = []; detectedSpotCount = 0
         zoom = 1; pan = .zero; showingOriginal = false
-        statusMessage = "Drop a photo to read the light."
+        statusMessage = "Drop a photo or a folder to read the light."
     }
 
     /// Remove a photo from the strip for this session, and forget any edit it had. The file itself
@@ -1314,9 +1331,30 @@ final class AppState: ObservableObject {
         // Choosing a folder opens the shoot — the same thing dropping one does.
         panel.canChooseDirectories = true
         panel.prompt = "Open"
+        // Reported as confusing, and fairly: the button said "choose a photo" while the panel
+        // quietly accepted folders and opening one frame listed its neighbours in the strip. The
+        // behaviour is deliberate — a shoot is the unit of work — but nothing said so, which made
+        // it read as the app doing something it had not been asked to do.
+        panel.message = "Open one photo, or a folder to work through a whole shoot."
+        // The checkbox that makes the folder listing a decision rather than a surprise.
+        panel.accessoryView = NSHostingView(rootView: OpenOptions(appState: self))
+        panel.isAccessoryViewDisclosed = true
         if panel.runModal() == .OK, let url = panel.url {
             Task { await open(url) }
         }
+    }
+
+    /// "· 9 more in this folder", or nothing when there are none and nothing when the folder was not
+    /// listed at all.
+    ///
+    /// The other half of the reported confusion: a folder appearing in the strip was a surprise
+    /// because nothing ever said it had happened. Saying it costs one clause and removes the
+    /// surprise entirely — and when the count is zero or the setting is off, it says nothing, so it
+    /// never becomes noise.
+    var statusNote: String {
+        let others = folderPhotos.count - 1
+        guard includeFolderOnOpen, others > 0 else { return "" }
+        return " · \(others) more \(others == 1 ? "photo" : "photos") in this folder"
     }
 
     func loadPhoto(from url: URL) async {
@@ -1325,7 +1363,12 @@ final class AppState: ObservableObject {
         // Keep whatever you were working on before this photo takes over.
         if loadedURL != nil, loadedURL != url { stashCurrentSession() }
         imageURL = url
-        let siblings = PhotoBrowser.siblings(of: url).filter { !dismissedURLs.contains($0) || $0 == url }
+        // `includeFolderOnOpen` off means exactly this photograph and nothing else. The strip
+        // disappears (it only draws above one photo), which also takes the arrow keys, culling and
+        // Batch apply with it — that is the deal, and it is the user's to make.
+        let siblings = includeFolderOnOpen
+            ? PhotoBrowser.siblings(of: url).filter { !dismissedURLs.contains($0) || $0 == url }
+            : [url]
         folderPhotos = PhotoOrder.sorted(siblings, by: photoSort,
                                          reversed: photoSortReversed, captureDates: captureIndex.dates)
         // THE REST OF THE FOLDER IS NOT READ UNTIL YOU ASK TO SEE IT.
@@ -1516,9 +1559,9 @@ final class AppState: ObservableObject {
             if let saved = EditStore.load(for: url) {
                 apply(saved)
                 editedURLs.insert(url)
-                statusMessage = "Ready · restored your edit from \(Self.friendlyDate(saved.savedAt))"
+                statusMessage = "Ready · restored your edit from \(Self.friendlyDate(saved.savedAt))\(statusNote)"
             } else {
-                statusMessage = "Ready · pick a look, or Batch apply it to a folder"
+                statusMessage = "Ready · pick a look, or Batch apply it to a folder\(statusNote)"
             }
         } catch {
             statusMessage = "Couldn't read that photo — \(error.localizedDescription)"
@@ -1686,8 +1729,11 @@ final class AppState: ObservableObject {
         case .partlyResolved where run.resolved.isEmpty:
             return "Eased what it could · \(run.remaining.count) still flagged"
         case .partlyResolved where run.deferred.count == run.remaining.count:
-            return "Fixed \(run.resolved.count) of \(total) · \(run.remaining.count) left alone — "
-                + "they pull against what was fixed"
+            // Subject flags are deferred BEFORE any work starts (`deferredForSubject` is intersected
+            // with the starting issues), so "they pull against what was fixed" stated a reason the
+            // code knows to be false — nothing was tried against them at all.
+            return "Fixed \(run.resolved.count) of \(total) · "
+                + "\(run.remaining.count) need their own Fix"
         case .partlyResolved:
             return "Fixed \(run.resolved.count) of \(total) · \(run.remaining.count) still flagged"
         case .nothingSafeToDo:
@@ -2382,8 +2428,23 @@ final class AppState: ObservableObject {
         return bitmaps
     }
 
+    /// The name a photographer gave a subject mask, or the name Vision gave it — never a raw id.
+    private func label(forInstanceId id: String) -> String {
+        userMasks.first { $0.instanceId == id }?.name
+            ?? userMasks.first { $0.instanceId == id }?.instanceLabel
+            ?? subjectInstances.first { $0.id == id }?.label
+            ?? "a subject mask"
+    }
+
     func exportFullResolution(to exportURL: URL) async {
-        guard let fullRes = fullResCI, let recipe = activeRecipe else { return }
+        // NOT a bare `return`. The workspace and the Export button appear as soon as the proxy
+        // decodes, but `activeRecipe` is nil until the candidates land — so clicking Export in that
+        // window, naming a file and pressing Save produced no file, no error and no message at all.
+        // The user is left believing they exported something.
+        guard let fullRes = fullResCI, let recipe = activeRecipe else {
+            statusMessage = "Still preparing this photo — try the export again in a moment"
+            return
+        }
         isProcessing = true
         statusMessage = "Rendering full resolution…"
         // OFF THE MAIN ACTOR. `AppState` is `@MainActor`, and `async` does NOT move work off an
@@ -2406,27 +2467,43 @@ final class AppState: ObservableObject {
         let input = ExportInput(fullRes: fullRes, recipe: recipe, url: exportURL,
                                 metadata: exportMetadata)
 
-        let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
+        // Carries back WHICH subject masks could not be found again at full resolution, because the
+        // renderer's response to a missing bitmap is to skip that mask silently. A per-subject local
+        // edit could therefore be absent from the exported file while the status line said
+        // "Exported IMG_1234.jpg". The code that was supposed to report this existed
+        // (`fullResolutionMaskBitmaps`) and was never called from anywhere — dead since it was
+        // written, while the live path inlined the re-identification and discarded `unmatched`.
+        let result: Result<[String], Error> = await Task.detached(priority: .userInitiated) {
             do {
                 var bitmaps: [String: CIImage] = [:]
+                var lost: [String] = []
                 if masksNeeded {
                     bitmaps = LocalMasks.measure(in: input.fullRes).bitmaps
                     if !references.isEmpty {
                         let matched = SubjectInstances.reidentify(
                             SubjectInstances.detect(in: input.fullRes), as: references)
                         bitmaps.merge(matched.bitmaps) { _, fresh in fresh }
+                        lost = matched.unmatched
                     }
                 }
                 try ImageWriter.write(
                     Renderer.render(input.fullRes, with: input.recipe, maskBitmaps: bitmaps),
                     to: input.url, metadata: input.metadata)
-                return .success(())
+                return .success(lost)
             } catch { return .failure(error) }
         }.value
 
         switch result {
-        case .success:
-            statusMessage = "Exported \(exportURL.lastPathComponent)"
+        case .success(let lost):
+            if lost.isEmpty {
+                statusMessage = "Exported \(exportURL.lastPathComponent)"
+            } else {
+                // Named, not counted. "One mask is missing" sends someone hunting; "Person 2" tells
+                // them what to check.
+                let names = lost.map { label(forInstanceId: $0) }.joined(separator: ", ")
+                statusMessage = "Exported \(exportURL.lastPathComponent) — but \(names) "
+                    + "couldn't be found again at full size, so that edit is not in the file"
+            }
             // Exporting is the one unambiguous signal of preference, so it's logged. NOTE: nothing
             // currently reads this back — candidates are generated fresh per photo, by design (the
             // way to reuse an edit is Batch apply, not a cross-image average). The log exists so
@@ -2455,8 +2532,13 @@ final class AppState: ObservableObject {
     /// and scene — copying identical slider values would wreck half of them. The manual tweaks
     /// you made on the reference photo ride along on top of each adapted recipe.
     func runBatchApply(inputDir: URL, outputDir: URL) async {
+        // Same silent guard as the export path had, and worse here: the user has already chosen an
+        // input folder AND an output folder before anything checks whether a look is selected.
         guard let styleId = selectedCandidateId,
-              let style = CandidateStyle.all.first(where: { $0.id == styleId }) else { return }
+              let style = CandidateStyle.all.first(where: { $0.id == styleId }) else {
+            statusMessage = "Pick a look first — Batch apply propagates the one you have chosen"
+            return
+        }
         let tweaks = manualTweaks()
         // Snapshotted as VALUES before the loop. `applyLookBeyondGlobals` reads five pieces of
         // actor state, and reaching back for them from a detached task is how a data race gets
@@ -2916,7 +2998,7 @@ struct ContentView: View {
                     Text("Read the light.")
                         .font(Theme.ui(40, .medium))
                         .foregroundColor(Theme.ink)
-                    Text("Drop a photo. \(Branding.displayName) reads the scene on-device and offers a few finished looks — pick one, tune it, then apply it across the shoot.")
+                    Text("Drop a photo — or a whole folder. \(Branding.displayName) reads the scene on-device and offers a few finished looks: pick one, tune it, then apply it across the shoot. Open a single frame and the rest of its folder is listed alongside it, ready when you want it.")
                         .textSelection(.enabled)
                         .font(Theme.ui(14))
                         .foregroundColor(Theme.inkDim)
@@ -2940,7 +3022,10 @@ struct ContentView: View {
                 }
 
                 Button(action: appState.chooseAndOpen) {
-                    Text("Choose a photo")
+                    // "or folder", because the panel accepts both and always has. Saying only
+                    // "photo" made opening a folder look like something the app was not offering,
+                    // and made the shoot appearing in the strip look like a surprise.
+                    Text("Choose a photo or folder")
                         .font(Theme.ui(13, .semibold))
                         .foregroundColor(Theme.base)
                         .padding(.horizontal, 22).padding(.vertical, 11)
@@ -2949,7 +3034,7 @@ struct ContentView: View {
                 .buttonStyle(.plain)
             }
             Spacer()
-            Text("RAW · JPEG · PNG   —   on-device, nothing leaves your Mac")
+            Text("RAW · JPEG · HEIC · PNG · TIFF   —   on-device, your photos never leave your Mac")
                 .font(Theme.mono(10))
                 .foregroundColor(Theme.inkFaint)
                 .padding(.bottom, 22)
@@ -3240,8 +3325,14 @@ struct ContentView: View {
                             .opacity(appState.fixInProgress ? 0.45 : 1)
                             .animation(Motion.gated(Motion.quick, reduceMotion),
                                        value: appState.fixInProgress)
-                            .help("Work through every flag in one step, worst damage first — "
-                                  + "clipping, then tone, then colour and skin")
+                            // "frame-wide", because subject flags are excluded by construction:
+                            // `CraftFix.deferredForSubject` permanently defers .subjectFlat,
+                            // .subjectTooDark and .subjectBlown, while this button appears whenever
+                            // there is more than one flag of any kind. On a backlit portrait it was
+                            // offering to fix flags it provably would not touch.
+                            .help("Work through the frame-wide flags in one step, worst damage "
+                                  + "first — clipping, then tone, then colour and skin. "
+                                  + "Subject flags keep their own Fix.")
                         }
                     }
                     ForEach(appState.activeCraftIssues, id: \.self) { issue in
@@ -3270,8 +3361,17 @@ struct ContentView: View {
                                 Text("no fix").font(Theme.mono(9)).foregroundColor(Theme.inkDim)
                                     .padding(.horizontal, 8).padding(.vertical, 3)
                                     .background(Capsule().stroke(Theme.inkDim.opacity(0.35), lineWidth: 1))
-                                    .help("\(Branding.displayName)'s automatic correction for this is already as far "
-                                          + "as it goes — from here it's a manual adjustment")
+                                    // Two different reasons wore one sentence. A subject flag with
+                                    // no person segmentation never had a correction ATTEMPTED —
+                                    // saying it "is already as far as it goes" describes a fix that
+                                    // never ran. Live case, not a corner: Vision's face detector
+                                    // fires on animals, so a cat portrait raises .subjectTooDark
+                                    // with hasPerson false.
+                                    .help(appState.hasPerson
+                                          ? "\(Branding.displayName)'s automatic correction for this is already as far "
+                                            + "as it goes — from here it's a manual adjustment"
+                                          : "No subject \(Branding.displayName) can isolate in this frame — "
+                                            + "this one needs a mask you draw")
                             }
                         }
                     }
@@ -3470,7 +3570,12 @@ struct ContentView: View {
                         .buttonStyle(.plain).disabled(!appState.canRedo)
                         .keyboardShortcut("z", modifiers: [.command, .shift])
                     Spacer()
-                    Button(action: appState.resetToCandidate) { editToolLabel("Reset all", enabled: true, icon: "arrow.counterclockwise") }
+                    // "Reset sliders", not "Reset all": `resetToCandidate` restores the global
+                    // adjustments, straighten, HSL, the look and the auto-mask dictionaries — and
+                    // deliberately leaves hand-drawn masks and dust removal alone. Three brush masks
+                    // surviving a button called "Reset all" is a broken promise; renaming the button
+                    // is the honest fix, because silently deleting someone's masks would be worse.
+                    Button(action: appState.resetToCandidate) { editToolLabel("Reset sliders", enabled: true, icon: "arrow.counterclockwise") }
                         .buttonStyle(.plain)
                 }
 
@@ -3808,9 +3913,17 @@ struct ContentView: View {
         VStack(spacing: 18) {
             Text("Batch complete").font(Theme.ui(18, .semibold)).foregroundColor(Theme.ink)
             if let outcome = appState.batchOutcome {
+                // THREE numbers, because Outcome has three and this showed two — with the wrong
+                // word on one of them. `failed` (a decode, render or write that threw) was printed
+                // under the label "skipped" in a calm blue, and `skippedCount` (a collision, where
+                // the existing file was deliberately left alone) was never shown at all. A batch
+                // that threw on forty frames told the photographer forty were skipped.
                 HStack(spacing: 28) {
                     stat("\(outcome.succeeded)", "applied", Theme.glow)
-                    stat("\(outcome.failed)", "skipped", outcome.failed > 0 ? Theme.cool : Theme.inkFaint)
+                    if outcome.skippedCount > 0 {
+                        stat("\(outcome.skippedCount)", "skipped", Theme.inkDim)
+                    }
+                    stat("\(outcome.failed)", "failed", outcome.failed > 0 ? Theme.warn : Theme.inkFaint)
                 }
             }
             Button(action: { appState.showBatchSheet = false }) { toolbarLabel("Done", filled: true) }
@@ -4612,7 +4725,7 @@ struct UserMaskEditor: View {
                     .font(Theme.mono(9)).foregroundColor(Theme.inkDim).fixedSize(horizontal: false, vertical: true)
                 ToneSlider(label: "Tolerance", value: $mask.selRange, range: 0.02...0.18, step: 0.005, unit: "", onChange: onChange, neutral: 0.06)
             case .background:
-                Text("Everything except the detected subject — darken or blur it to make the subject pop.")
+                Text("Everything except the detected subject — darken or desaturate it to make the subject pop.")
                     .font(Theme.mono(9)).foregroundColor(Theme.inkDim).fixedSize(horizontal: false, vertical: true)
             case .subject:
                 Text("The detected person — lift, model, or recover them without touching the scene.")
