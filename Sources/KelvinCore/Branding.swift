@@ -37,17 +37,23 @@ public enum Branding {
     /// it. Aligning in this direction rather than the other keeps every `@AppStorage` setting
     /// already on disk attached to the app that wrote it.
     ///
-    /// NOW `io.github.wmwallace.kelvin`, and the change is deliberate. `dev.kelvin.app` is the
-    /// reverse-DNS of `kelvin.dev`, a domain this project does not own and cannot obtain — it is
-    /// registered to someone else. A reverse-DNS identifier is conventionally a namespace you
-    /// control; `wmwallace.github.io` is one, it costs nothing, and it does not depend on renewing a
-    /// registration forever.
+    /// NOW `app.usekelvin.kelvin` — the reverse-DNS of `usekelvin.app`, which this project owns
+    /// (D11). It got here in two steps on the same day: it said `dev.kelvin.app`, which is the
+    /// reverse-DNS of a domain registered to somebody else entirely, then briefly
+    /// `io.github.wmwallace.kelvin` while no domain was owned at all.
     ///
-    /// This is the LAST cheap moment to change it. No external user exists, so nothing is orphaned
-    /// today. After the first alpha install, macOS keys the preferences domain, the sandbox
-    /// container and LaunchServices off this string, and changing it strands every setting and
-    /// sidecar those users have. Do not touch it again.
-    public static let bundleIdentifier = "io.github.wmwallace.kelvin"
+    /// The domain is the better namespace precisely because it carries no extra risk: `usekelvin.app`
+    /// has to stay renewed regardless, since the Sparkle appcast URL lives there and every shipped
+    /// copy checks it forever. A GitHub-derived identifier would have been free but tied to an
+    /// account name rather than to the product.
+    ///
+    /// **THIS WAS THE LAST CHEAP MOMENT AND IT IS NOW SPENT.** No external user existed when it
+    /// changed, so nothing was orphaned. After the first alpha install, macOS keys the preferences
+    /// domain, the sandbox container and LaunchServices off this exact string — changing it then
+    /// strands every setting, every flag and every sidecar those users have, silently. Do not touch
+    /// it again, including if the product is ever renamed: a bundle identifier is an identity, not a
+    /// label, and keeping a stale-looking one is far cheaper than orphaning a user's work.
+    public static let bundleIdentifier = "app.usekelvin.kelvin"
 
     /// File extension for recipe sidecars (no leading dot). Expensive to change once
     /// sidecars exist in the wild, so it lives here from commit one.
