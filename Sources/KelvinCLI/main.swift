@@ -465,6 +465,36 @@ case "bench-load":
         }
 
         let stats = try time("statistics") { try ImageStatistics.compute(proxy) }
+
+        // What the white-balance estimator sees, and what it does about it. Whole-frame mean chroma
+        // is a grey-world assumption: it reads a photograph full of warm content — skin, wood,
+        // autumn leaves — as an illuminant error, and the stronger the correction the more that
+        // matters.
+        if rest.contains("--wb") {
+            let mag = (stats.chromaA * stats.chromaA + stats.chromaB * stats.chromaB).squareRoot()
+            print(String(format: "  cast: a %+.1f  b %+.1f  magnitude %.1f",
+                         stats.chromaA, stats.chromaB, mag))
+            let neutralising = RecipeEngine.neutralisingWhiteBalance(for: stats)
+            print(String(format: "  neutralising: %.0f K  tint %+.0f",
+                         neutralising.temperatureK, neutralising.tint))
+            let before = FaceSkin.read(in: proxy)
+            for strength in [0.0, 0.4, 0.7, 1.0] {
+                var g = GlobalAdjustments.neutral
+                g.temperatureK = RecipeEngine.temperature(correctingChromaB: stats.chromaB,
+                                                          strength: strength)
+                g.tint = stats.chromaA * 1.8 * strength
+                var r = Recipe.neutral; r.global = g
+                let out = Renderer.render(proxy, with: r)
+                let s = try ImageStatistics.compute(out)
+                let skin = FaceSkin.read(in: out)
+                let residual = (s.chromaA * s.chromaA + s.chromaB * s.chromaB).squareRoot()
+                print(String(format: "    strength %.1f -> %.0f K  residual cast %5.1f  skin hue %5.1f°%@",
+                             strength, g.temperatureK ?? 6500, residual,
+                             skin.skinHueDegrees ?? -1,
+                             (skin.skinHueDegrees.map { $0 < 6 || $0 > 32 } ?? false) ? "  OFF-NATURAL" : ""))
+            }
+            _ = before
+        }
         // None of these four reads another's output, which is the whole point of measuring them
         // one at a time and then together.
         //

@@ -535,7 +535,7 @@ public enum RecipeEngine {
     static func whiteBalance(
         _ p: Perception, _ s: ImageStatistics, strengthScale: Double = 1.0
     ) -> (temperatureK: Double?, tint: Double) {
-        let strength = wbStrength(p) * strengthScale
+        var strength = wbStrength(p) * strengthScale
 
         // Deadband: don't chase tiny casts. Keeps neutral input a no-op and avoids adding a
         // WB filter pass that would only introduce rounding error.
@@ -543,6 +543,35 @@ public enum RecipeEngine {
         // choice (warm golden light, cool shade), not an error to neutralise.
         let castMagnitude = (s.chromaA * s.chromaA + s.chromaB * s.chromaB).squareRoot()
         guard strength > 0, castMagnitude > 6.0 else { return (nil, 0) }
+
+        // SKIN IS WARM, AND A PHOTOGRAPH OF PEOPLE IS WARM BECAUSE OF THE PEOPLE.
+        //
+        // `chromaB` is the mean chroma of the whole frame, which is a grey-world assumption: it
+        // cannot tell "the light was yellow" from "the picture is mostly faces". Neutralise a
+        // portrait's measured warmth and what actually gets neutralised is the skin.
+        //
+        // This was always slightly wrong and was hidden by the estimator being 2–4× too weak. With
+        // the mired correction it became plainly visible — measured on three real photographs at
+        // the natural-intent strength of 0.7:
+        //
+        //     people, overcast   b +21.9 -> 12000 K   skin hue 15.2° -> 1.7°   off-natural
+        //     portrait           b  +6.6 ->  7742 K   skin hue  8.6° -> 2.7°   off-natural
+        //     cool cast          b −11.8 ->  5050 K   skin hue  352° -> 13.4°  RECOVERED
+        //
+        // So the warm direction is damped, and only when there is a warm subject to protect. The
+        // cool direction is untouched: a blue cast genuinely is the light, and correcting it moves
+        // skin back INTO its natural arc rather than out of it — the third row is the whole reason
+        // this is asymmetric rather than a blanket reduction.
+        //
+        // The same reasoning already caps vibrance for these subjects, and holds for animals too:
+        // warm fur is skin-hued.
+        if warmSubject(p), s.chromaB > 0 {
+            // Below this, the warmth a portrait measures is comfortably explained by the faces in
+            // it; correcting at all costs more than it buys (the second row measures a *worse*
+            // photo after correction than before).
+            guard s.chromaB > 10 else { return (nil, 0) }
+            strength *= 0.45
+        }
 
         let kelvin = temperature(correctingChromaB: s.chromaB, strength: strength)
         let tint = s.chromaA * 1.8 * strength
@@ -574,7 +603,7 @@ public enum RecipeEngine {
     /// ramps, and it is strikingly consistent once you are in the right units: −5.25, −5.56, −5.04
     /// and −5.48 mired per unit of b across four cast strengths in both directions, each leaving a
     /// residual magnitude of about 1 — neutral, for practical purposes.
-    static let miredPerChromaB = 5.33
+    public static let miredPerChromaB = 5.33
 
     /// The temperature that pulls a measured chroma-b cast back toward neutral.
     ///
@@ -596,7 +625,7 @@ public enum RecipeEngine {
     /// temperature — the sweep bottoms out against the range, not against the estimate. This
     /// returns the best available correction and clamps; whether the range should be widened is an
     /// owner's decision, since it is the recipe schema's validated range (see CLAUDE.md).
-    static func temperature(correctingChromaB b: Double, strength: Double = 1.0) -> Double {
+    public static func temperature(correctingChromaB b: Double, strength: Double = 1.0) -> Double {
         let neutralMired = 1e6 / 6500.0
         // Clamped in MIRED, before the reciprocal. A strong warm cast drives the target toward
         // zero, where 1e6/mired runs away to infinity — clamping afterwards would mean converting
