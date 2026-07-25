@@ -25,7 +25,13 @@ struct KelvinApp: App {
         WindowGroup {
             ContentView(appState: appState)
                 .frame(minWidth: 940, minHeight: 660)
-                .onAppear { NSApplication.shared.activate(ignoringOtherApps: true) }
+                .onAppear {
+                    NSApplication.shared.activate(ignoringOtherApps: true)
+                    // Load the model while the window sits on the empty state, rather than charging
+                    // fifteen seconds to whichever photograph is opened first. Background priority:
+                    // this must never compete with decoding a photo somebody just dropped.
+                    Task(priority: .background) { await appState.warmPerception() }
+                }
         }
         // Hidden title bar so the darkroom UI runs edge to edge — the window is the instrument.
         .windowStyle(.hiddenTitleBar)

@@ -87,7 +87,10 @@ if first == "label" {
 
         let started = Date()
         let perception = try await provider.perceive(image)
-        note(String(format: "Perceived in %.1fs\n", Date().timeIntervalSince(started)))
+        note(String(format: "Perceived in %.1fs", Date().timeIntervalSince(started)))
+        // The breakdown, because "4.5 seconds" does not say whether to shrink the image or the
+        // answer — and both of those trade accuracy, so the trade should be aimed.
+        note("  " + (await provider.lastTiming).summary + "\n")
 
         print("── perception (VLM output — categorical only) ──")
         print(String(data: try encoder.encode(perception), encoding: .utf8) ?? "{}")

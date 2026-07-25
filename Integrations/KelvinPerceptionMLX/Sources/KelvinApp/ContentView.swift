@@ -1136,6 +1136,58 @@ final class AppState: ObservableObject {
         return f.string(from: date)
     }
 
+    // MARK: Reusing a read across near-duplicates
+    //
+    // A burst of twenty frames of one pose is one scene: same subject, same light, same problems.
+    // Reading it twenty times costs twenty generations — measured at ~6.5 s each, and measured to be
+    // dominated by writing the answer rather than by looking at the photograph, so a smaller image
+    // would not have helped. Reading it once and reusing the answer costs one.
+    //
+    // THIS DOES NOT SHARE ANY NUMBERS. The model only ever returns categories — scene, subject,
+    // lighting, what is technically wrong — and every actual parameter is computed per frame from
+    // that frame's own histogram and EXIF. Sharing "backlit portrait, subject underexposed" across a
+    // burst is sharing a true statement about all of them; the exposure each one gets is still its
+    // own. Non-negotiable #1 is untouched.
+    //
+    // The fingerprint is the same 64-bit difference hash the Similar grouping uses, at the same
+    // threshold, so "close enough to reuse" means exactly what "close enough to group" means — one
+    // definition of near-duplicate in the app rather than two that can disagree.
+
+    private var perceptionBySignature: [(signature: PhotoTriage.Signature, perception: Perception)] = []
+    private static let maxRememberedReads = 32
+
+    /// The signature for `url`, from the scan if it has run, measured now if not. Cheap either way
+    /// now that a RAW's embedded preview is enough to measure.
+    private func signature(for url: URL) -> PhotoTriage.Signature? {
+        if let known = triage[url]?.signature { return known }
+        guard let proxy = PerceptionProxy.measurementProxy(url, maxEdge: PhotoTriage.proxyEdge)
+        else { return nil }
+        return PhotoTriage.signature(of: proxy)
+    }
+
+    private func reusablePerception(for url: URL) -> Perception? {
+        guard let mine = signature(for: url), mine.isMeasurable else { return nil }
+        // An unmeasurable fingerprint means "no signal", not "unique" — never reuse against one.
+        return perceptionBySignature.first {
+            $0.signature.isMeasurable
+                && $0.signature.distance(to: mine) <= PhotoTriage.nearDuplicateDistance
+        }?.perception
+    }
+
+    private func rememberPerception(_ perception: Perception, for url: URL) {
+        guard let signature = signature(for: url), signature.isMeasurable else { return }
+        perceptionBySignature.append((signature, perception))
+        if perceptionBySignature.count > Self.maxRememberedReads {
+            perceptionBySignature.removeFirst()
+        }
+    }
+
+    /// Load the perception model in the background at launch, so the first photograph does not pay
+    /// for it. See `MLXPerceptionProvider.preload`.
+    func warmPerception() async {
+        await perceptionProvider.preload()
+    }
+
     /// Whether any photograph has been read since launch. Only ever used to tell the truth about
     /// how long the first one takes.
     private var hasReadAPhoto = false
@@ -1558,11 +1610,18 @@ final class AppState: ObservableObject {
             // seconds once cached); if it can't run, fall back to a conservative read so the
             // app still produces candidates from the measured statistics.
             let perceptionRead: Perception
-            do {
-                perceptionRead = try await perceptionProvider.perceive(perceptionProxy)
-            } catch {
-                perceptionRead = Self.conservativeRead
-                statusMessage = "Model unavailable — conservative read"
+            if let shared = reusablePerception(for: url) {
+                // Same picture, same answer. See `reusablePerception`.
+                perceptionRead = shared
+                statusMessage = "Same scene as a frame already read — reusing it"
+            } else {
+                do {
+                    perceptionRead = try await perceptionProvider.perceive(perceptionProxy)
+                    rememberPerception(perceptionRead, for: url)
+                } catch {
+                    perceptionRead = Self.conservativeRead
+                    statusMessage = "Couldn't run the perception model — using a conservative read"
+                }
             }
             guard imageURL == url else { return }
             self.perception = perceptionRead

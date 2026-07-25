@@ -131,11 +131,52 @@ public actor MLXPerceptionProvider: PerceptionProvider {
     /// loading it.
     public nonisolated var activeModelID: String { modelID }
 
+    /// Where the time went on the last read: model load, image preparation, generation, parsing.
+    ///
+    /// Published because the alternative to measuring is guessing, and the obvious speed-ups here
+    /// trade accuracy for time — a smaller proxy, fewer tokens, a smaller model. Which of those is
+    /// worth considering depends entirely on whether the cost is in preparing the image or in
+    /// generating the answer, and nothing in this codebase knew which.
+    public struct Timing: Sendable {
+        public var modelLoad: TimeInterval = 0
+        public var proxy: TimeInterval = 0
+        public var generate: TimeInterval = 0
+        public var parse: TimeInterval = 0
+        public var outputCharacters: Int = 0
+        public var total: TimeInterval { modelLoad + proxy + generate + parse }
+
+        public var summary: String {
+            String(format: "load %.2fs · proxy %.3fs · generate %.2fs · parse %.3fs · %d chars",
+                   modelLoad, proxy, generate, parse, outputCharacters)
+        }
+    }
+
+    public private(set) var lastTiming = Timing()
+
+    /// Load the weights before anybody asks for a photograph to be read.
+    ///
+    /// The first read of a session costs about fifteen seconds of model loading on top of the read
+    /// itself, and it is charged to whichever photograph the user happens to open first. Meanwhile
+    /// the window has been sitting on the empty state doing nothing since launch. Moving the load
+    /// into that idle time does not make anything faster; it moves the wait to where nobody is
+    /// waiting.
+    ///
+    /// Safe to call more than once, and cheap after the first: `loadedContainer` returns the
+    /// container it already has.
+    public func preload() async {
+        _ = try? await loadedContainer()
+    }
+
     public func perceive(_ image: CIImage) async throws -> Perception {
+        var timing = Timing()
+        let loadStart = Date()
         let container = try await loadedContainer()
+        timing.modelLoad = Date().timeIntervalSince(loadStart)
 
         // The model never sees full resolution — only the 768px proxy (non-negotiable #4).
+        let proxyStart = Date()
         let proxy = PerceptionProxy.downsample(image)
+        timing.proxy = Date().timeIntervalSince(proxyStart)
 
         var parameters = GenerateParameters()
         parameters.temperature = 0        // argmax: deterministic reads for a given proxy
@@ -147,11 +188,19 @@ public actor MLXPerceptionProvider: PerceptionProvider {
         // system. See `boundMemory` — without a cap that pool only grows, and the symptom is not a
         // crash but a stall.
         defer { MLX.Memory.clearCache() }
+        let generateStart = Date()
         let raw = try await session.respond(
             to: PerceptionPrompt.instruction(),
             image: .ciImage(proxy)
         )
-        return try PerceptionParser.parse(raw)
+        timing.generate = Date().timeIntervalSince(generateStart)
+        timing.outputCharacters = raw.count
+
+        let parseStart = Date()
+        let perception = try PerceptionParser.parse(raw)
+        timing.parse = Date().timeIntervalSince(parseStart)
+        lastTiming = timing
+        return perception
     }
 
     /// Load the model container once and cache it for subsequent images.

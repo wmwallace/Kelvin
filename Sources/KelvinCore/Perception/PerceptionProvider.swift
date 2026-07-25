@@ -32,7 +32,15 @@ public struct StaticPerceptionProvider: PerceptionProvider {
 /// problem detection, and it turns perception cost from a bottleneck into a rounding error.
 public enum PerceptionProxy {
     /// The long-edge target the model sees (ARCHITECTURE.md).
-    public static let defaultMaxEdge = 768
+    /// The long edge the model sees. 768 by default.
+    ///
+    /// Overridable with `KELVIN_PROXY_EDGE` so the accuracy-for-time trade can be MEASURED rather
+    /// than argued about: vision tokens scale with area, so halving this quarters them, and whether
+    /// that buys anything depends on whether generation time is dominated by chewing the image or by
+    /// writing the answer. Change the default only with eval-harness evidence — every perception
+    /// threshold was calibrated at 768.
+    public static let defaultMaxEdge = ProcessInfo.processInfo.environment["KELVIN_PROXY_EDGE"]
+        .flatMap(Int.init).map { min(1536, max(224, $0)) } ?? 768
 
     /// A proxy read STRAIGHT from the file at the size we want, without decoding the full frame.
     ///
