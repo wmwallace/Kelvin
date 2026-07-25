@@ -148,6 +148,10 @@ private struct AboutSettings: View {
             Section {
                 LabeledContent("Version", value: AppInfo.versionLine)
                 LabeledContent("Licence", value: Branding.licenceName)
+                // Copyright exists the moment something is written — no notice is required for it
+                // to hold. It is here because a copyleft licence is a grant of rights BY someone,
+                // and a reader who cannot see who is granting them cannot rely on them.
+                LabeledContent("Copyright", value: Branding.copyright)
             }
 
             Section {

@@ -598,3 +598,43 @@ repository is asking for whatever it holds.
   release is a ~1.6 GB download unless deltas are configured. `BinaryDelta` handles this well —
   unchanged files contribute almost nothing, so a code-only update is a few MB — but it must exist
   before the *second* release, or the first update teaches users that this app is expensive to keep.
+
+---
+
+## D12 — An AI upscaler: yes eventually, at export only, and not in v1
+
+**Raised 25 July 2026 (Upscayl mentioned as the reference). Deferred — the architecture is decided,
+the timing is not now.**
+
+**Where it goes is not in question, because the existing rules already answer it.** Non-negotiable #3
+says generative pixel editing "is a *separate, later* feature that operates on top of a recipe. It is
+never part of the base edit path", and D10 puts generative work out of scope for v1. An upscaler is
+generative — it invents detail that was never recorded — so it belongs at **export**, applied to the
+finished render, and it must never enter the recipe. That is architecturally clean: the recipe stays
+a small struct of numbers describing reversible adjustments, and the upscale is a post-process on the
+pixels that struct produced. It also composes correctly with the export options added today, since
+resize and upscale are the same stage of the pipeline pointing in opposite directions.
+
+**What to build it from, when the time comes.** Not Upscayl itself: that is an Electron application
+(AGPL-3.0), and what is wanted is the model underneath it. Real-ESRGAN is the usual answer — BSD-3
+for the code, small weights (tens of MB against the perception model's 1.6 GB), and convertible to
+Core ML or runnable through MLX, which is already a dependency. **The weights need the D-model-3
+treatment before shipping any bytes**: read the actual licence file rather than the repo card, because
+some ESRGAN variants were trained on datasets with terms of their own, and this project has already
+been bitten once by a model whose licence was written down wrongly.
+
+**Why not now, beyond the rules:**
+
+- **It is the wrong tool for most of this app's input.** A 60 MP RAW does not need upscaling. The real
+  uses are a hard crop, a scan, or an old small file — worth having, not worth delaying an alpha for.
+- **It sits awkwardly beside the project's central claim.** "The model never emits numbers" is a
+  promise about not inventing what cannot be verified. Inventing pixels is defensible when it is
+  labelled, optional and off by default; it is corrosive when it is quiet. If it ships, the UI must
+  say plainly that detail is being generated rather than recovered.
+- **There is no evaluation for it.** `docs/EVALUATION.md` scores recipes against references. Nothing
+  in the harness can currently say whether an upscale improved a photograph or fabricated a plausible
+  lie over it, and by D6's rule the measurement comes before the feature.
+
+**Shape when built:** an export option, off by default, offering 2× and 4×; applied after the render
+and after any long-edge resize; disabled outright when the source is already large, because upscaling
+a 60 MP frame is a slower way to make a worse file.

@@ -70,6 +70,11 @@ public enum Branding {
     public static let issuesURL = repositoryURL + "/issues"
     public static let licenceName = "AGPL-3.0-only"
 
+    /// The rights holder. Not required for copyright to exist — that happens on creation, notice or
+    /// not — but required in practice for a copyleft project: AGPL is a grant of rights BY someone,
+    /// and both enforcing it and ever relicensing under D8 depend on it being legible who that is.
+    public static let copyright = "© 2026 William Wallace"
+
     /// Where "Support development" points, once there is somewhere to point.
     ///
     /// `nil` on purpose, and the settings pane hides the whole section while it is nil — an empty

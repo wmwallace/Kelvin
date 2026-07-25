@@ -140,3 +140,5 @@ application or as a hosted service — your source has to be open too. Nobody ge
 Contributions are covered by a [contributor licence agreement](CLA.md) which leaves your copyright
 with you and grants the maintainer the right to relicense. The reasoning, including why that is
 necessary rather than merely convenient, is in `docs/DECISIONS.md` D8.
+
+Copyright © 2026 William Wallace.
