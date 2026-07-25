@@ -849,6 +849,10 @@ final class AppState: ObservableObject {
     func closeCurrentPhoto() {
         stashCurrentSession()
         imageURL = nil; loadedURL = nil
+        // Every early return in `loadPhoto` guards on `imageURL == url` and bails without reaching
+        // the `isProcessing = false` at the end — so closing a photo mid-decode left the empty
+        // state showing a spinner that never stopped.
+        isProcessing = false
         fullResCI = nil; proxyCI = nil
         candidates = []; selectedCandidateId = nil
         activeRecipe = nil; active = nil; original = nil
@@ -865,7 +869,14 @@ final class AppState: ObservableObject {
     /// is never touched — this is about clearing the working set, not deleting someone's work.
     func dismiss(_ url: URL) {
         dismissedURLs.insert(url)      // survives the folder re-scan that happens on every open
-        EditStore.remove(for: url)
+        // THE SIDECAR STAYS. This called `EditStore.remove(for:)`, while the tooltip said "Remove
+        // from this session" and this method's own doc comment said "The file itself is never
+        // touched — this is about clearing the working set, not deleting someone's work." It was
+        // deleting the work: hide a frame you had already edited and the edit was gone for good,
+        // with nothing named delete anywhere near the click.
+        //
+        // Dismissing is about what is IN FRONT OF YOU. Un-dismiss the frame, or open it directly,
+        // and the edit is still there — which is what "session" means.
         editedURLs.remove(url)
         sessions.removeValue(forKey: url)
         sessionOrder.removeAll { $0 == url }
@@ -1185,6 +1196,7 @@ final class AppState: ObservableObject {
         maskEnabled = Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, true) })
         maskStrength = Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, $0.opacity * 100) })
         maskAdjustments = [:]; maskFeather = [:]; maskInvert = [:]
+        maskTightness = [:]      // omitted here while `resetMask` cleared it — a slip, not a policy
         updateActiveRecipe()
         resetHistory()          // the chosen candidate is the new base for undo
         // NOTE: selecting/browsing candidates does NOT record a pick — only a deliberate
@@ -1201,6 +1213,7 @@ final class AppState: ObservableObject {
         maskEnabled = Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, true) })
         maskStrength = Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, $0.opacity * 100) })
         maskAdjustments = [:]; maskFeather = [:]; maskInvert = [:]
+        maskTightness = [:]      // omitted here while `resetMask` cleared it — a slip, not a policy
         updateActiveRecipe()
     }
 
@@ -1735,7 +1748,7 @@ final class AppState: ObservableObject {
         var ms = baseMasks.compactMap { m -> Mask? in
             guard maskEnabled[m.id] ?? true else { return nil }
             var m = m
-            m.opacity = clampStep((maskStrength[m.id] ?? m.opacity * 100) / 100, 0...1, 0.01)
+            m.opacity = Self.clampStep((maskStrength[m.id] ?? m.opacity * 100) / 100, 0...1, 0.01)
             // Whatever the user has dialled in for this mask overrides the engine's proposal.
             // Absent = untouched, so the engine's own values stand.
             if let edited = maskAdjustments[m.id] { m.adjustments = edited }
@@ -2013,48 +2026,137 @@ final class AppState: ObservableObject {
         guard let styleId = selectedCandidateId,
               let style = CandidateStyle.all.first(where: { $0.id == styleId }) else { return }
         let tweaks = manualTweaks()
+        // Snapshotted as VALUES before the loop. `applyLookBeyondGlobals` reads five pieces of
+        // actor state, and reaching back for them from a detached task is how a data race gets
+        // written by accident. The look does not change during a batch, so capture it once.
+        let look = BatchLook(hsl: hsl, straighten: straighten, maskEnabled: maskEnabled,
+                             maskStrength: maskStrength, userMasks: userMasks)
         isProcessing = true
         do {
             let files = try BatchApply.imageFiles(in: inputDir)
-            try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
-            var written: [URL] = []
-            var failures: [BatchApply.Failure] = []
+            // THE DESTINATION IS CHECKED BEFORE A SINGLE BYTE IS WRITTEN. Measured in Core: the
+            // CLI's batch, pointed at its own source folder, silently rewrote every original in
+            // place — shasums before and after. Non-negotiable #3 says the original is never
+            // written to. `prepare` refuses that, refuses a non-folder, creates the destination,
+            // and compares filesystem identity rather than path strings, so a symlink or a
+            // /tmp-vs-/private/tmp spelling cannot sneak past it.
+            let destination = BatchApply.Destination(directory: outputDir,
+                                                     onCollision: .uniqueSuffix,
+                                                     format: .jpeg(quality: 0.97))
+            try destination.prepare(sources: files)
+
+            var items: [BatchApply.Outcome.Item] = []
             for (i, file) in files.enumerated() {
                 statusMessage = "Adapting \(style.label) to photo \(i + 1) of \(files.count)…"
                 do {
+                    // PERCEPTION STAYS HERE — it is an actor hop of its own and the only part that
+                    // was ever off this thread.
                     let image = try ImageDecoder.decode(url: file)
-                    let proxy = PerceptionProxy.downsample(image)
+                    // Materialised, not lazy. A lazy proxy is a filter graph over the FULL frame,
+                    // so every measurement below would silently re-render all 60 megapixels again —
+                    // the exact trap `loadPhoto` documents and avoids.
+                    let proxy = Self.materialiseShared(PerceptionProxy.downsample(image))
                     let perception = try await perceptionProvider.perceive(proxy)
-                    let stats = try ImageStatistics.compute(proxy)
-                    // Per-photo subject + sky masks — each frame gets its own local decisions.
-                    let m = LocalMasks.measure(in: proxy)
-                    var recipe = RecipeEngine.candidate(perception: perception, statistics: stats,
-                                                        style: style, subjectLuma: m.subjectLuma,
-                                                        skyLuma: m.skyLuma, iso: ExifReader.iso(url: file))
-                    applyTweaks(tweaks, to: &recipe.global)
-                    applyLookBeyondGlobals(to: &recipe)
-                    // Sensor dust sits at the same normalised position on every frame of a shoot,
-                    // so the spots found on the reference photo heal the whole batch.
-                    recipe.heal = (removeDust && !healSpots.isEmpty) ? healSpots : nil
-                    let masks = (recipe.masks?.isEmpty == false) ? LocalMasks.measure(in: image).bitmaps : [:]
-                    // Name each output from what the model read about THAT frame, so a batch
-                    // comes out searchable rather than as a wall of camera serial numbers.
-                    let stem = ExportNaming.stem(for: file, perception: perception, look: style.label)
-                    let out = ExportNaming.uniqueURL(in: outputDir, stem: stem, ext: "jpg")
-                    try ImageWriter.write(Renderer.render(image, with: recipe, maskBitmaps: masks),
-                                          to: out, format: .jpeg(quality: 0.97))
-                    written.append(out)
+
+                    // ...AND EVERYTHING ELSE GOES OFF THE MAIN ACTOR. `AppState` is `@MainActor`,
+                    // so decode, statistics, two Vision passes, a full-resolution render and a file
+                    // write were all running on the thread drawing the window — for every frame in
+                    // the shoot. The app was locked for the whole batch, which on a real shoot is
+                    // minutes, and the per-file progress it sets each iteration could not repaint,
+                    // so the one thing telling you it was alive was invisible.
+                    let work = BatchInput(image: image, proxy: proxy, source: file,
+                                          perception: perception, style: style, tweaks: tweaks,
+                                          heal: (removeDust && !healSpots.isEmpty) ? healSpots : nil,
+                                          look: look, destination: destination)
+                    let item = await Task.detached(priority: .userInitiated) { () -> BatchApply.Outcome.Item in
+                        do {
+                            let stats = try ImageStatistics.compute(work.proxy)
+                            // Per-photo subject + sky masks — each frame gets its own local decisions.
+                            let m = LocalMasks.measure(in: work.proxy)
+                            var recipe = RecipeEngine.candidate(
+                                perception: work.perception, statistics: stats, style: work.style,
+                                subjectLuma: m.subjectLuma, skyLuma: m.skyLuma,
+                                iso: ExifReader.iso(url: work.source))
+                            Self.applyTweaks(work.tweaks, to: &recipe.global)
+                            work.look.apply(to: &recipe)
+                            // Sensor dust sits at the same normalised position on every frame of a
+                            // shoot, so the spots found on the reference photo heal the whole batch.
+                            recipe.heal = work.heal
+                            let masks = (recipe.masks?.isEmpty == false)
+                                ? LocalMasks.measure(in: work.image).bitmaps : [:]
+                            // Named from what the model read about THAT frame, so a batch comes out
+                            // searchable rather than as a wall of camera serial numbers.
+                            switch work.destination.plan(for: work.source,
+                                                         perception: work.perception,
+                                                         look: work.style.label) {
+                            case .skip(let existing):
+                                return .skipped(source: work.source, existing: existing)
+                            case .write(let out):
+                                try ImageWriter.write(
+                                    Renderer.render(work.image, with: recipe, maskBitmaps: masks),
+                                    to: out, format: work.destination.format)
+                                return .written(source: work.source, to: out)
+                            }
+                        } catch {
+                            return .failed(source: work.source, message: "\(error)")
+                        }
+                    }.value
+                    items.append(item)
                 } catch {
-                    failures.append(BatchApply.Failure(source: file, message: "\(error)"))
+                    items.append(.failed(source: file, message: "\(error)"))
                 }
             }
-            self.batchOutcome = BatchApply.Outcome(written: written, failures: failures)
+            let outcome = BatchApply.Outcome(items: items)
+            self.batchOutcome = outcome
             self.showBatchSheet = true
-            statusMessage = "Batch done · \(written.count) edited as \(style.label), \(failures.count) skipped"
+            statusMessage = "Batch done · \(outcome.succeeded) edited as \(style.label), "
+                + "\(outcome.skippedCount) skipped, \(outcome.failed) failed"
         } catch {
-            statusMessage = "Batch failed — \(error.localizedDescription)"
+            // `"\(error)"` rather than `localizedDescription`: `Destination.Problem` writes a
+            // sentence a photographer can act on, and `localizedDescription` would replace it with
+            // a generic Cocoa string.
+            statusMessage = "Batch failed — \(error)"
         }
         isProcessing = false
+    }
+
+    /// One photo's worth of batch work, boxed to cross the actor boundary.
+    private struct BatchInput: @unchecked Sendable {
+        let image: CIImage
+        let proxy: CIImage
+        let source: URL
+        let perception: Perception
+        let style: CandidateStyle
+        let tweaks: [String: Double]
+        let heal: [HealSpot]?
+        let look: BatchLook
+        let destination: BatchApply.Destination
+    }
+
+    /// The parts of the reference photo's look that are not global slider values, captured as
+    /// values so a batch worker never reads back into the main actor.
+    private struct BatchLook: @unchecked Sendable {
+        let hsl: [String: HSLAdjustment]
+        let straighten: Double
+        let maskEnabled: [String: Bool]
+        let maskStrength: [String: Double]
+        let userMasks: [UserMaskVM]
+
+        func apply(to recipe: inout Recipe) {
+            if !hsl.isEmpty { recipe.hsl = hsl }
+            if straighten != 0 {
+                recipe.geometry = Geometry(rotateDeg: straighten, crop: nil, lensCorrection: false)
+            }
+            // Honour the reference photo's auto-mask toggles/strengths, then append the user's.
+            var ms = (recipe.masks ?? []).compactMap { m -> Mask? in
+                guard maskEnabled[m.id] ?? true else { return nil }
+                var m = m
+                if let pct = maskStrength[m.id] { m.opacity = min(1, max(0, pct / 100)) }
+                return m
+            }
+            ms += userMasks.map { $0.toMask() }
+            recipe.masks = ms.isEmpty ? nil : ms
+        }
     }
 
     /// Carry the parts of the look that AREN'T global slider values onto a batch photo: the colour
@@ -2108,20 +2210,21 @@ final class AppState: ObservableObject {
         return t
     }
 
-    private func applyTweaks(_ t: [String: Double], to g: inout GlobalAdjustments) {
-        g.exposureEV = clampStep(g.exposureEV + (t["exposure_ev"] ?? 0), -5...5, 0.05)
-        g.contrast = clampStep(g.contrast + (t["contrast"] ?? 0), -100...100, 1)
-        g.highlights = clampStep(g.highlights + (t["highlights"] ?? 0), -100...100, 1)
-        g.shadows = clampStep(g.shadows + (t["shadows"] ?? 0), -100...100, 1)
-        g.whites = clampStep(g.whites + (t["whites"] ?? 0), -100...100, 1)
-        g.blacks = clampStep(g.blacks + (t["blacks"] ?? 0), -100...100, 1)
-        g.vibrance = clampStep(g.vibrance + (t["vibrance"] ?? 0), -100...100, 1)
-        g.saturation = clampStep(g.saturation + (t["saturation"] ?? 0), -100...100, 1)
-        g.clarity = clampStep(g.clarity + (t["clarity"] ?? 0), -100...100, 1)
-        g.texture = clampStep(g.texture + (t["texture"] ?? 0), -100...100, 1)
-        g.dehaze = clampStep(g.dehaze + (t["dehaze"] ?? 0), 0...100, 1)
-        g.fusion = clampStep(g.fusion + (t["fusion"] ?? 0), 0...100, 1)
-        g.tint = clampStep(g.tint + (t["tint"] ?? 0), -100...100, 1)
+    /// Pure: reads only its arguments, so a batch worker can call it off the actor.
+    nonisolated static func applyTweaks(_ t: [String: Double], to g: inout GlobalAdjustments) {
+        g.exposureEV = Self.clampStep(g.exposureEV + (t["exposure_ev"] ?? 0), -5...5, 0.05)
+        g.contrast = Self.clampStep(g.contrast + (t["contrast"] ?? 0), -100...100, 1)
+        g.highlights = Self.clampStep(g.highlights + (t["highlights"] ?? 0), -100...100, 1)
+        g.shadows = Self.clampStep(g.shadows + (t["shadows"] ?? 0), -100...100, 1)
+        g.whites = Self.clampStep(g.whites + (t["whites"] ?? 0), -100...100, 1)
+        g.blacks = Self.clampStep(g.blacks + (t["blacks"] ?? 0), -100...100, 1)
+        g.vibrance = Self.clampStep(g.vibrance + (t["vibrance"] ?? 0), -100...100, 1)
+        g.saturation = Self.clampStep(g.saturation + (t["saturation"] ?? 0), -100...100, 1)
+        g.clarity = Self.clampStep(g.clarity + (t["clarity"] ?? 0), -100...100, 1)
+        g.texture = Self.clampStep(g.texture + (t["texture"] ?? 0), -100...100, 1)
+        g.dehaze = Self.clampStep(g.dehaze + (t["dehaze"] ?? 0), 0...100, 1)
+        g.fusion = Self.clampStep(g.fusion + (t["fusion"] ?? 0), 0...100, 1)
+        g.tint = Self.clampStep(g.tint + (t["tint"] ?? 0), -100...100, 1)
         if let dt = t["temperatureK"] { g.temperatureK = (g.temperatureK ?? 5500) + dt }
     }
 
@@ -2141,7 +2244,8 @@ final class AppState: ObservableObject {
     // Active look's white balance for the rail (nil = as-shot).
     var activeTemperature: Double? { activeRecipe?.global.temperatureK }
 
-    private func clampStep(_ v: Double, _ r: ClosedRange<Double>, _ step: Double) -> Double {
+    /// Pure, so the batch worker can clamp off the actor too.
+    nonisolated static func clampStep(_ v: Double, _ r: ClosedRange<Double>, _ step: Double) -> Double {
         let c = min(r.upperBound, max(r.lowerBound, v))
         return (c / step).rounded() * step
     }
