@@ -2724,16 +2724,31 @@ struct ContentView: View {
                     .font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
             }
             if let location = c.locationText {
-                // Clickable: coordinates are only useful if you can get to a map from them.
-                if let url = c.mapURL {
-                    Link(destination: url) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "mappin.and.ellipse").font(.system(size: 9))
-                            Text(location).font(Theme.mono(9))
-                        }.foregroundColor(Theme.glow)
-                    }
-                } else {
+                // WHERE, AND A WAY OUT TO A MAP — deliberately as a hand-off rather than a map
+                // drawn in this window.
+                //
+                // MapKit renders by fetching tiles from Apple, so an inline map would send this
+                // photograph's coordinates off the machine every time you opened the panel. The
+                // first line of CLAUDE.md is "Everything runs on-device. No cloud, no account, no
+                // upload", and a location is the most sensitive single field in the file. Handing
+                // off means Kelvin itself never makes the request: nothing leaves until you click,
+                // and then it is Maps doing it, visibly, because you asked.
+                //
+                // Which is also why the button says "Show in Maps" instead of just being a
+                // clickable coordinate. An affordance that quietly leaves the app is the thing
+                // being avoided here.
+                VStack(alignment: .leading, spacing: 3) {
                     Text(location).font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
+                        .textSelection(.enabled)
+                    if let url = c.mapURL {
+                        Link(destination: url) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "mappin.and.ellipse").font(.system(size: 9))
+                                Text("Show in Maps").font(Theme.mono(9))
+                            }.foregroundColor(Theme.glow)
+                        }
+                        .help("Opens Maps with these coordinates. Kelvin does not fetch anything itself.")
+                    }
                 }
             }
         }
