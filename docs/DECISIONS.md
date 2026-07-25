@@ -99,10 +99,9 @@ to be the load-bearing sentence — see the later entry on why a CLA was needed.
 
 > **This entry is history and one of its claims was WRONG.** "Kalo" is recorded below as
 > "clear as far as checked"; it is not — plain `Kalo` is already an App Store app name, and
-> Apple's names are unique store-wide. The naming collision is also understated in the entry
-> below. The owner read the fuller research and chose to keep
-> Kelvin anyway. See D11 for the domain that followed, and `Branding.swift` for the rename
-> insurance that decision made necessary.
+> Apple's names are unique store-wide. The naming collision below is also understated. The owner
+> read the fuller research and chose to keep Kelvin anyway. See D11 for the domain that followed,
+> and `Branding.swift` for the rename insurance that decision made necessary.
 
 Current folder name is a placeholder.
 
