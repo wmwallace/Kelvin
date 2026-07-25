@@ -228,27 +228,17 @@ public enum Renderer {
             guard mask.opacity > 0 else { continue }
             // Parametric masks (colour/luma selection, brush stamps, gradients) generate their own
             // bitmap here; segmentation masks (subject/sky) use the bitmap the caller supplied.
+            // ONE PRIMITIVE: a region, from a source, optionally narrowed by a refinement.
+            //
+            // "Skin" used to be a mask KIND with its own branch here — skin-coloured pixels
+            // intersected with the person segmentation. But that is not a kind of mask, it is a
+            // subject mask with a colour refinement, and writing it as a kind meant the
+            // intersection was available for exactly one combination out of the many people want:
+            // the highlights within a person, the reds within a graduated filter, everything
+            // except the sky. `refine` makes it general, and `skin` falls out as one instance of
+            // it (see `Mask.skin`, which still constructs precisely the old behaviour).
             let bitmap: CIImage?
-            if mask.type == "skin" {
-                // Skin = skin-coloured pixels intersected with the person segmentation, so it lands
-                // on faces/hands and not on skin-toned wood or walls. Fair across complexions: it
-                // keys on hue, never brightness.
-                //
-                // The person segmentation is REQUIRED. Without it this would silently degrade into
-                // a plain hue selection and grab skin-toned sand, timber, or walls — a "skin" mask
-                // quietly editing the scenery is worse than one that does nothing, so it skips and
-                // the UI says why.
-                let sel = mask.selection ?? MaskSelection(kind: .color, center: 0.06, range: 0.06, softness: 0.05)
-                if let subject = maskBitmaps[mask.id] ?? maskBitmaps["subject"],
-                   let cube = SelectionMask.makeData(sel) {
-                    bitmap = img
-                        .applyingFilter("CIColorCubeWithColorSpace", parameters: [
-                            "inputCubeDimension": SelectionMask.dimension,
-                            "inputCubeData": cube, "inputColorSpace": ImageWriter.outputColorSpace])
-                        .applyingFilter("CIMultiplyCompositing", parameters: [
-                            kCIInputBackgroundImageKey: subject])
-                } else { bitmap = nil }
-            } else if let sel = mask.selection, let cube = SelectionMask.makeData(sel) {
+            if let sel = mask.selection, let cube = SelectionMask.makeData(sel) {
                 // The cube turns the current image into a white-where-selected mask.
                 bitmap = img.applyingFilter("CIColorCubeWithColorSpace", parameters: [
                     "inputCubeDimension": SelectionMask.dimension,
@@ -266,8 +256,23 @@ public enum Renderer {
             } else {
                 bitmap = maskBitmaps[mask.id] ?? maskBitmaps[mask.type]
             }
-            guard let bitmap else { continue }
-            img = applyMaskedAdjustments(img, mask: mask, maskBitmap: bitmap)
+            guard var region = bitmap else { continue }
+
+            // REFINE: narrow the region to pixels that also fall in a colour or luminance range.
+            //
+            // A missing SOURCE skips the mask entirely (above), which is what keeps a skin mask
+            // from silently degrading into a bare hue selection when there is no person — it would
+            // grab skin-toned sand, timber and walls, and a mask quietly editing the scenery is
+            // worse than one that does nothing. A missing refinement cube, by contrast, leaves the
+            // region as it is: the narrowing is optional, the region is not.
+            if let refine = mask.refine, let cube = SelectionMask.makeData(refine) {
+                let selected = img.applyingFilter("CIColorCubeWithColorSpace", parameters: [
+                    "inputCubeDimension": SelectionMask.dimension,
+                    "inputCubeData": cube, "inputColorSpace": ImageWriter.outputColorSpace])
+                region = selected.applyingFilter("CIMultiplyCompositing", parameters: [
+                    kCIInputBackgroundImageKey: region])
+            }
+            img = applyMaskedAdjustments(img, mask: mask, maskBitmap: region)
         }
 
         // Detail: noise reduction, then output sharpening — a finishing pass, applied last so the

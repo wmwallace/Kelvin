@@ -317,7 +317,21 @@ public struct Mask: Codable, Equatable, Sendable {
     public var stamps: [BrushStamp]?
     /// A selection mask generated FROM the image by colour or luminance range — "adjust the reds",
     /// "adjust the highlights". Parametric (a target + range), the renderer bakes it into a cube.
+    /// This is the mask's SOURCE — it says where the region comes from.
     public var selection: MaskSelection?
+
+    /// Narrows whatever region the source produced to pixels that ALSO fall in a colour or
+    /// luminance range. The mask's one modifier of substance, alongside `invert`.
+    ///
+    /// "Skin" used to be a mask type with a bespoke branch in the renderer: skin-coloured pixels
+    /// intersected with the person segmentation. That is not a KIND of mask — it is a subject mask
+    /// with a colour refinement — and encoding it as a kind meant the intersection existed for
+    /// exactly one combination out of the many people want. Generalised, the same machinery
+    /// expresses "the highlights within this person", "the reds inside a graduated filter", "the
+    /// bright part of the sky", none of which were reachable before.
+    ///
+    /// Optional, so a sidecar written before it existed decodes unchanged.
+    public var refine: MaskSelection?
 
     /// Optional mask tightness / edge contrast (0…100). Higher tightness sharpens the transition
     /// boundary of soft mask edges. Neutral 0.
@@ -327,12 +341,27 @@ public struct Mask: Codable, Equatable, Sendable {
         id: String, type: String, source: String?, invert: Bool,
         feather: Double, opacity: Double, adjustments: [String: Double],
         shape: MaskShape? = nil, stamps: [BrushStamp]? = nil, selection: MaskSelection? = nil,
-        tightness: Double? = nil
+        tightness: Double? = nil, refine: MaskSelection? = nil
     ) {
         self.id = id; self.type = type; self.source = source; self.invert = invert
         self.feather = feather; self.opacity = opacity; self.adjustments = adjustments
         self.shape = shape; self.stamps = stamps; self.selection = selection
-        self.tightness = tightness
+        self.tightness = tightness; self.refine = refine
+    }
+
+    /// The colour range that stands for human skin across complexions — hue, never brightness,
+    /// which is what keeps it fair. A named constant because it is a claim about people rather
+    /// than a tuning value, and it now CONSTRUCTS a refinement instead of hiding in a renderer
+    /// branch.
+    public static let skinRefinement = MaskSelection(kind: .color, center: 0.06, range: 0.06,
+                                                    softness: 0.05)
+
+    /// A skin mask in the general vocabulary: the subject region, narrowed to skin hues — exactly
+    /// what the old bespoke `type == "skin"` branch computed.
+    public static func skin(id: String, adjustments: [String: Double],
+                            refinement: MaskSelection = skinRefinement) -> Mask {
+        Mask(id: id, type: "subject", source: "segmentation", invert: false, feather: 0,
+             opacity: 1, adjustments: adjustments, refine: refinement)
     }
 
     public init(from decoder: Decoder) throws {
@@ -347,11 +376,27 @@ public struct Mask: Codable, Equatable, Sendable {
         shape = try c.decodeIfPresent(MaskShape.self, forKey: .shape)
         stamps = try c.decodeIfPresent([BrushStamp].self, forKey: .stamps)
         selection = try c.decodeIfPresent(MaskSelection.self, forKey: .selection)
+        refine = try c.decodeIfPresent(MaskSelection.self, forKey: .refine)
         tightness = try c.clampedOptionalDouble(.tightness, in: Ranges.unsigned100)
+
+        // MIGRATION. A sidecar written before `refine` existed says `type: "skin"` and carries the
+        // hue range in `selection`, because that is where the bespoke renderer branch looked. It
+        // is rewritten into the general form here, on the way in, so exactly ONE shape of mask
+        // ever reaches the renderer and an edit saved last week still renders identically.
+        //
+        // Done at decode rather than at render because a migration in the renderer is a special
+        // case that never goes away — this one is over the moment the file is read.
+        if type == "skin" {
+            refine = refine ?? selection ?? Mask.skinRefinement
+            selection = nil
+            type = "subject"
+            source = source ?? "segmentation"
+        }
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, type, source, invert, feather, opacity, adjustments, shape, stamps, selection, tightness
+        case id, type, source, invert, feather, opacity, adjustments, shape, stamps, selection
+        case tightness, refine
     }
 }
 

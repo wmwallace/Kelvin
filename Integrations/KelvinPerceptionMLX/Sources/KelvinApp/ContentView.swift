@@ -2965,7 +2965,7 @@ struct ContentView: View {
                         // The "+" used to be repeated on all eight buttons. Said once over the
                         // grid it costs a line and buys every button back the width its glyph
                         // needs — and the row stops reading as a list of things called "+ Luma".
-                        Text("ADD A MASK")
+                        Text("ADD A MASK — PICK WHAT DEFINES THE REGION")
                             .font(Theme.mono(9)).tracking(1.4).foregroundColor(Theme.inkFaint)
                         HStack(spacing: 6) {
                             Button(action: { appState.addUserMask(.radial) }) { addMaskLabel("Radial", icon: "circle.circle") }.buttonStyle(.plain)
@@ -3546,6 +3546,16 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
     /// was: three radial masks were all called "Radial", in a list, with nothing to tell them
     /// apart. Fine with one mask and useless with four.
     var name: String?
+    /// THE UNIVERSAL MODIFIER. Narrows whatever region this mask defines to pixels that also fall
+    /// in a colour or luminance range — "the skin within this person", "the highlights inside this
+    /// graduated filter", "the reds in the bottom half".
+    ///
+    /// `.skin` used to be the only mask that could do this, because the intersection was written
+    /// into the renderer as a special case for one type. It is available on every mask now, which
+    /// is the whole point of collapsing the kinds into one primitive.
+    enum Refinement: String, Codable, CaseIterable { case none, colour, luminance }
+    var refinement: Refinement = .none
+    var refineCenter = 0.06, refineRange = 0.12, refineSoftness = 0.06
 
     enum CodingKeys: String, CodingKey {
         case id, kind, cx, cy, radius, angle, softness, stamps, selCenter, selRange, selSoftness
@@ -3642,37 +3652,59 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
         let f = feather
         let t = tightness
         let inv = invert
+        // Applied to whatever region the source below produces. `.skin` still constructs its own
+        // refinement from the legacy fields, so an existing skin mask is untouched by this.
+        let ref: MaskSelection? = {
+            switch refinement {
+            case .none: return nil
+            case .colour: return MaskSelection(kind: .color, center: refineCenter,
+                                               range: refineRange, softness: refineSoftness)
+            case .luminance: return MaskSelection(kind: .luminance, center: refineCenter,
+                                                  range: refineRange, softness: refineSoftness)
+            }
+        }()
         switch kind {
         case .brush:
             return Mask(id: id.uuidString, type: "brush", source: "brush", invert: inv,
-                        feather: f, opacity: 1, adjustments: adj, stamps: stamps, tightness: t)
+                        feather: f, opacity: 1, adjustments: adj, stamps: stamps, tightness: t,
+                        refine: ref)
         case .radial, .linear:
             let sk: MaskShape.Kind = kind == .radial ? .radial : .linear
             return Mask(id: id.uuidString, type: sk.rawValue, source: "gradient", invert: inv,
                         feather: f, opacity: 1, adjustments: adj,
-                        shape: MaskShape(kind: sk, cx: cx, cy: cy, radius: radius, angle: angle, softness: softness), tightness: t)
+                        shape: MaskShape(kind: sk, cx: cx, cy: cy, radius: radius, angle: angle, softness: softness), tightness: t,
+                        refine: ref)
         case .colorRange, .luminance:
             let k: MaskSelection.Kind = kind == .colorRange ? .color : .luminance
             return Mask(id: id.uuidString, type: k.rawValue, source: "selection", invert: inv,
                         feather: f, opacity: 1, adjustments: adj,
-                        selection: MaskSelection(kind: k, center: selCenter, range: selRange, softness: selSoftness), tightness: t)
+                        selection: MaskSelection(kind: k, center: selCenter, range: selRange, softness: selSoftness), tightness: t,
+                        refine: ref)
         case .skin:
-            return Mask(id: id.uuidString, type: "skin", source: "skin", invert: inv,
-                        feather: f, opacity: 1, adjustments: adj,
-                        selection: MaskSelection(kind: .color, center: selCenter, range: selRange, softness: selSoftness), tightness: t)
+            // NOT a kind any more — the subject region, narrowed to skin hues. Identical pixels to
+            // the old bespoke path; it is just said in the general vocabulary now.
+            return Mask(id: id.uuidString, type: "subject", source: "segmentation", invert: inv,
+                        feather: f, opacity: 1, adjustments: adj, tightness: t,
+                        refine: MaskSelection(kind: .color, center: selCenter,
+                                              range: selRange, softness: selSoftness))
         case .background:
+            // Also not a kind: the subject region, inverted. `invert` was always the modifier
+            // doing the work — this case existed only to set it for you.
             let finalInvert = inv ? false : true
             let finalFeather = f != 0 ? f : 20
             return Mask(id: id.uuidString, type: "subject", source: "segmentation", invert: finalInvert,
-                        feather: finalFeather, opacity: 1, adjustments: adj, tightness: t)
+                        feather: finalFeather, opacity: 1, adjustments: adj, tightness: t,
+                        refine: ref)
         case .subject:
             let finalFeather = f != 0 ? f : 30
             return Mask(id: id.uuidString, type: "subject", source: "segmentation", invert: inv,
-                        feather: finalFeather, opacity: 1, adjustments: adj, tightness: t)
+                        feather: finalFeather, opacity: 1, adjustments: adj, tightness: t,
+                        refine: ref)
         case .instance:
             let finalFeather = f != 0 ? f : 30
             return Mask(id: instanceId ?? id.uuidString, type: "instance", source: "segmentation",
-                        invert: inv, feather: finalFeather, opacity: 1, adjustments: adj, tightness: t)
+                        invert: inv, feather: finalFeather, opacity: 1, adjustments: adj, tightness: t,
+                        refine: ref)
         }
     }
 }
@@ -3799,6 +3831,43 @@ struct UserMaskEditor: View {
             case .instance:
                 Text("Just this one — everything else in the frame is untouched.")
                     .font(Theme.mono(9)).foregroundColor(Theme.inkDim).fixedSize(horizontal: false, vertical: true)
+            }
+
+            Rectangle().fill(Theme.hairline).frame(height: 1)
+
+            // MODIFIERS — the same two on every mask, whatever defines its region. `.skin` and
+            // `.background` used to be separate mask kinds, which is what made these unavailable
+            // everywhere else: "the highlights within this person" or "everything except the
+            // reds" had no way to be said.
+            Toggle(isOn: $mask.invert) {
+                Text("Invert — adjust everything else")
+                    .font(Theme.ui(11)).foregroundColor(Theme.inkDim)
+            }
+            .toggleStyle(.switch).tint(Theme.glow)
+            .onChange(of: mask.invert) { _ in onChange() }
+
+            HStack(spacing: 6) {
+                Text("REFINE").font(Theme.mono(9)).tracking(1.2).foregroundColor(Theme.inkFaint)
+                Spacer()
+                Picker("", selection: $mask.refinement) {
+                    Text("Off").tag(UserMaskVM.Refinement.none)
+                    Text("Colour").tag(UserMaskVM.Refinement.colour)
+                    Text("Light").tag(UserMaskVM.Refinement.luminance)
+                }
+                .pickerStyle(.segmented).labelsHidden().frame(width: 170).controlSize(.small)
+                .onChange(of: mask.refinement) { _ in onChange() }
+            }
+            .help("Narrow this mask to pixels that are also a certain colour or brightness")
+
+            if mask.refinement != .none {
+                ToneSlider(label: mask.refinement == .colour ? "Hue" : "Brightness",
+                           value: $mask.refineCenter, range: 0...1, step: 0.005, unit: "",
+                           onChange: onChange,
+                           identity: mask.refinement == .colour ? .spectrum : .exposure)
+                ToneSlider(label: "Range", value: $mask.refineRange, range: 0.01...0.5,
+                           step: 0.005, unit: "", onChange: onChange)
+                ToneSlider(label: "Softness", value: $mask.refineSoftness, range: 0...0.3,
+                           step: 0.005, unit: "", onChange: onChange)
             }
 
             Rectangle().fill(Theme.hairline).frame(height: 1)
