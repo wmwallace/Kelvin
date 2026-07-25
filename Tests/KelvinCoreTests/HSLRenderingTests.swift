@@ -77,6 +77,70 @@ final class HSLRenderingTests: XCTestCase {
         XCTAssertGreaterThan(HSLCube.hueWeight(hueDegrees: 350, center: 0), 0.5)
     }
 
+    // MARK: - Reproducibility
+    //
+    // A recipe is a promise that the same numbers give the same pixels. These guard the one place
+    // that was quietly not true: band influence used to be measured against the running hue, so a
+    // band could rotate a pixel into its neighbour's window and the result depended on which band
+    // went first — an order that came from `Dictionary` iteration, i.e. from the process's hash
+    // seed. Same recipe, same photo, different output between launches.
+
+    /// Two bands close enough to overlap, plus one far away that should stay inert.
+    private var overlappingBands: [HSLCube.Band] {
+        [HSLCube.Band(name: "orange", center: 30, adj: HSLAdjustment(h: 90, s: 40, l: 10)),
+         HSLCube.Band(name: "yellow", center: 60, adj: HSLAdjustment(h: -60, s: -50, l: -8)),
+         HSLCube.Band(name: "blue",   center: 240, adj: HSLAdjustment(h: 30, s: 70, l: 5))]
+    }
+
+    func testBandOrderCannotChangeTheResult() {
+        let bands = overlappingBands
+        // Sweep the whole hue circle, not one convenient colour — the coupling only shows up
+        // where two bands' influence regions overlap, and that is a narrow arc.
+        for step in 0..<72 {
+            let h = Double(step) / 72.0
+            let reference = HSLCube.adjusted(h: h, s: 0.6, l: 0.5, bands: bands)
+            for permutation in [[1, 0, 2], [2, 1, 0], [0, 2, 1], [2, 0, 1], [1, 2, 0]] {
+                let shuffled = permutation.map { bands[$0] }
+                let got = HSLCube.adjusted(h: h, s: 0.6, l: 0.5, bands: shuffled)
+                XCTAssertEqual(got.0, reference.0, accuracy: 1e-12, "hue at \(h * 360)°")
+                XCTAssertEqual(got.1, reference.1, accuracy: 1e-12, "saturation at \(h * 360)°")
+                XCTAssertEqual(got.2, reference.2, accuracy: 1e-12, "lightness at \(h * 360)°")
+            }
+        }
+    }
+
+    func testShiftedHueIsNotHandedToTheNeighbouringBand() {
+        // Orange sits at 30°, and a full +100 hue shift rotates it the whole 30° to 60° — exactly
+        // the yellow band's centre. Yellow's claim on this pixel must still be judged on the 30°
+        // it arrived as (30° away, so a quarter weight), not on where orange left it.
+        let bands = [HSLCube.Band(name: "orange", center: 30, adj: HSLAdjustment(h: 100, s: 0, l: 0)),
+                     HSLCube.Band(name: "yellow", center: 60, adj: HSLAdjustment(h: 0, s: -100, l: 0))]
+        let (_, s, _) = HSLCube.adjusted(h: 30.0 / 360.0, s: 0.8, l: 0.5, bands: bands)
+        // Weight 1 - 30/40 = 0.25 → saturation scaled by 0.75, so 0.8 → 0.6.
+        XCTAssertEqual(s, 0.6, accuracy: 1e-9,
+                       "yellow must weight the pixel by its original hue, not its rotated one")
+        XCTAssertGreaterThan(s, 0.1, "a pixel rotated into a band must not be swallowed by it")
+    }
+
+    func testBandsAreSortedIntoAFixedOrder() {
+        // Whatever order the dictionary hands them over in, the array is the same one every time.
+        let hsl = ["blue": HSLAdjustment(h: 4, s: 0, l: 0),
+                   "red": HSLAdjustment(h: 2, s: 0, l: 0),
+                   "cyan": HSLAdjustment(h: 1, s: 0, l: 0),
+                   "aqua": HSLAdjustment(h: 3, s: 0, l: 0),
+                   "yellow": HSLAdjustment(h: 5, s: 0, l: 0)]
+        // aqua and cyan share 180°, so the name is what separates them — without it the order of
+        // two distinct bands would still be the dictionary's business.
+        XCTAssertEqual(HSLCube.bands(from: hsl).map(\.name), ["red", "yellow", "aqua", "cyan", "blue"])
+    }
+
+    func testNeutralAndUnknownBandsAreDropped() {
+        let hsl = ["orange": HSLAdjustment(h: 0, s: 0, l: 0),      // neutral
+                   "chartreuse": HSLAdjustment(h: 20, s: 0, l: 0), // not a band we know
+                   "green": HSLAdjustment(h: 0, s: 10, l: 0)]
+        XCTAssertEqual(HSLCube.bands(from: hsl).map(\.name), ["green"])
+    }
+
     func testCubeDataHasExpectedSize() throws {
         let data = try XCTUnwrap(HSLCube.makeData(from: ["red": HSLAdjustment(h: 10, s: 0, l: 0)]))
         let n = HSLCube.dimension

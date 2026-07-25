@@ -353,6 +353,10 @@ public enum Renderer {
         } else {
             crop = largestInscribedRect(ext, angleDeg: geo.rotateDeg)
         }
+        // Same guard as `framedNormalized`. A degenerate crop has no interior to map through, and
+        // without this the two halves of an inverse pair disagree about it: that one returns the
+        // point untouched while this one collapsed every point onto the crop's corner.
+        guard crop.width > 0, crop.height > 0 else { return p }
 
         // Framed-normalised → a point in the rotated space (Core Image's bottom-left origin).
         let rx = crop.minX + p.x * crop.width

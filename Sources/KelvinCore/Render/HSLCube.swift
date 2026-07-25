@@ -29,14 +29,60 @@ enum HSLCube {
     private static let maxHueShiftDegrees = 30.0
     private static let maxLightnessShift = 0.5
 
+    /// One band's centre and its adjustment, resolved from the recipe's name-keyed map.
+    struct Band: Equatable {
+        let name: String
+        let center: Double
+        let adj: HSLAdjustment
+    }
+
+    /// The active bands, in a **fixed** order.
+    ///
+    /// The order is defensive rather than load-bearing — `adjusted` is written to be
+    /// order-independent — but a recipe must render the same pixels on every launch, and leaving
+    /// that resting on `Dictionary` iteration order would be leaving it to a per-process hash
+    /// seed. Sorted by centre, then name, so aliases at the same hue (`aqua`/`cyan`) are ordered
+    /// too and no two distinct bands ever compare equal.
+    static func bands(from hsl: [String: HSLAdjustment]) -> [Band] {
+        hsl.compactMap { name, adj -> Band? in
+            let key = name.lowercased()
+            guard let center = bandCenter[key],
+                  adj.h != 0 || adj.s != 0 || adj.l != 0 else { return nil }
+            return Band(name: key, center: center, adj: adj)
+        }
+        .sorted { $0.center != $1.center ? $0.center < $1.center : $0.name < $1.name }
+    }
+
+    /// Apply every band that reaches this colour, and return the adjusted HSL.
+    ///
+    /// **Every weight is measured against the hue the pixel came in with**, captured before the
+    /// loop. Reading the running `h` instead — which is what this did — made the result depend on
+    /// the order the bands happened to arrive in: with a warm preset holding `orange` (30°) and
+    /// `yellow` (60°), which overlap inside the 40° influence radius, rotating an orange pixel
+    /// warmwards first walked it *into* the yellow band's window, so yellow then grabbed a pixel
+    /// it should barely have touched. Run the two the other way round and the pixel came out
+    /// different. Bands describe the colour the photographer sees, not the colour a previous band
+    /// left behind, so which band owns a pixel is settled once, up front.
+    ///
+    /// With the weights fixed, the three terms are a sum, a product and a sum, so the bands
+    /// commute and the result no longer depends on their order at all.
+    static func adjusted(h: Double, s: Double, l: Double, bands: [Band]) -> (Double, Double, Double) {
+        let originalHueDegrees = h * 360.0
+        var h = h, s = s, l = l
+        for band in bands {
+            let w = hueWeight(hueDegrees: originalHueDegrees, center: band.center)
+            guard w > 0 else { continue }
+            h += (band.adj.h / 100.0) * (maxHueShiftDegrees / 360.0) * w
+            s *= 1.0 + (band.adj.s / 100.0) * w
+            l += (band.adj.l / 100.0) * maxLightnessShift * w
+        }
+        return (h, s, l)
+    }
+
     /// Build the cube's raw float data, or nil when there is nothing to do (so the renderer
     /// skips the filter entirely and stays a no-op).
     static func makeData(from hsl: [String: HSLAdjustment]) -> Data? {
-        let bands: [(center: Double, adj: HSLAdjustment)] = hsl.compactMap { name, adj in
-            guard let center = bandCenter[name.lowercased()],
-                  adj.h != 0 || adj.s != 0 || adj.l != 0 else { return nil }
-            return (center, adj)
-        }
+        let bands = bands(from: hsl)
         guard !bands.isEmpty else { return nil }
 
         let n = dimension
@@ -48,15 +94,8 @@ enum HSLCube {
                 let g = Double(gi) / Double(n - 1)
                 for ri in 0..<n {
                     let r = Double(ri) / Double(n - 1)
-                    var (h, s, l) = rgbToHSL(r, g, b)
-
-                    for band in bands {
-                        let w = hueWeight(hueDegrees: h * 360.0, center: band.center)
-                        guard w > 0 else { continue }
-                        h += (band.adj.h / 100.0) * (maxHueShiftDegrees / 360.0) * w
-                        s *= 1.0 + (band.adj.s / 100.0) * w
-                        l += (band.adj.l / 100.0) * maxLightnessShift * w
-                    }
+                    let (h0, s0, l0) = rgbToHSL(r, g, b)
+                    var (h, s, l) = adjusted(h: h0, s: s0, l: l0, bands: bands)
 
                     h = h.truncatingRemainder(dividingBy: 1.0); if h < 0 { h += 1 }
                     s = min(max(s, 0), 1)

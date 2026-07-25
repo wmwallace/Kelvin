@@ -44,7 +44,10 @@ enum SelectionMask {
     /// 1 inside `±half` of the target, falling linearly to 0 over `soft`.
     private static func window(_ distance: Double, half: Double, soft: Double) -> Double {
         if distance <= half { return 1 }
-        if distance >= half + soft || soft <= 0 { return distance <= half ? 1 : 0 }
+        // Past here the pixel is outside the window by definition, so a hard edge (`soft <= 0`)
+        // or a distance beyond the falloff both mean zero. This used to re-test `distance <= half`
+        // and read as though it could still return 1.
+        if distance >= half + soft || soft <= 0 { return 0 }
         return 1 - (distance - half) / soft
     }
 }
