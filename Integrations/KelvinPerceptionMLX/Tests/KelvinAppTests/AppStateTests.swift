@@ -98,6 +98,26 @@ final class AppStateTests: XCTestCase {
         s.includeFolderOnOpen = true   // leave the shared default as it was found
     }
 
+    /// The last step of a shoot: show me what I actually worked on. The dot has been drawn in the
+    /// strip since the filmstrip existed; being able to filter on it is what makes it useful.
+    func testTheEditedFilterShowsOnlyWhatWasWorkedOn() {
+        let urls = (1...4).map { url("_DSC000\($0).ARW") }
+        let s = state(with: urls)
+        s.editedURLs = [urls[1], urls[3]]
+        s.stripFilter = .edited
+        XCTAssertEqual(s.visiblePhotos, [urls[1], urls[3]])
+        XCTAssertEqual(s.editedCount, 2, "the export button says how many it will render")
+    }
+
+    /// A frame edited in a different folder must not be counted here — `editedURLs` accumulates
+    /// across a session, and the count labels a button about THIS shoot.
+    func testTheEditedCountIsAboutThisShootOnly() {
+        let mine = url("_DSC0001.ARW")
+        let s = state(with: [mine])
+        s.editedURLs = [mine, URL(fileURLWithPath: "/other/shoot/_DSC9999.ARW")]
+        XCTAssertEqual(s.editedCount, 1)
+    }
+
     // MARK: Grouping — one control, one axis (D-browse-1)
 
     /// Minutes apart, as a shoot's EXIF would read.

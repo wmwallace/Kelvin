@@ -16,6 +16,18 @@ struct SavedEdit: Codable {
     var hsl: [String: HSLAdjustment]
     var blackAndWhite: BlackAndWhiteMix?
     var removeDust: Bool
+    /// THE COMPOSED RECIPE, exactly as it was rendered.
+    ///
+    /// Everything above describes an edit relative to a candidate — the sliders you moved, the masks
+    /// you drew — and none of it is sufficient on its own, because the candidate contributed the
+    /// engine's auto-masks, its tone curve and its detail settings. Re-deriving those means
+    /// re-running perception at about fifteen seconds a photograph, which is fine when you open one
+    /// and absurd when you export forty.
+    ///
+    /// Optional so that sidecars written before this existed still decode. A photo whose sidecar
+    /// predates it can be re-rendered by opening it once, and `exportEdited` says so by name rather
+    /// than quietly producing different pixels.
+    var recipe: Recipe?
     var savedAt: String
     /// Recorded for provenance and to spot a file that changed under us; not used for lookup.
     var contentHint: String?

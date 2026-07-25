@@ -559,7 +559,8 @@ final class AppState: ObservableObject {
 
     /// Which frames the strip is showing.
     enum StripFilter: String, CaseIterable {
-        case all = "All", keepers = "Keepers", undecided = "Undecided", soft = "Focus"
+        case all = "All", keepers = "Keepers", undecided = "Undecided"
+        case edited = "Edited", soft = "Focus"
     }
     @Published var stripFilter: StripFilter = .all
 
@@ -572,6 +573,10 @@ final class AppState: ObservableObject {
             case .all:       return flags[url] != .reject
             case .keepers:   return flags[url] == .keep
             case .undecided: return flags[url] == nil
+            // What you have actually worked on. The strip has drawn a dot for this since the
+            // filmstrip existed; it just could not be filtered on, which is the half that makes it
+            // useful — "show me the twenty I edited" is the last step of a shoot.
+            case .edited:    return editedURLs.contains(url)
             // Review, not a verdict: this is the list to LOOK at, so the false positives are
             // the point of it rather than something hidden by it.
             case .soft:      return focus[url]?.isSoft == true
@@ -904,15 +909,20 @@ final class AppState: ObservableObject {
             // is the framework that crashes when two of its requests race, and none of this
             // touches it.
             //
-            // Bounded rather than unbounded. Each task can hold a decoded frame, and a folder of
-            // 60 MP files would otherwise try to hold all of them at once.
-            let limit = min(4, max(2, ProcessInfo.processInfo.activeProcessorCount - 2))
+            // Bounded rather than unbounded, but the bound is looser than it was, because the cost
+            // it was protecting against has largely gone. It used to be 4 because each task could
+            // hold a fully decoded 60 MP frame; `PerceptionProxy.measurementProxy` now reads a RAW
+            // file's embedded preview, so a task in flight holds a few megabytes rather than a few
+            // hundred. What remains is the FALLBACK — a body that embeds no usable preview still
+            // pays for a real decode — so this stays bounded rather than becoming `cores`.
+            let limit = min(8, max(2, ProcessInfo.processInfo.activeProcessorCount - 2))
             await withTaskGroup(of: (URL, PhotoTriage.Verdict?).self) { group in
                 var next = 0
                 func start() {
                     guard next < pending.count else { return }
                     let url = pending[next]; next += 1
-                    group.addTask(priority: .utility) { (url, PhotoTriage.read(url: url)) }
+                    // .userInitiated: somebody pressed a button and is watching a progress bar.
+                    group.addTask(priority: .userInitiated) { (url, PhotoTriage.read(url: url)) }
                 }
                 for _ in 0..<min(limit, pending.count) { start() }
                 for await (url, verdict) in group {
@@ -1023,6 +1033,10 @@ final class AppState: ObservableObject {
     }
     static let includeFolderKey = "open.includeFolder"
 
+    /// How many frames in this shoot carry an edit — drives the export button's label, so it says
+    /// what it will actually do rather than making someone guess.
+    var editedCount: Int { folderPhotos.filter { editedURLs.contains($0) }.count }
+
     var keeperCount: Int { folderPhotos.filter { flags[$0] == .keep }.count }
     var rejectCount: Int { folderPhotos.filter { flags[$0] == .reject }.count }
 
@@ -1118,6 +1132,9 @@ final class AppState: ObservableObject {
                   maskEnabled: maskEnabled, maskStrength: maskStrength,
                   straighten: straighten, hsl: hsl, blackAndWhite: activeRecipe?.blackAndWhite,
                   removeDust: removeDust,
+                  // The composed recipe, so this edit can be re-rendered without re-perceiving the
+                  // photograph. See SavedEdit.recipe.
+                  recipe: activeRecipe,
                   savedAt: ISO8601DateFormatter().string(from: Date()), contentHint: imageId)
     }
 
@@ -2571,6 +2588,78 @@ final class AppState: ObservableObject {
         isProcessing = false
     }
 
+    /// Render every photograph in this shoot that carries a saved edit, each with ITS OWN recipe.
+    ///
+    /// The hole this fills: `exportFullResolution` handles one photo, and Batch apply propagates ONE
+    /// look across a folder by re-perceiving every frame. Neither renders the twenty frames somebody
+    /// actually sat down and edited — which was the last step of a shoot, and had no button.
+    ///
+    /// Masks are re-measured per photograph, exactly as batch does: a subject mask is measured on
+    /// the proxy and must be re-found at full resolution, and the frames differ.
+    func exportEdited(to directory: URL) async {
+        let targets = folderPhotos.filter { editedURLs.contains($0) }
+        guard !targets.isEmpty else {
+            statusMessage = "Nothing edited in this shoot yet"
+            return
+        }
+
+        // Refuses to write into the folder the originals live in. `prepare` compares filesystem
+        // identity rather than path strings, so a symlink or a /tmp-vs-/private/tmp spelling cannot
+        // sneak past it — the same guard batch uses, for the same reason.
+        let destination = BatchApply.Destination(directory: directory, onCollision: .uniqueSuffix,
+                                                 format: exportFormat, metadata: exportMetadata)
+        do { try destination.prepare(sources: targets) }
+        catch {
+            statusMessage = "Can't export there — \(error)"
+            return
+        }
+
+        isProcessing = true
+        var written = 0, failed = 0
+        var needsReopening: [String] = []
+        let size = exportSize, space = exportColorSpace, scheme = exportNaming
+
+        for (index, url) in targets.enumerated() {
+            statusMessage = "Exporting \(index + 1) of \(targets.count)…"
+            guard let saved = EditStore.load(for: url) else { continue }
+            // A sidecar written before recipes were stored cannot be reproduced without re-running
+            // perception. Say which ones, rather than exporting something that is not what they saw.
+            guard let recipe = saved.recipe else {
+                needsReopening.append(url.lastPathComponent); continue
+            }
+            let look = saved.styleId
+            let out = ExportNaming.uniqueURL(
+                in: directory,
+                stem: ExportNaming.stem(for: url, perception: nil, look: look, scheme: scheme),
+                ext: exportFormat.fileExtension)
+
+            // Read off the actor once, before the work crosses to a detached task. Reaching back
+            // into `self` from inside it is an await per property and, worse, a value that could
+            // change between photographs mid-export.
+            let format = exportFormat, metadata = exportMetadata
+            let result: Bool = await Task.detached(priority: .userInitiated) {
+                guard let image = try? ImageDecoder.decode(url: url) else { return false }
+                let bitmaps = recipe.masks?.isEmpty == false
+                    ? LocalMasks.measure(in: image).bitmaps : [:]
+                let rendered = Renderer.render(image, with: recipe, maskBitmaps: bitmaps)
+                do {
+                    try ImageWriter.write(rendered, to: out, format: format, metadata: metadata,
+                                          size: size, colorSpace: space)
+                    return true
+                } catch { return false }
+            }.value
+            if result { written += 1 } else { failed += 1 }
+        }
+
+        isProcessing = false
+        var message = "Exported \(written) edited photo\(written == 1 ? "" : "s") to \(directory.lastPathComponent)"
+        if failed > 0 { message += " · \(failed) failed" }
+        if !needsReopening.isEmpty {
+            message += " · \(needsReopening.count) saved before this version — open each once to include it"
+        }
+        statusMessage = message
+    }
+
     /// Everything a detached export needs, boxed so it can cross the actor boundary. `CIImage` and
     /// `Recipe` are safe to read from another thread here — the box exists to say so explicitly
     /// rather than to launder a race.
@@ -3460,6 +3549,15 @@ struct ContentView: View {
                 Button(action: appState.closeCurrentPhoto) { toolbarLabel("Close", filled: false) }
                     .buttonStyle(.plain)
                     .help("Close this photo — your edit is saved")
+                // Only when there is something to export. A button that reports "nothing edited yet"
+                // is a button that exists to disappoint.
+                if appState.editedCount > 0 {
+                    Button(action: openExportEditedPanel) {
+                        toolbarLabel("Export \(appState.editedCount) edited", filled: false)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Render every photo you have edited in this shoot, each with its own edit")
+                }
                 Button(action: openBatchPanel) { toolbarLabel("Batch apply", filled: false) }
                     .buttonStyle(.plain)
                 // Press and hold to see the untouched original. DragGesture(minimumDistance:0) is
@@ -4029,6 +4127,30 @@ struct ContentView: View {
         if panel.runModal() == .OK, let url = panel.url {
             Task { await appState.exportFullResolution(to: url) }
         }
+    }
+
+    /// Where the edited photographs go.
+    ///
+    /// A save panel rather than a folder chooser, so the destination arrives PRE-NAMED and visible:
+    /// it opens on the shoot's own folder with "Edited" already typed. The principle is that nothing
+    /// is ever written somewhere the user has not seen named — but they should not have to type it
+    /// either, and the answer is the same nine times in ten.
+    ///
+    /// Writing into the shoot's own folder is refused downstream by `Destination.prepare`, which
+    /// compares filesystem identity; a subfolder is safe and the originals cannot be touched.
+    private func openExportEditedPanel() {
+        let panel = NSSavePanel()
+        panel.title = "Export edited photos"
+        panel.message = "Choose a folder for the edited copies. Your originals are never modified."
+        panel.nameFieldLabel = "Folder:"
+        panel.nameFieldStringValue = "Edited"
+        panel.canCreateDirectories = true
+        if let folder = appState.imageURL?.deletingLastPathComponent() {
+            panel.directoryURL = folder
+        }
+        panel.accessoryView = PanelAccessories.exportOptions(appState)
+        guard panel.runModal() == .OK, let target = panel.url else { return }
+        Task { await appState.exportEdited(to: target) }
     }
 
     private func openBatchPanel() {
