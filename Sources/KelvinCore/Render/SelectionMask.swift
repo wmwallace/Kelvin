@@ -6,10 +6,10 @@ import CoreImage
 /// image with `CIColorCubeWithColorSpace`, the output IS the mask — so "adjust the reds" or
 /// "adjust the highlights" become ordinary masked local edits, and the selection stays parametric
 /// (a target + range, no stored bitmap). Mirrors `HSLCube`'s cube machinery.
-enum SelectionMask {
-    static let dimension = 32
+public enum SelectionMask {
+    public static let dimension = 32
 
-    static func makeData(_ sel: MaskSelection) -> Data? {
+    public static func makeData(_ sel: MaskSelection) -> Data? {
         let n = dimension
         var cube = [Float](repeating: 0, count: n * n * n * 4)
         var i = 0

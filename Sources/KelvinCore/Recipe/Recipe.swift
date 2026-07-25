@@ -302,14 +302,20 @@ public struct Mask: Codable, Equatable, Sendable {
     /// "adjust the highlights". Parametric (a target + range), the renderer bakes it into a cube.
     public var selection: MaskSelection?
 
+    /// Optional mask tightness / edge contrast (0…100). Higher tightness sharpens the transition
+    /// boundary of soft mask edges. Neutral 0.
+    public var tightness: Double?
+
     public init(
         id: String, type: String, source: String?, invert: Bool,
         feather: Double, opacity: Double, adjustments: [String: Double],
-        shape: MaskShape? = nil, stamps: [BrushStamp]? = nil, selection: MaskSelection? = nil
+        shape: MaskShape? = nil, stamps: [BrushStamp]? = nil, selection: MaskSelection? = nil,
+        tightness: Double? = nil
     ) {
         self.id = id; self.type = type; self.source = source; self.invert = invert
         self.feather = feather; self.opacity = opacity; self.adjustments = adjustments
         self.shape = shape; self.stamps = stamps; self.selection = selection
+        self.tightness = tightness
     }
 
     public init(from decoder: Decoder) throws {
@@ -324,10 +330,11 @@ public struct Mask: Codable, Equatable, Sendable {
         shape = try c.decodeIfPresent(MaskShape.self, forKey: .shape)
         stamps = try c.decodeIfPresent([BrushStamp].self, forKey: .stamps)
         selection = try c.decodeIfPresent(MaskSelection.self, forKey: .selection)
+        tightness = try c.clampedOptionalDouble(.tightness, in: Ranges.unsigned100)
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, type, source, invert, feather, opacity, adjustments, shape, stamps, selection
+        case id, type, source, invert, feather, opacity, adjustments, shape, stamps, selection, tightness
     }
 }
 

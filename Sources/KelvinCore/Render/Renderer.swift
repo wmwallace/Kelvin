@@ -464,27 +464,57 @@ public enum Renderer {
             layer = layer.applyingFilter("CIVibrance", parameters: ["inputAmount": vib / 100.0])
         }
 
-        // Prepare the mask: invert, feather, then scale by opacity.
-        var m = mask.invert ? maskBitmap.applyingFilter("CIColorInvert") : maskBitmap
-        if mask.feather > 0 {
-            // Feather is 0…100; interpret it relative to image size so the soft edge looks the
-            // same on a 768px proxy and a full-res export.
+        // Prepare the mask: invert, feather, tightness, then scale by opacity.
+        let tightness = mask.tightness ?? 0
+        let m = prepareMask(maskBitmap, invert: mask.invert, feather: mask.feather, tightness: tightness, opacity: mask.opacity)
+
+        return layer.applyingFilter("CIBlendWithMask", parameters: [
+            "inputBackgroundImage": base,
+            "inputMaskImage": m
+        ])
+    }
+
+    /// Prepare a raw mask bitmap: apply invert, feather, tightness edge-sharpening, and opacity scaling.
+    public static func prepareMask(_ maskBitmap: CIImage, invert: Bool = false, feather: Double = 0, tightness: Double = 0, opacity: Double = 1.0) -> CIImage {
+        var m = invert ? maskBitmap.applyingFilter("CIColorInvert") : maskBitmap
+        if feather > 0 {
             let minEdge = min(maskBitmap.extent.width, maskBitmap.extent.height)
-            let radius = max(1.0, mask.feather / 100.0 * Double(minEdge) * 0.06)
+            let radius = max(1.0, feather / 100.0 * Double(minEdge) * 0.06)
             m = m.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: radius])
                  .cropped(to: maskBitmap.extent)
         }
-        if mask.opacity < 1.0 {
-            let o = mask.opacity
+        if tightness > 0 {
+            let gain = 1.0 + (tightness / 100.0) * 4.0
+            let bias = 0.5 * (1.0 - gain)
+            let v = CIVector(x: gain, y: 0, z: 0, w: 0)
+            let g = CIVector(x: 0, y: gain, z: 0, w: 0)
+            let b = CIVector(x: 0, y: 0, z: gain, w: 0)
+            let bVector = CIVector(x: bias, y: bias, z: bias, w: 0)
+            m = m.applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": v,
+                "inputGVector": g,
+                "inputBVector": b,
+                "inputBiasVector": bVector
+            ]).applyingFilter("CIColorClamp")
+        }
+        if opacity < 1.0 {
+            let o = opacity
             m = m.applyingFilter("CIColorMatrix", parameters: [
                 "inputRVector": CIVector(x: o, y: 0, z: 0, w: 0),
                 "inputGVector": CIVector(x: 0, y: o, z: 0, w: 0),
                 "inputBVector": CIVector(x: 0, y: 0, z: o, w: 0)
             ])
         }
+        return m
+    }
 
-        return layer.applyingFilter("CIBlendWithMask", parameters: [
-            "inputBackgroundImage": base,
+    /// Composite a translucent red overlay (ruby red tint) over `baseImage` representing `maskBitmap` for UI mask visualization.
+    public static func renderMaskOverlay(_ baseImage: CIImage, maskBitmap: CIImage, invert: Bool = false, feather: Double = 0, tightness: Double = 0, opacity: Double = 0.55) -> CIImage {
+        let m = prepareMask(maskBitmap, invert: invert, feather: feather, tightness: tightness, opacity: 1.0)
+        let redColor = CIColor(red: 0.95, green: 0.15, blue: 0.25, alpha: opacity)
+        let redOverlay = CIImage(color: redColor).cropped(to: baseImage.extent)
+        return redOverlay.applyingFilter("CIBlendWithMask", parameters: [
+            "inputBackgroundImage": baseImage,
             "inputMaskImage": m
         ])
     }
@@ -493,7 +523,7 @@ public enum Renderer {
     /// linear gradient. Coordinates are normalised, top-left origin; Core Image is bottom-left, so
     /// y is flipped. White marks where the mask's adjustments apply; `applyMaskedAdjustments`
     /// then handles invert/opacity.
-    static func gradientMask(_ shape: MaskShape, extent: CGRect) -> CIImage? {
+    public static func gradientMask(_ shape: MaskShape, extent: CGRect) -> CIImage? {
         guard !extent.isInfinite, extent.width > 0, extent.height > 0 else { return nil }
         let w = extent.width, h = extent.height, minEdge = min(w, h)
         let cx = extent.origin.x + shape.cx * w
