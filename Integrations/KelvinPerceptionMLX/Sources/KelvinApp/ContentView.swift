@@ -1603,6 +1603,20 @@ final class AppState: ObservableObject {
         onEdit()
     }
 
+    /// Move a mask up or down the stack.
+    ///
+    /// Order is not cosmetic: `activeMasks()` hands the renderer the array as it stands and each
+    /// mask composites over the result of the ones before it, so two overlapping masks give a
+    /// different photograph depending which is on top. The stack was therefore already meaningful
+    /// and simply not adjustable — you got creation order and nothing else.
+    func moveUserMask(_ id: UUID, by offset: Int) {
+        guard let i = userMasks.firstIndex(where: { $0.id == id }) else { return }
+        let j = i + offset
+        guard j >= 0, j < userMasks.count else { return }
+        userMasks.swapAt(i, j)
+        onEdit()
+    }
+
     func removeUserMask(_ id: UUID) {
         userMasks.removeAll { $0.id == id }
         if paintingMaskId == id { paintingMaskId = nil }
@@ -2941,7 +2955,11 @@ struct ContentView: View {
                                                  set: { appState.brushRadius = $0 }),
                             hasPerson: appState.hasPerson,
                             onAdjustBegin: { appState.isAdjustingMaskTone = true },
-                            onAdjustEnd: { appState.isAdjustingMaskTone = false })
+                            onAdjustEnd: { appState.isAdjustingMaskTone = false },
+                            canMoveUp: appState.userMasks.first?.id != m.id,
+                            canMoveDown: appState.userMasks.last?.id != m.id,
+                            onMoveUp: { appState.moveUserMask(m.id, by: -1) },
+                            onMoveDown: { appState.moveUserMask(m.id, by: 1) })
                     }
                     VStack(alignment: .leading, spacing: 6) {
                         // The "+" used to be repeated on all eight buttons. Said once over the
@@ -3524,6 +3542,10 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
     var instanceBox: CGRect?
     /// Kind at the time, for the same reason — it tie-breaks the match.
     var instanceKind: SubjectInstances.Kind?
+    /// What the photographer calls this mask. Nil falls back to the kind's name, which is how it
+    /// was: three radial masks were all called "Radial", in a list, with nothing to tell them
+    /// apart. Fine with one mask and useless with four.
+    var name: String?
 
     enum CodingKeys: String, CodingKey {
         case id, kind, cx, cy, radius, angle, softness, stamps, selCenter, selRange, selSoftness
@@ -3572,6 +3594,12 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
         case .subject: return "Subject"
         case .instance: return instanceLabel ?? "Subject"
         }
+    }
+
+    /// The name shown in the panel: what it was renamed to, or what kind it is.
+    var displayName: String {
+        let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? label : trimmed
     }
     var hasCanvasHandles: Bool { kind == .radial || kind == .linear }
 
@@ -3664,6 +3692,10 @@ struct UserMaskEditor: View {
     /// otherwise you are grading 60% red and the slider appears to do nothing useful.
     var onAdjustBegin: () -> Void = {}
     var onAdjustEnd: () -> Void = {}
+    var canMoveUp = false
+    var canMoveDown = false
+    var onMoveUp: () -> Void = {}
+    var onMoveDown: () -> Void = {}
 
     /// Skin and Background are built from the person segmentation — flag it when there isn't one,
     /// so the mask isn't just quietly inert.
@@ -3674,11 +3706,31 @@ struct UserMaskEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text(mask.label).font(Theme.ui(12, .semibold)).foregroundColor(Theme.ink)
+                TextField(mask.label, text: Binding(
+                    get: { mask.name ?? "" },
+                    set: { mask.name = $0.isEmpty ? nil : $0 }))
+                    .textFieldStyle(.plain)
+                    .font(Theme.ui(12, .semibold)).foregroundColor(Theme.ink)
+                    .onSubmit(onChange)
+                    .help("Rename this mask")
                 if isSelected && mask.kind != .brush {
                     Text("editing on canvas").font(Theme.mono(9)).foregroundColor(Theme.glow)
                 }
                 Spacer()
+                // Which mask sits on top of which. Composites in array order, so this changes the
+                // picture, not just the list.
+                Button(action: onMoveUp) {
+                    Image(systemName: "chevron.up").font(.system(size: 9, weight: .bold))
+                        .foregroundColor(canMoveUp ? Theme.inkDim : Theme.inkFaint.opacity(0.4))
+                }
+                .buttonStyle(.plain).disabled(!canMoveUp)
+                .help("Move this mask up the stack")
+                Button(action: onMoveDown) {
+                    Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
+                        .foregroundColor(canMoveDown ? Theme.inkDim : Theme.inkFaint.opacity(0.4))
+                }
+                .buttonStyle(.plain).disabled(!canMoveDown)
+                .help("Move this mask down the stack")
                 Button(action: onDelete) {
                     Image(systemName: "trash").font(.system(size: 11)).foregroundColor(Theme.inkDim)
                 }.buttonStyle(.plain)
