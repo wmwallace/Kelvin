@@ -451,12 +451,42 @@ public enum Renderer {
             // flat" flag cleared while the subject was being destroyed — and it destroys a darker
             // face far more readily than a lighter one, which is the exact bias this codebase
             // measures everything relatively to avoid.
+            // ...AND PIVOT ON THE SUBJECT, not on mid grey. The colour space fixed half of this;
+            // the other half is that `CIColorControls` expands tone about a FIXED 0.5, while a
+            // masked region sits wherever it sits. For anything that is not mid grey, "contrast"
+            // is then mostly a brightness change — away from 0.5, in whichever direction the
+            // region happens to lie. Measured through the subject mask at +100, display-referred:
+            //
+            //     face luma 0.66 (light) → 0.76   range 0.150 → 0.177   works, weakly
+            //     face luma 0.41 (mid)   → 0.36   range 0.092 → 0.087   inert
+            //     face luma 0.17 (dark)  → 0.003  range 0.037 → 0.002   destroyed, 100% clipped
+            //
+            // So the control got weaker the darker the subject and then destroyed it outright —
+            // the same complexion bias the evaluator refuses to encode, sitting in the renderer.
+            // And "add modelling to the face" is not a request to move the face's brightness at
+            // all: it is a request to spread its tones about where it already is.
+            //
+            // `CIColorControls` computes (in − 0.5)·g + 0.5 + brightness, so pivoting at L is
+            // exactly brightness = (g − 1)(0.5 − L) — the mean is preserved and the spread scales
+            // by g, for any complexion. L is metered off the masked region in the same
+            // display-referred space the pivot operates in.
+            //
+            // A mask too small to meter (`maskedMeanLuma` samples at 96×96 and wants more than a
+            // handful of lit pixels, so this is a brush dab of well under a tenth of a percent of
+            // the frame) falls back to the old fixed pivot. That is the pre-existing behaviour, and
+            // over an area that small the brightness shift it causes is not visible anyway.
+            let gain = 1.0 + (a["contrast"] ?? 0) / 100.0 * 0.6
+            var pivotShift = 0.0
+            if (a["contrast"] ?? 0) != 0 {
+                let pivot = SubjectMask.maskedMeanLuma(image: base, mask: maskBitmap) ?? 0.5
+                pivotShift = (gain - 1.0) * (0.5 - pivot)
+            }
             layer = layer
                 .applyingFilter("CILinearToSRGBToneCurve")
                 .applyingFilter("CIColorControls", parameters: [
-                    kCIInputContrastKey: 1.0 + (a["contrast"] ?? 0) / 100.0 * 0.6,
+                    kCIInputContrastKey: gain,
                     kCIInputSaturationKey: 1.0 + (a["saturation"] ?? 0) / 100.0,
-                    kCIInputBrightnessKey: 0.0
+                    kCIInputBrightnessKey: pivotShift
                 ])
                 .applyingFilter("CISRGBToneCurveToLinear")
         }

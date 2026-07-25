@@ -128,20 +128,23 @@ final class SubjectFixConvergenceTests: XCTestCase {
                       "\(issue.rawValue): the fix invented a flag the photo did not have")
     }
 
-    /// `.subjectFlat` is the one correction in this family that cannot be shown to work, and the
-    /// loop has to be honest about that rather than applying it anyway.
+    /// `.subjectFlat` now widens the face's tonal range instead of moving its brightness — for
+    /// every complexion, which is the part that was broken.
     ///
-    /// Its control is contrast inside the subject mask, and measured against the real renderer on a
-    /// flat face it does not widen the metered face range at all — 0.0917 at +0 contrast, 0.0917 at
-    /// +7, 0.0912 at +14, 0.0917 at +30, while the face's luma is dragged 0.411 → 0.397. On a dark
-    /// flat face it is worse: the range FALLS (0.0365 → 0.0259 at +30) and the subject is walked
-    /// into `.subjectTooDark` on the way. Contrast pivots at mid grey, a face rarely sits there,
-    /// and the mask is feathered — so the amount that reaches the face is neither uniform nor
-    /// pivoted where the modelling lives.
+    /// Its control is contrast inside the subject mask, and it used to be measurably useless or
+    /// worse. `CIColorControls` expands tone about a fixed 0.5, and a face rarely sits at mid grey,
+    /// so "contrast" was mostly a brightness change away from 0.5 in whichever direction the
+    /// subject happened to lie. At +100, display-referred: a light face (0.66) went to 0.76 and
+    /// gained a little range; a mid face (0.41) went to 0.36 and gained none; a dark face (0.17)
+    /// went to 0.003 with its range collapsing 0.037 → 0.002 and the whole subject clipped to
+    /// black. Weaker the darker the subject, then destructive — the same complexion bias the
+    /// evaluator is careful never to encode, sitting in the renderer instead.
     ///
-    /// Before the loop, the app applied +14 per click regardless. So: the click must now come back
-    /// having applied nothing, and say why.
-    func testSubjectFlatRefusesRatherThanApplyingAPlacebo() throws {
+    /// The renderer now pivots the expansion on the masked region's own mean, so the face's
+    /// brightness is preserved and only its spread changes. What this test pins is the property
+    /// that makes the correction honest: modelling goes UP, luma stays PUT, and nothing clips —
+    /// on a light face and on a dark one.
+    func testSubjectFlatAddsModellingWithoutMovingTheFace() throws {
         for image in [flatFace(), TestSupport.facePatch((50, 44, 40), bg: (100, 100, 100), ramp: 0.06)] {
             let measure = measurer(image)
             let before = try measure(CraftFix.SubjectState())
@@ -149,14 +152,19 @@ final class SubjectFixConvergenceTests: XCTestCase {
 
             let result = try CraftFix.convergeSubject(issue: .subjectFlat, from: .init(), measure: measure)
             let after = try measure(result.state)
+
             XCTAssertGreaterThanOrEqual(CraftFix.subjectExcess(.subjectFlat, before) ?? 0,
                                         CraftFix.subjectExcess(.subjectFlat, after) ?? 0,
-                                        "a refused fix must never leave the defect worse")
-            XCTAssertTrue([CraftFix.Outcome.noProgress, .wouldHarm, .resolved].contains(result.outcome),
-                          "a correction that cannot move its metric must say so, not apply anyway")
-            if result.outcome != .resolved {
-                XCTAssertEqual(result.passes, 0, "nothing may be applied when nothing helps")
-                XCTAssertEqual(result.state, CraftFix.SubjectState())
+                                        "the fix must never leave the defect worse")
+            if result.passes > 0 {
+                XCTAssertGreaterThan(try XCTUnwrap(after.face.skinRange),
+                                     try XCTUnwrap(before.face.skinRange),
+                                     "a pass that was accepted has to have bought modelling")
+                // The whole point of the pivot: this is a modelling control, not a dimmer. A
+                // tolerance rather than equality because the mask is feathered and the metering
+                // grid is 8-bit — but nothing like the 0.17 → 0.003 it used to manage.
+                XCTAssertEqual(try XCTUnwrap(after.face.skinLuma), try XCTUnwrap(before.face.skinLuma),
+                               accuracy: 0.03, "contrast on the subject must not move its brightness")
             }
             try assertSubjectSurvived(.subjectFlat, before: before, after: after)
         }

@@ -347,6 +347,41 @@ final class CraftFixAuditTests: XCTestCase {
     /// A subject issue is corrected on the subject mask, so it never reaches `converge`. These have
     /// no evaluator loop behind them at all — one bounded step per click — which makes it more
     /// important, not less, that each one is measured.
+    /// Contrast inside a mask is a MODELLING control, and it has to behave like one at every
+    /// complexion — spread the region's tones without moving where the region sits.
+    ///
+    /// It did not. `CIColorControls` expands about a fixed 0.5, and a face rarely sits at mid grey,
+    /// so the control was mostly a brightness change away from 0.5 in whichever direction the
+    /// subject lay — and the further from mid grey, the more brightness and the less modelling. A
+    /// dark face took it worst: at +100 it went from luma 0.17 to 0.003, fully clipped, with its
+    /// range collapsing rather than opening. Weaker the darker the subject, then destructive.
+    ///
+    /// This is the same bias `AestheticEvaluator` refuses to encode when it judges skin by hue and
+    /// saturation and never by brightness — so it must not sit in the renderer either. Three
+    /// complexions, one assertion each way: brightness held, range opened, nothing clipped.
+    func testMaskedContrastModelsTheSubjectRatherThanDimmingIt() throws {
+        let complexions: [(String, (UInt8, UInt8, UInt8))] = [
+            ("light", (190, 168, 154)), ("mid", (120, 104, 96)), ("dark", (50, 44, 40))
+        ]
+        for (name, colour) in complexions {
+            let image = facePatch(colour, bg: (180, 180, 180), ramp: 0.06)
+            let mask = Mask(id: "subject", type: "subject", source: "segmentation", invert: false,
+                            feather: 0, opacity: 1, adjustments: ["contrast": 100])
+            let before = skinReading(render(image, .neutral))
+            let after = skinReading(render(image, .neutral, masks: [mask],
+                                           bitmaps: ["subject": subjectBitmap(image)]))
+
+            XCTAssertEqual(try XCTUnwrap(after.skinLuma), try XCTUnwrap(before.skinLuma),
+                           accuracy: 0.02, "\(name): contrast moved the subject's brightness")
+            XCTAssertGreaterThan(try XCTUnwrap(after.skinRange), try XCTUnwrap(before.skinRange),
+                                 "\(name): contrast bought no modelling")
+            XCTAssertLessThanOrEqual(try XCTUnwrap(after.skinClipLow), 0.01,
+                                     "\(name): contrast crushed the subject to black")
+            XCTAssertLessThanOrEqual(try XCTUnwrap(after.skinClipHigh), 0.01,
+                                     "\(name): contrast blew the subject out")
+        }
+    }
+
     func testSubjectFixesImproveTheirMetricWithoutDestroyingTheSubject() throws {
         // (issue, subject colour, ramp) — a dark subject on a bright scene, a flat one, a blown one.
         let rows: [(AestheticEvaluator.Issue, (UInt8, UInt8, UInt8), Double)] = [
