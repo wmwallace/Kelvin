@@ -315,3 +315,37 @@ the white balance the engine applies.
 **Also found:** `kelvin-perceive` printed "Loading Qwen2.5-VL-3B-Instruct-4bit" regardless of
 `KELVIN_MODEL`, so throughout an A/B it named the model that was not running. Fixed — but it means
 any earlier comparison recorded elsewhere should be distrusted.
+
+---
+
+## D-browse-1 — One "Group by" control, not two grouping menus
+
+**Decided with the owner, July 2026. Not yet built.**
+
+Two independent passes now produce groupings of a shoot, and they are complementary rather than
+competing:
+
+- `PhotoOrder.grouped(_:by:index:)` partitions by **when and where** — day, burst (3 s gap), place
+  (250 m anchor clustering), all from one EXIF header read.
+- `PhotoTriage.groups(_:)` partitions by **what the picture looks like** — a 64-bit difference hash
+  plus a time signal, for near-duplicates.
+
+**Surfacing both as separate menus would be worse than either.** "How is the strip organised" is one
+question, and a photographer who has picked "by day" and then meets a second, orthogonal grouping
+control has to hold two partitions in their head at once to predict what they will see.
+
+So: **one control, one axis** — None / Burst / Day / Place / Similar. Near-duplicate grouping takes
+its place as a peer of the metadata groupings rather than as a second dimension.
+
+Rejected: day-or-place as an outer partition with similarity nested inside. It is strictly more
+expressive and it is a worse control, because the nesting is invisible until you have already chosen
+both halves, and the common case — "show me the near-duplicates so I can pick one" — does not want
+an outer partition at all.
+
+Constraints for whoever builds it:
+- Groups and their members arrive in final order from Core. Do not re-sort them.
+- The Place lens must be hidden or disabled when `CaptureIndex.hasAnyLocation` is false, which is
+  most folders.
+- Residue groups (`isResidue`) are always last and need their own heading — "No date", "No location".
+- Headings are the app's to format; Core does no localisation on purpose.
+- Grouping assumes the shoot arrives in capture order.
