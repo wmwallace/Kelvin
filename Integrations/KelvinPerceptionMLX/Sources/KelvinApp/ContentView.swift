@@ -1247,6 +1247,25 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Drop everything derived from the photograph being left behind.
+    ///
+    /// Not the same as `closeCurrentPhoto`, which also clears the URL and returns to the empty
+    /// state — a switch is arriving somewhere rather than leaving. `loadedURL` deliberately stays
+    /// put until the new photo actually loads, so a failed load can still be retried.
+    private func clearPerPhotoState() {
+        activeRecipe = nil; active = nil; original = nil; lastRenderedCI = nil
+        candidates = []; selectedCandidateId = nil; perception = nil
+        activeCraftIssues = []; lastCraftReading = nil; exhaustedFixes = []
+        userMasks = []; paintingMaskId = nil; selectedMask = nil
+        subjectInstances = []; highlightedInstanceId = nil
+        proxyMaskBitmaps = [:]; brushCache = [:]
+        healSpots = []; detectedSpotCount = 0; removeDust = false
+        baseMasks = []; maskEnabled = [:]; maskStrength = [:]
+        maskAdjustments = [:]; maskFeather = [:]; maskTightness = [:]; maskInvert = [:]
+        hsl = [:]; straighten = 0; activeLookId = nil
+        showingOriginal = false; showingRepairSpots = false
+    }
+
     /// Put a previously-edited photo back exactly as it was.
     private func restore(_ s: PhotoSession) {
         imageURL = s.url; imageId = s.imageId
@@ -1439,6 +1458,18 @@ final class AppState: ObservableObject {
         statusMessage = "Decoding…"
         // Keep whatever you were working on before this photo takes over.
         if loadedURL != nil, loadedURL != url { stashCurrentSession() }
+        // AND THEN LET GO OF IT. Reported as "it tries to apply settings from the old pic, and the
+        // preview stays on the previous one".
+        //
+        // Everything derived from a photograph — the recipe, the candidates, the rendered preview,
+        // the craft flags, the masks measured on its proxy — used to survive until the NEW
+        // photograph's equivalents replaced it, several seconds later. In between, the sliders held
+        // the previous frame's values, the footer showed its colour temperature, and the canvas
+        // showed its pixels, all under the new photo's name. Anything the user touched in that
+        // window applied the old frame's numbers to the new frame.
+        //
+        // Stashed first, so nothing is lost — this only clears what has just been saved.
+        if loadedURL != url { clearPerPhotoState() }
         imageURL = url
         // `includeFolderOnOpen` off means exactly this photograph and nothing else. The strip
         // disappears (it only draws above one photo), which also takes the arrow keys, culling and
@@ -3281,6 +3312,29 @@ struct ContentView: View {
                                 // arriving gets the fade.
                                 .id(appState.imageURL)
                                 .transition(.opacity)
+                        } else if appState.isProcessing {
+                            // A LOADING STATE, not a blank canvas and not the previous photograph.
+                            //
+                            // The previews are tagged with the photo they belong to, so once the
+                            // open moves on there is nothing to draw until the new frame decodes —
+                            // and an empty rectangle for a second or two reads as the app having
+                            // dropped something. Showing the OLD photo instead would be worse: it
+                            // is the wrong picture under the new one's name, which is how somebody
+                            // ends up editing a frame they are not looking at.
+                            //
+                            // So: say what is happening. The status line carries the detail
+                            // ("Loading the perception model", "Reading the scene"); this is just
+                            // the acknowledgement that the click landed.
+                            VStack(spacing: 14) {
+                                ProgressView()
+                                    .controlSize(.large)
+                                    .tint(Theme.glow)
+                                Text(appState.statusMessage)
+                                    .font(Theme.mono(11))
+                                    .foregroundColor(Theme.inkDim)
+                                    .transition(.opacity)
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                     }
                     // Photos come in from the filmstrip, a drop, or the arrow keys. A hard cut

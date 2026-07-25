@@ -6,6 +6,7 @@ import KelvinCore
 // against: MLXVLM registers the Qwen2.5-VL factory, MLXLMCommon holds ChatSession/UserInput,
 // MLXHuggingFace provides the loader macros — and those macros expand to fully-qualified
 // `HuggingFace.*` / `Tokenizers.*` references, so both must be imported here too.
+import MLX
 import MLXVLM
 import MLXLMCommon
 import MLXHuggingFace
@@ -142,6 +143,10 @@ public actor MLXPerceptionProvider: PerceptionProvider {
 
         // Fresh session per image so nothing carries over between photos.
         let session = ChatSession(container, generateParameters: parameters)
+        // The buffers this generation allocates are returned to MLX's pool afterwards, not to the
+        // system. See `boundMemory` — without a cap that pool only grows, and the symptom is not a
+        // crash but a stall.
+        defer { MLX.Memory.clearCache() }
         let raw = try await session.respond(
             to: PerceptionPrompt.instruction(),
             image: .ciImage(proxy)
@@ -153,8 +158,29 @@ public actor MLXPerceptionProvider: PerceptionProvider {
     ///
     /// Local first, download second. A `KELVIN_MODEL` naming a different repo wins over the bundled
     /// weights, because the only reason to set it is to run something other than what shipped.
+    /// Cap MLX's buffer cache, once.
+    ///
+    /// REPORTED AS "after reading a few photos it stops reading new pics — the preview stays on the
+    /// previous photo and it applies the old photo's settings". That is what a stalled `perceive`
+    /// looks like from the outside: `loadPhoto` awaits a read that never returns, so `imageURL` has
+    /// already moved to the new frame while every piece of state behind it still belongs to the old
+    /// one.
+    ///
+    /// MLX keeps the buffers it allocates in a pool rather than returning them to the system, which
+    /// is the right trade for a benchmark loop and the wrong one for an app that also holds a 1.6 GB
+    /// model, up to eight cached photo sessions and a decoded full-resolution frame. Nothing bounded
+    /// that pool, so it grew with every photograph until the machine started fighting for memory.
+    ///
+    /// 256 MB is generous for a 2B model doing one short generation at a time — MLX's own guidance
+    /// suggests 20 MB for a constrained device — and it leaves the pool doing its job between
+    /// photographs while stopping it from becoming a leak with a nicer name.
+    private static func boundMemory() {
+        MLX.Memory.cacheLimit = 256 * 1024 * 1024
+    }
+
     private func loadedContainer() async throws -> ModelContainer {
         if let container { return container }
+        Self.boundMemory()
         let configuration: ModelConfiguration
         if let directory = Self.overrideModelDirectory {
             configuration = ModelConfiguration(directory: directory)
