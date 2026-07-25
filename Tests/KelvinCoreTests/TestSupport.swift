@@ -1,5 +1,7 @@
 import Foundation
 import CoreImage
+import ImageIO
+import UniformTypeIdentifiers
 @testable import KelvinCore
 
 enum TestSupport {
@@ -133,5 +135,39 @@ enum TestSupport {
             skinRange: max(0, lumas[Int(Double(lumas.count) * 0.95)] - lumas[Int(Double(lumas.count) * 0.05)]),
             skinClipHigh: Double(lumas.filter { $0 > 0.985 }.count) / n,
             skinClipLow: Double(lumas.filter { $0 < 0.02 }.count) / n)
+    }
+
+    enum FixtureError: Error { case couldNotWriteJPEG }
+
+    /// A tiny JPEG carrying the header fields a browse-time read cares about: a capture date, a
+    /// GPS dictionary, or neither.
+    ///
+    /// Encoded with ImageIO so the readers are tested against a real file. Asserting against a
+    /// property dictionary made up in the test would only prove the reader agrees with itself,
+    /// where what matters is that it agrees with what a camera writes.
+    static func writeJPEG(to url: URL, captured: Date? = nil, gps: [CFString: Any]? = nil) throws {
+        let context = CGContext(data: nil, width: 8, height: 8, bitsPerComponent: 8,
+                                bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+        context?.setFillColor(gray: 0.5, alpha: 1)
+        context?.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+        guard let image = context?.makeImage(),
+              let destination = CGImageDestinationCreateWithURL(
+                url as CFURL, UTType.jpeg.identifier as CFString, 1, nil)
+        else { throw FixtureError.couldNotWriteJPEG }
+
+        var properties: [CFString: Any] = [:]
+        if let gps { properties[kCGImagePropertyGPSDictionary] = gps }
+        if let captured {
+            // EXIF has no time zone: the camera writes local time, and the reader parses it as
+            // local. The fixture has to be written the same way or the round trip shifts.
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+            properties[kCGImagePropertyExifDictionary] = [
+                kCGImagePropertyExifDateTimeOriginal: formatter.string(from: captured)
+            ]
+        }
+        CGImageDestinationAddImage(destination, image, properties as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { throw FixtureError.couldNotWriteJPEG }
     }
 }

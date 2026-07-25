@@ -108,14 +108,23 @@ struct SubjectHighlight: View {
     let instance: SubjectInstances.Instance
     /// The photo's frame on screen, in view coordinates.
     let imageFrame: CGRect
+    /// Maps a SOURCE-normalised point to a view point, undoing straighten and crop on the way.
+    ///
+    /// Required, not optional polish. The box comes from Vision in SOURCE space — masks are
+    /// measured before geometry — while `imageFrame` is the FRAMED image after straightening and
+    /// auto-crop. Mapping one straight onto the other means that the moment a photo is
+    /// straightened the outline is offset and mis-scaled against the very subject it is pointing
+    /// at. Every other on-canvas element already routes through this; this one did not.
+    let normToView: (Double, Double) -> CGPoint
 
     var body: some View {
         // Vision's boxes are bottom-left origin; SwiftUI is top-left.
         let box = instance.boundingBox
-        let rect = CGRect(x: imageFrame.minX + box.minX * imageFrame.width,
-                          y: imageFrame.minY + (1 - box.maxY) * imageFrame.height,
-                          width: box.width * imageFrame.width,
-                          height: box.height * imageFrame.height)
+        let topLeft = normToView(box.minX, 1 - box.maxY)
+        let bottomRight = normToView(box.maxX, 1 - box.minY)
+        let rect = CGRect(x: min(topLeft.x, bottomRight.x), y: min(topLeft.y, bottomRight.y),
+                          width: abs(bottomRight.x - topLeft.x),
+                          height: abs(bottomRight.y - topLeft.y))
         ZStack(alignment: .topLeading) {
             RoundedRectangle(cornerRadius: 4)
                 .stroke(Theme.glow, lineWidth: 1.5)

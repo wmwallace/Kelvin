@@ -6,7 +6,7 @@ import Metal
 /// Encoding a rendered `CIImage` to a file, plus a deterministic raster helper used by
 /// tests to compare pixels. Output is written in sRGB.
 public enum ImageWriter {
-    public enum Format {
+    public enum Format: Sendable {
         case jpeg(quality: Double)
         case png
 
@@ -16,6 +16,15 @@ public enum ImageWriter {
             switch url.pathExtension.lowercased() {
             case "png": return .png
             default: return .jpeg(quality: 0.97)
+            }
+        }
+
+        /// The extension this format writes. Lives here rather than at each call site because a
+        /// caller that guessed wrong would hand the user a `.png` file full of JPEG.
+        public var fileExtension: String {
+            switch self {
+            case .png: return "png"
+            case .jpeg: return "jpg"
             }
         }
     }

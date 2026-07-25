@@ -22,6 +22,7 @@ public struct CaptureInfo: Sendable, Equatable {
     public var exposureBias: Double?    // EV
     public var captured: Date?
     public var coordinate: CLLocationCoordinate2D?
+    public var altitude: Double?        // metres relative to sea level, negative below
     public var pixelWidth: Int?
     public var pixelHeight: Int?
 
@@ -32,8 +33,17 @@ public struct CaptureInfo: Sendable, Equatable {
             && a.aperture == b.aperture && a.shutterSeconds == b.shutterSeconds
             && a.iso == b.iso && a.exposureBias == b.exposureBias && a.captured == b.captured
             && a.pixelWidth == b.pixelWidth && a.pixelHeight == b.pixelHeight
+            && a.altitude == b.altitude
             && a.coordinate?.latitude == b.coordinate?.latitude
             && a.coordinate?.longitude == b.coordinate?.longitude
+    }
+
+    /// The position as the browser groups on it — see `GeoPoint`, which is `Equatable`/`Hashable`
+    /// where `CLLocationCoordinate2D` is not. `nil` whenever the frame has no fix, which is the
+    /// common case and not an error.
+    public var location: GeoPoint? {
+        guard let c = coordinate else { return nil }
+        return GeoPoint(latitude: c.latitude, longitude: c.longitude, altitude: altitude)
     }
 
     // MARK: - Display
@@ -63,6 +73,12 @@ public struct CaptureInfo: Sendable, Equatable {
         return String(format: "%.5f°%@, %.5f°%@",
                       abs(c.latitude), c.latitude >= 0 ? "N" : "S",
                       abs(c.longitude), c.longitude >= 0 ? "E" : "W")
+    }
+    /// Whole metres. Consumer GPS altitude is good to ±10–30 m at best, so decimals here would be
+    /// precision the number does not have.
+    public var altitudeText: String? {
+        guard let a = altitude else { return nil }
+        return String(format: "%.0f m", a)
     }
     /// The one-line summary a photographer scans first.
     public var summaryText: String? {
@@ -124,16 +140,52 @@ public enum CaptureInfoReader {
             info.captured = f.date(from: raw)
         }
 
-        if let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any],
-           let lat = gps[kCGImagePropertyGPSLatitude] as? Double,
-           let lon = gps[kCGImagePropertyGPSLongitude] as? Double {
-            // GPS magnitudes are unsigned; the hemisphere lives in a separate ref field.
-            let latRef = (gps[kCGImagePropertyGPSLatitudeRef] as? String) ?? "N"
-            let lonRef = (gps[kCGImagePropertyGPSLongitudeRef] as? String) ?? "E"
-            info.coordinate = CLLocationCoordinate2D(
-                latitude: latRef.uppercased() == "S" ? -lat : lat,
-                longitude: lonRef.uppercased() == "W" ? -lon : lon)
-        }
+        // GPS is read from the same property dictionary as everything else above — still a header
+        // read, still no pixels. Most frames have no GPS at all (any camera without a receiver,
+        // any file that went through an export that stripped it), so absence is the common case:
+        // it leaves the fields nil and says nothing about it.
+        readGPS(props[kCGImagePropertyGPSDictionary] as? [CFString: Any], into: &info)
         return info
+    }
+
+    private static func readGPS(_ gps: [CFString: Any]?, into info: inout CaptureInfo) {
+        guard let gps else { return }
+
+        // GPSStatus 'V' means "measurement void" — the receiver was on but had no fix, and the
+        // numbers next to it are stale or zero. 'A' means active. EXIF 2.3, tag 0x0009.
+        if let status = (gps[kCGImagePropertyGPSStatus] as? String)?.uppercased(), status == "V" {
+            return
+        }
+
+        guard let lat = gps[kCGImagePropertyGPSLatitude] as? Double,
+              let lon = gps[kCGImagePropertyGPSLongitude] as? Double
+        else { return }
+
+        // GPS magnitudes are unsigned; the hemisphere lives in a separate ref field.
+        let latRef = (gps[kCGImagePropertyGPSLatitudeRef] as? String) ?? "N"
+        let lonRef = (gps[kCGImagePropertyGPSLongitudeRef] as? String) ?? "E"
+        let point = GeoPoint(latitude: latRef.uppercased() == "S" ? -lat : lat,
+                             longitude: lonRef.uppercased() == "W" ? -lon : lon)
+
+        // Two rejections, both of them frames that claim a position they do not have.
+        //
+        // Out of range or NaN: firmware and third-party taggers do write these, and a NaN would
+        // propagate into every distance the browser computes and take the ordering with it.
+        //
+        // Exactly (0, 0): the null island. Some devices write zeros rather than omitting the tags
+        // when there is no fix, and a whole card of them would otherwise cluster into one confident
+        // fake location in the Gulf of Guinea. A genuine fix does not land on both axes at exactly
+        // 0.000000, so the false-negative risk is a photograph taken on the equator at Greenwich,
+        // in the sea.
+        guard point.isValid, !(point.latitude == 0 && point.longitude == 0) else { return }
+        info.coordinate = CLLocationCoordinate2D(latitude: point.latitude, longitude: point.longitude)
+
+        // Altitude is a magnitude plus a ref, same pattern as the coordinate: 0 = above sea level,
+        // 1 = below. Below-sea-level frames are rare but real (the Dead Sea, Death Valley), and a
+        // sign error there is silent, so the ref is honoured rather than assumed.
+        if let alt = gps[kCGImagePropertyGPSAltitude] as? Double, alt.isFinite {
+            let belowSeaLevel = (gps[kCGImagePropertyGPSAltitudeRef] as? Int) == 1
+            info.altitude = belowSeaLevel ? -abs(alt) : alt
+        }
     }
 }

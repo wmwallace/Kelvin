@@ -7,7 +7,9 @@ import CoreImage
 ///
 /// Like `Eval/`, this module is allowed I/O; the pure `Render`/`Engine` layers are not. It
 /// renders full resolution (this is the export-time path, not the interactive one) and never
-/// writes over the originals — non-destructive, always (CLAUDE.md non-negotiable #3).
+/// writes over the originals — non-destructive, always (CLAUDE.md non-negotiable #3). The rules
+/// that make that true — where output goes, what happens to a name that already exists, and the
+/// refusal to write into the source folder — live in `BatchApply.Destination`.
 public enum BatchApply {
 
     /// A single file that could not be processed. Batch never aborts on one bad frame — a
@@ -18,12 +20,72 @@ public enum BatchApply {
         public init(source: URL, message: String) { self.source = source; self.message = message }
     }
 
+    /// What happened, file by file.
+    ///
+    /// This used to be two flat lists, which meant a partial run could only be reported as
+    /// "37 succeeded, 3 failed" — the user could see that something went wrong but not *what*,
+    /// and a file that was quietly skipped looked exactly like a file that was written. A batch
+    /// that ran overnight has to be able to answer "which frames do I still need?", so the
+    /// per-file record is the stored form and the counts are derived from it.
     public struct Outcome: Sendable {
-        public var written: [URL]
-        public var failures: [Failure]
+
+        public enum Result: Sendable, Equatable {
+            /// Rendered and written to this URL.
+            case written(URL)
+            /// Not rendered: a file of that name was already in the destination and the collision
+            /// policy said to leave it alone. The existing file is named so a UI can point at it.
+            case skipped(existing: URL)
+            /// Rendered or decoded and threw. The rest of the batch continued.
+            case failed(String)
+        }
+
+        public struct Item: Sendable, Equatable {
+            public var source: URL
+            public var result: Result
+            public init(source: URL, result: Result) { self.source = source; self.result = result }
+
+            public static func written(source: URL, to output: URL) -> Item {
+                Item(source: source, result: .written(output))
+            }
+            public static func skipped(source: URL, existing: URL) -> Item {
+                Item(source: source, result: .skipped(existing: existing))
+            }
+            public static func failed(source: URL, message: String) -> Item {
+                Item(source: source, result: .failed(message))
+            }
+        }
+
+        /// One entry per input, in the order the batch processed them.
+        public var items: [Item]
+
+        public init(items: [Item]) { self.items = items }
+
+        /// Compatibility shim for callers that assemble an outcome from their own render loop
+        /// (the app's adaptive batch re-perceives every frame, so it cannot use `run` directly).
+        /// It cannot recover which source produced which output, so written items carry the
+        /// output URL as their source; prefer building `items` directly.
+        public init(written: [URL], failures: [Failure]) {
+            self.items = written.map { Item(source: $0, result: .written($0)) }
+                + failures.map { Item(source: $0.source, result: .failed($0.message)) }
+        }
+
+        public var written: [URL] {
+            items.compactMap { if case .written(let url) = $0.result { return url } else { return nil } }
+        }
+        public var skipped: [URL] {
+            items.compactMap { if case .skipped = $0.result { return $0.source } else { return nil } }
+        }
+        public var failures: [Failure] {
+            items.compactMap {
+                if case .failed(let message) = $0.result {
+                    return Failure(source: $0.source, message: message)
+                } else { return nil }
+            }
+        }
+
         public var succeeded: Int { written.count }
         public var failed: Int { failures.count }
-        public init(written: [URL], failures: [Failure]) { self.written = written; self.failures = failures }
+        public var skippedCount: Int { skipped.count }
     }
 
     /// Extensions we attempt to decode. Core Image handles the RAW and HEIF cases; anything
@@ -46,45 +108,57 @@ public enum BatchApply {
             .sorted { $0.path < $1.path }
     }
 
-    /// Render `recipe` over every URL in `inputs`, writing results into `outputDir` under the
-    /// same basename. Processes in stable order, continues past failures and collects them.
-    /// Output format defaults to PNG (lossless propagation regardless of source type).
+    /// Render `recipe` over every URL in `inputs`, writing edited copies into `destination`.
+    /// Processes in stable order, continues past failures and collects them.
+    ///
+    /// `look` labels the output filenames; it defaults to the recipe's own label, which is what
+    /// the user picked ("Natural", "Warm portrait") and therefore the one word that distinguishes
+    /// two batches of the same shoot.
     @discardableResult
     public static func run(
         inputs: [URL],
         recipe: Recipe,
-        outputDir: URL,
-        format: ImageWriter.Format = .png
+        destination: Destination,
+        look: String? = nil
     ) throws -> Outcome {
-        try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
+        let ordered = inputs.sorted { $0.path < $1.path }
+        // Throws before any pixel is written: a destination that could clobber originals is a
+        // refusal, not a per-file failure.
+        try destination.prepare(sources: ordered)
 
-        let ext: String
-        switch format {
-        case .png: ext = "png"
-        case .jpeg: ext = "jpg"
-        }
+        // Belt and braces behind the destination guard. `prepare` compares folders, and a folder
+        // comparison is only as good as what the filesystem will tell us about paths; this
+        // compares the actual bytes-about-to-be-written path against the actual inputs. It should
+        // be unreachable, and it is the last thing standing between a bug here and a lost original.
+        let inputPaths = Set(ordered.map { $0.resolvingSymlinksInPath().standardizedFileURL.path })
 
-        var written: [URL] = []
-        var failures: [Failure] = []
-        for url in inputs.sorted(by: { $0.path < $1.path }) {
-            do {
-                let image = try ImageDecoder.decode(url: url)
-                // Re-segment subject + sky per photo so the recipe's local masks land on *this*
-                // frame's subject and sky, not the reference frame's — the masks adapt even when
-                // the recipe parameters are propagated verbatim.
-                let bitmaps = recipe.masks?.isEmpty == false
-                    ? LocalMasks.measure(in: image).bitmaps : [:]
-                let rendered = Renderer.render(image, with: recipe, maskBitmaps: bitmaps)
-                let out = outputDir
-                    .appendingPathComponent(url.deletingPathExtension().lastPathComponent)
-                    .appendingPathExtension(ext)
-                try ImageWriter.write(rendered, to: out, format: format)
-                written.append(out)
-            } catch {
-                failures.append(Failure(source: url, message: "\(error)"))
+        var items: [Outcome.Item] = []
+        for url in ordered {
+            switch destination.plan(for: url, look: look ?? recipe.label) {
+            case .skip(let existing):
+                items.append(.skipped(source: url, existing: existing))
+            case .write(let out):
+                guard !inputPaths.contains(out.resolvingSymlinksInPath().standardizedFileURL.path) else {
+                    items.append(.failed(source: url,
+                                         message: "refusing to write over a source file at \(out.path)"))
+                    continue
+                }
+                do {
+                    let image = try ImageDecoder.decode(url: url)
+                    // Re-segment subject + sky per photo so the recipe's local masks land on *this*
+                    // frame's subject and sky, not the reference frame's — the masks adapt even when
+                    // the recipe parameters are propagated verbatim.
+                    let bitmaps = recipe.masks?.isEmpty == false
+                        ? LocalMasks.measure(in: image).bitmaps : [:]
+                    let rendered = Renderer.render(image, with: recipe, maskBitmaps: bitmaps)
+                    try ImageWriter.write(rendered, to: out, format: destination.format)
+                    items.append(.written(source: url, to: out))
+                } catch {
+                    items.append(.failed(source: url, message: "\(error)"))
+                }
             }
         }
-        return Outcome(written: written, failures: failures)
+        return Outcome(items: items)
     }
 
     /// Convenience: apply a recipe to every image directly inside `inputDir`.
@@ -92,10 +166,36 @@ public enum BatchApply {
     public static func run(
         inputDir: URL,
         recipe: Recipe,
-        outputDir: URL,
-        format: ImageWriter.Format = .png
+        destination: Destination,
+        look: String? = nil
     ) throws -> Outcome {
         try run(inputs: try imageFiles(in: inputDir), recipe: recipe,
-                outputDir: outputDir, format: format)
+                destination: destination, look: look)
+    }
+
+    /// Convenience for callers that only have a folder and a format. Output format defaults to
+    /// PNG (lossless propagation regardless of source type) and collisions get a unique suffix.
+    @discardableResult
+    public static func run(
+        inputs: [URL],
+        recipe: Recipe,
+        outputDir: URL,
+        format: ImageWriter.Format = .png,
+        onCollision: Destination.OnCollision = .uniqueSuffix
+    ) throws -> Outcome {
+        try run(inputs: inputs, recipe: recipe,
+                destination: Destination(directory: outputDir, onCollision: onCollision, format: format))
+    }
+
+    @discardableResult
+    public static func run(
+        inputDir: URL,
+        recipe: Recipe,
+        outputDir: URL,
+        format: ImageWriter.Format = .png,
+        onCollision: Destination.OnCollision = .uniqueSuffix
+    ) throws -> Outcome {
+        try run(inputs: try imageFiles(in: inputDir), recipe: recipe,
+                outputDir: outputDir, format: format, onCollision: onCollision)
     }
 }

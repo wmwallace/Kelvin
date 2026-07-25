@@ -63,6 +63,23 @@ let package = Package(
             ]
             // Icon comes from the packaged .app's .icns (CFBundleIconFile) — no runtime
             // Bundle.module lookup, which fatal-errors inside a hand-assembled bundle.
+        ),
+        // The app layer's logic, tested. It had no test target at all, and a whole class of bug
+        // shipped straight through the gap: two mask editors offering different adjustment lists,
+        // `toMask()` dropping adjustments the renderer honours, sidecar fields silently not
+        // persisted. All of those are pure value-level rules with no window in sight.
+        //
+        // Depending on an EXECUTABLE target is deliberate and it does work: SwiftPM links the test
+        // bundle against the executable's objects and hides `_main`, so `@testable import KelvinApp`
+        // reaches the whole app module without KelvinApp having to be split into a library first.
+        // Views are out of scope here — nothing in this target renders SwiftUI.
+        .testTarget(
+            name: "KelvinAppTests",
+            dependencies: [
+                "KelvinApp",
+                "KelvinPerceptionMLX",
+                .product(name: "KelvinCore", package: "Kelvin")
+            ]
         )
     ]
 )

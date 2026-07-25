@@ -198,6 +198,11 @@ final class AppState: ObservableObject {
     /// so the photograph is visible underneath. Set by the editors, not by the renderer.
     @Published var isAdjustingMaskTone: Bool = false
 
+    /// Whether the overlay is actually drawing anything — the toggle being on is not enough, since
+    /// with nothing selected there is no mask to draw. The pill and the `O` key report this rather
+    /// than the raw flag, so the control cannot claim to be doing something invisible.
+    var isOverlayShowing: Bool { showMaskOverlay && selectedMask != nil }
+
     /// Presentation for every adjustment in `Mask.adjustmentKeys` — the renderer's contract, which
     /// lives in Core and is tested there. This list supplies only the label, range and unit; it
     /// must not decide WHICH adjustments exist, because that is exactly how the two mask editors
@@ -1479,9 +1484,11 @@ final class AppState: ObservableObject {
         var g = editBaseline
         if let id, let look = LookPreset.named(id) {
             look.apply(to: &g)
-            hsl = look.hsl ?? [:]
-        } else {
-            hsl = [:]
+            // ONLY when the look actually carries one. `hsl = look.hsl ?? [:]` wiped hand-tuned
+            // per-band colour on every look tap — and most looks carry no `hsl` at all, so
+            // choosing any of them silently discarded work in a panel the user was not looking at.
+            // Clearing the look does the same. Undoable, but nothing said it had happened.
+            if let lookHSL = look.hsl { hsl = lookHSL }
         }
         edit = g
         onEdit()
@@ -1494,10 +1501,23 @@ final class AppState: ObservableObject {
 
     /// Level the horizon automatically (Vision). No-op if no clear horizon is found.
     func autoStraighten() {
-        guard let proxy = proxyCI, let deg = HorizonDetector.levelingAngle(in: proxy) else { return }
-        straighten = min(15, max(-15, deg))
-        onEdit()
+        // Vision, off the actor. `HorizonDetector` performs a `VNDetectHorizonRequest`, and this
+        // ran it synchronously on `@MainActor` — the same class of freeze as export and batch, just
+        // shorter, so it read as the button being slow rather than as the window being blocked.
+        guard let proxy = proxyCI else { return }
+        let input = ImageBox(image: proxy)
+        Task { [weak self] in
+            let deg = await Task.detached(priority: .userInitiated) {
+                HorizonDetector.levelingAngle(in: input.image)
+            }.value
+            guard let self, let deg else { return }
+            self.straighten = min(15, max(-15, deg))
+            self.onEdit()
+        }
     }
+
+    /// A `CIImage` on its way to a detached task. Boxed to say the crossing is deliberate.
+    private struct ImageBox: @unchecked Sendable { let image: CIImage }
 
     // MARK: Undo / redo (coalesced edit history)
 
@@ -1652,11 +1672,17 @@ final class AppState: ObservableObject {
         let distPx = ((p.x - c.x) * (p.x - c.x) + (p.y - c.y) * (p.y - c.y)).squareRoot()
         // The drag is measured against the FRAMED image on screen, but `radius` is a fraction of
         // the SOURCE image's short edge (masks live in source space) — rescale when cropped.
-        let framed = framedExtent, source = proxyCI?.extent ?? framed
         let frac = distPx / min(rect.width, rect.height)
-        let scale = min(source.width, source.height) > 0
-            ? min(framed.width, framed.height) / min(source.width, source.height) : 1
-        withMask(id) { $0.radius = min(1.2, max(0.05, Double(frac) * Double(scale))) }
+        withMask(id) { $0.radius = min(1.2, max(0.05, Double(frac) * framedToSourceScale)) }
+    }
+
+    /// How much smaller the framed (post-straighten, post-crop) image is than the source, on its
+    /// short edge. One definition, because the resize and the drawing must agree: they did not,
+    /// and the circle disagreed with the effect by about 23% at 15° of straighten.
+    var framedToSourceScale: Double {
+        let framed = framedExtent, source = proxyCI?.extent ?? framed
+        guard min(source.width, source.height) > 0 else { return 1 }
+        return Double(min(framed.width, framed.height) / min(source.width, source.height))
     }
     /// Rotate a linear mask so its gradient direction points at the dragged handle.
     func rotateLinear(_ id: UUID, handleAt p: CGPoint, in rect: CGRect) {
@@ -2647,7 +2673,9 @@ struct ContentView: View {
     private func subjectHighlightOverlay(in container: CGSize) -> some View {
         if !appState.showingOriginal, let id = appState.highlightedInstanceId,
            let instance = appState.subjectInstances.first(where: { $0.id == id }) {
-            SubjectHighlight(instance: instance, imageFrame: appState.imageRect(in: container))
+            let rect = appState.imageRect(in: container)
+            SubjectHighlight(instance: instance, imageFrame: rect,
+                             normToView: { appState.normToView($0, $1, in: rect) })
         }
     }
 
@@ -2661,7 +2689,13 @@ struct ContentView: View {
             let center = appState.normToView(m.cx, m.cy, in: rect)
             switch m.kind {
             case .radial:
-                let rPx = m.radius * min(rect.width, rect.height)
+                // Divided by the same framed/source scale `resizeRadial` MULTIPLIES by. `radius`
+                // is a fraction of the SOURCE short edge (masks live in source space, before
+                // geometry), while `rect` is the FRAMED image on screen — so on a straightened
+                // photo, where the auto-crop shrinks the frame, drawing without the divide made
+                // the dashed circle jump smaller the instant you dragged the size handle, and stop
+                // marking where the effect actually lands.
+                let rPx = m.radius * min(rect.width, rect.height) / appState.framedToSourceScale
                 Circle().stroke(Theme.glow.opacity(0.9), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
                     .frame(width: rPx * 2, height: rPx * 2).position(center).allowsHitTesting(false)
                 handle(at: center) { appState.moveMask(mid, to: appState.viewToNorm($0, in: rect).0,
@@ -2689,7 +2723,8 @@ struct ContentView: View {
                 // subject: the sliders below say "Exposure", and on a frame with three people
                 // there is otherwise nothing on screen saying whose.
                 if let instance = appState.subjectInstances.first(where: { $0.id == m.instanceId }) {
-                    SubjectHighlight(instance: instance, imageFrame: rect)
+                    SubjectHighlight(instance: instance, imageFrame: rect,
+                                     normToView: { appState.normToView($0, $1, in: rect) })
                 }
             case .brush, .colorRange, .luminance, .skin, .background, .subject:
                 EmptyView()
@@ -2719,13 +2754,13 @@ struct ContentView: View {
                             Image(systemName: appState.showMaskOverlay ? "eye.fill" : "eye")
                                 .font(.system(size: 10))
                             Text("Overlay")
-                                .font(Theme.ui(10, appState.showMaskOverlay ? .semibold : .regular))
+                                .font(Theme.ui(10, appState.isOverlayShowing ? .semibold : .regular))
                         }
-                        .foregroundColor(appState.showMaskOverlay ? Theme.glow : Theme.inkDim)
+                        .foregroundColor(appState.isOverlayShowing ? Theme.glow : Theme.inkDim)
                         .padding(.horizontal, 7).padding(.vertical, 3)
                         .background(
-                            Capsule().fill(appState.showMaskOverlay ? Theme.glow.opacity(0.15) : Theme.surface2)
-                                .overlay(Capsule().stroke(appState.showMaskOverlay ? Theme.glow.opacity(0.6) : Theme.hairline, lineWidth: 1))
+                            Capsule().fill(appState.isOverlayShowing ? Theme.glow.opacity(0.15) : Theme.surface2)
+                                .overlay(Capsule().stroke(appState.isOverlayShowing ? Theme.glow.opacity(0.6) : Theme.hairline, lineWidth: 1))
                         )
                     }
                     .buttonStyle(.plain)
@@ -3065,7 +3100,7 @@ struct ContentView: View {
                 // what gets touched on essentially every photograph.
                 CollapsibleSection("Light", icon: "sun.max", defaultOpen: true) {
                 VStack(spacing: 14) {
-                    ToneSlider(label: "Temp", value: appState.temperatureBinding, range: 2500...9500, step: 10, unit: " K", onChange: ch, identity: .temperature)
+                    ToneSlider(label: "Temp", value: appState.temperatureBinding, range: 2500...9500, step: 10, unit: " K", onChange: ch, identity: .temperature, neutral: 6500)
                     ToneSlider(label: "Tint", value: $appState.edit.tint, range: -100...100, step: 1, unit: "", onChange: ch, identity: .tint)
                     Divider().overlay(Theme.hairline).padding(.vertical, 2)
                     ToneSlider(label: "Exposure", value: $appState.edit.exposureEV, range: -5...5, step: 0.05, unit: " EV", onChange: ch, identity: .exposure)
@@ -3481,9 +3516,21 @@ struct HistogramView: View {
             .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.hairline, lineWidth: 1)))
     }
 
-    /// 64-bin luma histogram sampled from the rendered proxy. Cheap (100×100 sample).
+    /// 64-bin luma histogram sampled from the rendered proxy.
+    ///
+    /// The comment here used to say "Cheap (100×100 sample)" and it was not: `rgba8Sampled`
+    /// rasterises the image at its FULL extent and only then downsamples, so asking for 100×100
+    /// rendered all 1200 px of the proxy first. That happened inside a `Canvas` draw closure — the
+    /// main thread — on every render, which means on every tick of every slider drag.
+    ///
+    /// Scaling the CIImage down BEFORE the raster makes the claim true. Done here rather than in
+    /// `rgba8Sampled` because a dozen measurement paths depend on that function's exact resampling,
+    /// and this is a histogram: a few bins of difference are invisible, whereas silently moving
+    /// `FaceSkin` or `SubjectMask` numbers is how a calibrated threshold stops meaning what it did.
     static func luma(_ image: CIImage?) -> [Double]? {
-        guard let image, let data = try? ImageWriter.rgba8Sampled(image, width: 100, height: 100) else { return nil }
+        guard let image else { return nil }
+        let small = PerceptionProxy.downsample(image, maxEdge: 100)
+        guard let data = try? ImageWriter.rgba8Sampled(small, width: 100, height: 100) else { return nil }
         var bins = [Double](repeating: 0, count: 64)
         data.withUnsafeBytes { rp in
             let px = rp.bindMemory(to: UInt8.self)
@@ -3692,6 +3739,9 @@ struct ToneSlider: View {
     /// Called with true when a drag starts and false when it ends. Used to hide the mask overlay
     /// for the duration, so the photograph is visible while it is being judged.
     var onDragging: (Bool) -> Void = { _ in }
+    /// Where double-click sends this control. Defaults to zero for the signed ±100 scales, and is
+    /// given explicitly by the ones whose neutral is elsewhere.
+    var neutral: Double = 0
     @State private var resetTick = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -3701,8 +3751,8 @@ struct ToneSlider: View {
                 Text(label).font(Theme.ui(12)).foregroundColor(Theme.inkDim)
                 Spacer()
                 Text(readout)
-                    .font(Theme.mono(11, value == 0 ? .regular : .semibold))
-                    .foregroundColor(value == 0 ? Theme.inkFaint : Theme.glow)
+                    .font(Theme.mono(11, value == neutral ? .regular : .semibold))
+                    .foregroundColor(value == neutral ? Theme.inkFaint : Theme.glow)
                     .animation(Motion.gated(Motion.quick, reduceMotion), value: resetTick)
             }
             VStack(spacing: 3) {
@@ -3726,7 +3776,14 @@ struct ToneSlider: View {
         // Double-click the row to reset this control to its neutral value.
         .contentShape(Rectangle())
         .onTapGesture(count: 2) {
-            if range.contains(0) { value = 0; onChange(); resetTick += 1 }
+            // Reset to this control's OWN neutral, not to literal zero. Guarding on
+            // `range.contains(0)` made the gesture silently dead on every slider whose scale does
+            // not straddle zero — Temp (2500…9500), radial Size, Brush size, Skin tolerance and
+            // the three 0.01…0.5 Range sliders. Seven controls where double-click did nothing and
+            // nothing said why.
+            value = neutral
+            onChange()
+            resetTick += 1
         }
     }
 
@@ -4081,11 +4138,11 @@ struct UserMaskEditor: View {
                                 .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.hairline, lineWidth: 1)))
                     }.buttonStyle(.plain)
                 }
-                ToneSlider(label: "Brush size", value: brushRadius, range: 0.02...0.35, step: 0.01, unit: "", onChange: {})
+                ToneSlider(label: "Brush size", value: brushRadius, range: 0.02...0.35, step: 0.01, unit: "", onChange: {}, neutral: 0.09)
             case .radial:
                 ToneSlider(label: "Center X", value: $mask.cx, range: 0...1, step: 0.01, unit: "", onChange: onChange)
                 ToneSlider(label: "Center Y", value: $mask.cy, range: 0...1, step: 0.01, unit: "", onChange: onChange)
-                ToneSlider(label: "Size", value: $mask.radius, range: 0.05...1.2, step: 0.01, unit: "", onChange: onChange)
+                ToneSlider(label: "Size", value: $mask.radius, range: 0.05...1.2, step: 0.01, unit: "", onChange: onChange, neutral: 0.35)
                 ToneSlider(label: "Softness", value: $mask.softness, range: 0...1, step: 0.01, unit: "", onChange: onChange)
             case .linear:
                 ToneSlider(label: "Center X", value: $mask.cx, range: 0...1, step: 0.01, unit: "", onChange: onChange)
@@ -4095,16 +4152,16 @@ struct UserMaskEditor: View {
             case .colorRange:
                 // Hue picker (0…1 → the colour wheel) + how wide a band + edge softness.
                 ToneSlider(label: "Hue", value: $mask.selCenter, range: 0...1, step: 0.005, unit: "", onChange: onChange, identity: .spectrum)
-                ToneSlider(label: "Range", value: $mask.selRange, range: 0.01...0.5, step: 0.005, unit: "", onChange: onChange)
+                ToneSlider(label: "Range", value: $mask.selRange, range: 0.01...0.5, step: 0.005, unit: "", onChange: onChange, neutral: 0.1)
                 ToneSlider(label: "Softness", value: $mask.selSoftness, range: 0...0.3, step: 0.005, unit: "", onChange: onChange)
             case .luminance:
                 ToneSlider(label: "Brightness", value: $mask.selCenter, range: 0...1, step: 0.01, unit: "", onChange: onChange, identity: .exposure)
-                ToneSlider(label: "Range", value: $mask.selRange, range: 0.01...0.5, step: 0.005, unit: "", onChange: onChange)
+                ToneSlider(label: "Range", value: $mask.selRange, range: 0.01...0.5, step: 0.005, unit: "", onChange: onChange, neutral: 0.1)
                 ToneSlider(label: "Softness", value: $mask.selSoftness, range: 0...0.3, step: 0.005, unit: "", onChange: onChange)
             case .skin:
                 Text("Skin tones within the detected person, fair across complexions.")
                     .font(Theme.mono(9)).foregroundColor(Theme.inkDim).fixedSize(horizontal: false, vertical: true)
-                ToneSlider(label: "Tolerance", value: $mask.selRange, range: 0.02...0.18, step: 0.005, unit: "", onChange: onChange)
+                ToneSlider(label: "Tolerance", value: $mask.selRange, range: 0.02...0.18, step: 0.005, unit: "", onChange: onChange, neutral: 0.06)
             case .background:
                 Text("Everything except the detected subject — darken or blur it to make the subject pop.")
                     .font(Theme.mono(9)).foregroundColor(Theme.inkDim).fixedSize(horizontal: false, vertical: true)
@@ -4148,7 +4205,7 @@ struct UserMaskEditor: View {
                            onChange: onChange,
                            identity: mask.refinement == .colour ? .spectrum : .exposure)
                 ToneSlider(label: "Range", value: $mask.refineRange, range: 0.01...0.5,
-                           step: 0.005, unit: "", onChange: onChange)
+                           step: 0.005, unit: "", onChange: onChange, neutral: 0.12)
                 ToneSlider(label: "Softness", value: $mask.refineSoftness, range: 0...0.3,
                            step: 0.005, unit: "", onChange: onChange)
             }
@@ -4239,7 +4296,10 @@ struct MaskControl: View {
                     Spacer()
                     Text("\(Int(strength))%").font(Theme.mono(10)).foregroundColor(Theme.glow)
                 }
-                Slider(value: $strength, in: 0...100, step: 1) { editing in if !editing { onChange() } }
+                // Live, like every `ToneSlider`. Commit-on-release here alone made the one control
+                // in the panel that does not preview read as a control that does not work.
+                Slider(value: $strength, in: 0...100, step: 1)
+                    .onChange(of: strength) { _ in onChange() }
                     .tint(Theme.glow).controlSize(.small)
 
                 if let adjustment {

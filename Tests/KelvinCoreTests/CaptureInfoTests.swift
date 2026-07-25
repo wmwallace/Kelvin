@@ -1,5 +1,6 @@
 import XCTest
 import CoreLocation
+import ImageIO
 @testable import KelvinCore
 
 final class CaptureInfoTests: XCTestCase {
@@ -49,5 +50,127 @@ final class CaptureInfoTests: XCTestCase {
         let info = CaptureInfoReader.read(url: URL(fileURLWithPath: "/nope/missing.jpg"))
         XCTAssertNil(info.camera)
         XCTAssertNil(info.summaryText)
+    }
+
+    // MARK: - GPS, read off a real file
+    //
+    // These go through ImageIO both ways: the test writes a JPEG with a GPS dictionary and the
+    // reader reads it back. Asserting against a hand-made dictionary would only prove the reader
+    // agrees with itself; what matters is that it agrees with what a camera actually writes, and
+    // the closest thing to that available in a unit test is a real encoded file.
+
+    /// Writes an 8×8 JPEG carrying `gps` (or none at all). Returns the file's URL.
+    private func writeJPEG(gps: [CFString: Any]?, in dir: URL, named name: String) throws -> URL {
+        let url = dir.appendingPathComponent(name)
+        try TestSupport.writeJPEG(to: url, gps: gps)
+        return url
+    }
+
+    private func tempDir() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kelvin-gps-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        return dir
+    }
+
+    /// EXIF stores the magnitude unsigned and the hemisphere separately. A southern, western
+    /// position is the case that catches a reader which forgot the ref tags — it would come back
+    /// mirrored into the northern hemisphere and land in the wrong ocean.
+    func testGPSReadsHemispheresAndAltitude() throws {
+        let dir = try tempDir()
+        let url = try writeJPEG(gps: [
+            kCGImagePropertyGPSLatitude: 33.8688, kCGImagePropertyGPSLatitudeRef: "S",
+            kCGImagePropertyGPSLongitude: 70.6693, kCGImagePropertyGPSLongitudeRef: "W",
+            kCGImagePropertyGPSAltitude: 570.0, kCGImagePropertyGPSAltitudeRef: 0
+        ], in: dir, named: "santiago.jpg")
+
+        let info = CaptureInfoReader.read(url: url)
+        let location = try XCTUnwrap(info.location)
+        XCTAssertEqual(location.latitude, -33.8688, accuracy: 1e-4)
+        XCTAssertEqual(location.longitude, -70.6693, accuracy: 1e-4)
+        XCTAssertEqual(try XCTUnwrap(location.altitude), 570, accuracy: 1)
+    }
+
+    /// Below sea level is rare and real — the Dead Sea, Death Valley. The sign lives in
+    /// `GPSAltitudeRef`, so getting it wrong is silent: the number still looks plausible.
+    func testAltitudeBelowSeaLevelIsNegative() throws {
+        let dir = try tempDir()
+        let url = try writeJPEG(gps: [
+            kCGImagePropertyGPSLatitude: 31.5, kCGImagePropertyGPSLatitudeRef: "N",
+            kCGImagePropertyGPSLongitude: 35.5, kCGImagePropertyGPSLongitudeRef: "E",
+            kCGImagePropertyGPSAltitude: 430.0, kCGImagePropertyGPSAltitudeRef: 1
+        ], in: dir, named: "dead-sea.jpg")
+
+        XCTAssertEqual(try XCTUnwrap(CaptureInfoReader.read(url: url).altitude), -430, accuracy: 1)
+    }
+
+    /// The common case. Most frames have no GPS — any body without a receiver, any export that
+    /// stripped it — and that must cost nothing and say nothing, not raise an error.
+    func testNoGPSIsSimplyAbsent() throws {
+        let dir = try tempDir()
+        let url = try writeJPEG(gps: nil, in: dir, named: "plain.jpg")
+
+        let info = CaptureInfoReader.read(url: url)
+        XCTAssertNil(info.location)
+        XCTAssertNil(info.coordinate)
+        XCTAssertNil(info.altitude)
+        XCTAssertNil(info.locationText)
+        XCTAssertNil(info.mapURL, "no fix means no map link, rather than a link to nowhere")
+    }
+
+    /// A position without altitude is normal — plenty of receivers record one and not the other.
+    /// The frame is still placed.
+    func testPositionWithoutAltitudeStillPlacesTheFrame() throws {
+        let dir = try tempDir()
+        let url = try writeJPEG(gps: [
+            kCGImagePropertyGPSLatitude: 51.5074, kCGImagePropertyGPSLatitudeRef: "N",
+            kCGImagePropertyGPSLongitude: 0.1278, kCGImagePropertyGPSLongitudeRef: "W"
+        ], in: dir, named: "london.jpg")
+
+        let info = CaptureInfoReader.read(url: url)
+        XCTAssertNotNil(info.location)
+        XCTAssertNil(info.altitude)
+    }
+
+    /// `GPSStatus` of "V" is the receiver saying the measurement is void — it was switched on but
+    /// never got a fix, and the coordinates beside it are stale. Trusting them puts the whole
+    /// shoot at wherever the camera last saw satellites.
+    func testVoidGPSStatusIsNotAFix() throws {
+        let dir = try tempDir()
+        let url = try writeJPEG(gps: [
+            kCGImagePropertyGPSStatus: "V",
+            kCGImagePropertyGPSLatitude: 48.8566, kCGImagePropertyGPSLatitudeRef: "N",
+            kCGImagePropertyGPSLongitude: 2.3522, kCGImagePropertyGPSLongitudeRef: "E"
+        ], in: dir, named: "void.jpg")
+
+        XCTAssertNil(CaptureInfoReader.read(url: url).location)
+    }
+
+    /// Exactly (0, 0) is a device writing zeros instead of omitting the tags. Taken at face value
+    /// a card full of them becomes one confident group in the Gulf of Guinea.
+    func testNullIslandIsTreatedAsNoFix() throws {
+        let dir = try tempDir()
+        let url = try writeJPEG(gps: [
+            kCGImagePropertyGPSLatitude: 0.0, kCGImagePropertyGPSLatitudeRef: "N",
+            kCGImagePropertyGPSLongitude: 0.0, kCGImagePropertyGPSLongitudeRef: "E"
+        ], in: dir, named: "null-island.jpg")
+
+        XCTAssertNil(CaptureInfoReader.read(url: url).location)
+    }
+
+    /// A real position *on* the equator, half a degree east of the null island, is data — only the
+    /// exact-zero pair is rejected. Guards the rejection above from growing into "drop anything
+    /// near zero", which would throw away frames from Kenya, Ecuador and Indonesia.
+    func testAGenuineEquatorialFixIsKept() throws {
+        let dir = try tempDir()
+        let url = try writeJPEG(gps: [
+            kCGImagePropertyGPSLatitude: 0.0, kCGImagePropertyGPSLatitudeRef: "N",
+            kCGImagePropertyGPSLongitude: 36.8219, kCGImagePropertyGPSLongitudeRef: "E"
+        ], in: dir, named: "equator.jpg")
+
+        let location = try XCTUnwrap(CaptureInfoReader.read(url: url).location)
+        XCTAssertEqual(location.latitude, 0, accuracy: 1e-6)
+        XCTAssertEqual(location.longitude, 36.8219, accuracy: 1e-4)
     }
 }

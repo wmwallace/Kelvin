@@ -25,6 +25,7 @@ func printUsage() {
       \(tool) engine --in <image> --perception <perception.json> --out <recipe.json>
       \(tool) candidates --in <image> --perception <perception.json> --out-dir <dir>
       \(tool) batch --in-dir <dir> --recipe <recipe.json> --out-dir <dir> [--format png|jpg]
+                    [--on-collision unique|skip|overwrite]
       \(tool) corpus-init --root <dir> --references <a,b,c> [--source <dir>] [--perception <dir>]
       \(tool) corpus-degrade --in-dir <good-photos> --out-dir <corpus>
       \(tool) eval --corpus <dir> [--out <report.json>] [--engine-version <v>]
@@ -45,10 +46,14 @@ func printUsage() {
       --out-dir     Directory to write one <style>.json per candidate. Required.
 
     batch options:
-      --in-dir      Directory of source images to propagate the recipe across. Required.
-      --recipe      Path to a recipe JSON sidecar. Required.
-      --out-dir     Directory to write rendered outputs (originals untouched). Required.
-      --format      png (default) or jpg.
+      --in-dir       Directory of source images to propagate the recipe across. Required.
+      --recipe       Path to a recipe JSON sidecar. Required.
+      --out-dir      Directory to write edited copies. Created if missing. Must not be --in-dir;
+                     the originals are never written to. Required.
+      --format       png (default) or jpg.
+      --on-collision What to do when an output name already exists in --out-dir:
+                     unique (default, writes name-2), skip (keep what's there),
+                     overwrite (replace it — destroys the previous export).
 
     corpus-init options:
       --root        Dataset root containing the source and expert folders. Required.
@@ -213,17 +218,40 @@ case "batch":
     case let other?: fail("unknown --format '\(other)' (use png or jpg)")
     }
 
+    // Default: never clobber. `overwrite` has to be typed out, because a batch that silently
+    // replaces a previous export is how a photographer loses a morning's work.
+    let onCollision: BatchApply.Destination.OnCollision
+    switch value(for: "--on-collision", in: rest)?.lowercased() {
+    case "unique", "unique-suffix", nil: onCollision = .uniqueSuffix
+    case "skip": onCollision = .skip
+    case "overwrite": onCollision = .overwrite
+    case let other?: fail("unknown --on-collision '\(other)' (use unique, skip or overwrite)")
+    }
+
     do {
         let recipe = try RecipeIO.load(from: URL(fileURLWithPath: recipePath))
         let outcome = try BatchApply.run(
             inputDir: URL(fileURLWithPath: inDirPath, isDirectory: true),
             recipe: recipe,
-            outputDir: URL(fileURLWithPath: outDirPath, isDirectory: true),
-            format: format
+            destination: BatchApply.Destination(
+                directory: URL(fileURLWithPath: outDirPath, isDirectory: true),
+                onCollision: onCollision,
+                format: format
+            )
         )
-        print("Applied recipe to \(outcome.succeeded) image(s), \(outcome.failed) failed.")
-        for failure in outcome.failures {
-            FileHandle.standardError.write(Data("  skipped \(failure.source.lastPathComponent): \(failure.message)\n".utf8))
+        print("Applied recipe to \(outcome.succeeded) image(s), "
+            + "\(outcome.skippedCount) skipped, \(outcome.failed) failed.")
+        // Per-file, not just counts: a run that half-worked has to say which half.
+        for item in outcome.items {
+            switch item.result {
+            case .written: break
+            case .skipped(let existing):
+                print("  skipped \(item.source.lastPathComponent): "
+                    + "\(existing.lastPathComponent) already exists")
+            case .failed(let message):
+                FileHandle.standardError.write(
+                    Data("  failed \(item.source.lastPathComponent): \(message)\n".utf8))
+            }
         }
     } catch {
         fail("\(error)")
