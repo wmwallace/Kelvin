@@ -472,14 +472,23 @@ case "bench-load":
             _ = time("  face skin") { FaceSkin.read(in: proxy) }
         }
         if only != "seq" {
+        // The arrangement the app actually uses — NOT all four at once. All four crashes:
+        // EXC_BAD_ACCESS in `objc_release` inside Vision's
+        // `VNGenerateSemanticSegmentationCompoundRequest detectorTypeForSemanticSegmentationRequest`
+        // when two person-segmentation requests resolve their detector concurrently. Reproduced
+        // here at 2 crashes in 6 runs. `--only par-unsafe` still does it, because a race you can
+        // reproduce on demand is worth being able to reproduce again.
+        let unsafeAll = only == "par-unsafe"
+        let visionSerial = { _ = LocalMasks.measure(in: proxy); _ = SubjectInstances.detect(in: proxy) }
+        let jobs: [() -> Void] = unsafeAll
+            ? [{ _ = LocalMasks.measure(in: proxy) }, { _ = SubjectInstances.detect(in: proxy) },
+               { _ = DustDetector.detect(in: proxy) }, { _ = FocusMeasure.read(proxy) }]
+            : [visionSerial, { _ = DustDetector.detect(in: proxy) }, { _ = FocusMeasure.read(proxy) }]
         let group = DispatchGroup()
         let lock = NSLock()
         var done = 0
-        time("  ALL FOUR concurrently") {
-            for work in [{ _ = LocalMasks.measure(in: proxy) },
-                         { _ = SubjectInstances.detect(in: proxy) },
-                         { _ = DustDetector.detect(in: proxy) },
-                         { _ = FocusMeasure.read(proxy) }] {
+        time(unsafeAll ? "  ALL FOUR concurrently (UNSAFE)" : "  concurrent (Vision serialised)") {
+            for work in jobs {
                 group.enter()
                 DispatchQueue.global(qos: .userInitiated).async {
                     work()

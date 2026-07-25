@@ -932,22 +932,32 @@ final class AppState: ObservableObject {
             // Also off the main thread: the statistics pass, Vision's person/sky segmentation and
             // the dust scan each render the proxy, and together they were the second-biggest block
             // on the main thread after decode.
-            // ...and CONCURRENTLY, because none of these reads another's output. Profiled on three
-            // real photographs they ran 825–1019 ms end to end as a sequence, dominated by subject
-            // instances (623–703 ms) with the segmentation, dust and focus passes waiting behind
-            // it for no reason. Run together, the block costs about what its slowest member costs.
+            // ...and partly CONCURRENTLY. These passes take no input from each other and ran one
+            // after another for 973–1058 ms, dominated by subject instances (631–746 ms) with
+            // everything else waiting behind it for no reason.
             //
-            // `async let` rather than a task group: the set is fixed and each result has a
-            // different type, so a group would mean erasing them into an enum and matching them
-            // back out to gain nothing.
+            // BUT THE VISION PASSES MUST STAY SERIAL WITH EACH OTHER. Running all four at once
+            // crashed the app: EXC_BAD_ACCESS in `objc_release` inside Vision's own
+            // `VNGenerateSemanticSegmentationCompoundRequest detectorTypeForSemanticSegmentationRequest`,
+            // on Vision's request queue. `LocalMasks.measure` and `SubjectInstances.detect` both
+            // perform person segmentation, and Vision over-releases something while resolving
+            // which detector to use for two of those at once. It is a race, so it is intermittent
+            // — reproduced at 2 crashes in 6 runs through the CLI's `bench-load --only par`, which
+            // is exactly the sort of failure that reaches a user and not a test.
+            //
+            // Dust and focus touch no Vision at all (integral images and a Laplacian), so they
+            // still overlap the Vision block for free. The win drops from ~28% to ~15%. A quarter
+            // of a second is not worth a segfault.
             let measurement = try await Task.detached(priority: .userInitiated) { () throws -> MeasuredPhoto in
-                async let masks = LocalMasks.measure(in: proxy)
-                async let instances = SubjectInstances.detect(in: proxy)
                 async let dust = DustDetector.detect(in: proxy)
                 async let focus = FocusMeasure.read(proxy)
 
                 let sampleBytes = try ImageMetrics.sample(proxy)
                 let stats = ImageStatistics.compute(from: sampleBytes)
+                // Serial, deliberately. Do not turn these into `async let`.
+                let masks = LocalMasks.measure(in: proxy)
+                let instances = SubjectInstances.detect(in: proxy)
+
                 return await MeasuredPhoto(stats: stats, masks: masks, dust: dust,
                                            focus: focus, instances: instances)
             }.value
