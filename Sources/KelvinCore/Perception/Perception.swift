@@ -21,6 +21,16 @@ public struct Perception: Codable, Equatable, Sendable {
     public var confidence: Double
     /// Free text. **Never parsed** — for debugging and for explaining a choice to the user.
     /// Do not build logic on it (docs/RECIPE-SCHEMA.md).
+    /// A sentence of free text from the model. NO LONGER REQUESTED, and the field survives only so
+    /// that perception JSON written before that change still decodes.
+    ///
+    /// Nothing has ever read it. Measured, generation is the whole cost of a read — 6.5 s of the
+    /// 6.5 s — and it is dominated by DECODE rather than by looking at the photograph, so the length
+    /// of the answer is the one lever that moves it. This field was a fifth of the output, produced
+    /// for every photograph, for a human who was never shown it.
+    ///
+    /// If it comes back, it should come back as something a person can actually see — an explanation
+    /// on the candidate that says why the read went the way it did — and be paid for deliberately.
     public var notes: String?
 
     public static let currentSchemaVersion = 1

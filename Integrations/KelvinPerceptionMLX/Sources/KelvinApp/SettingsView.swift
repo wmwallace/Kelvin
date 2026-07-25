@@ -162,6 +162,7 @@ private struct AboutSettings: View {
                 // the ids in .github/ISSUE_TEMPLATE/bug_report.yml — rename one there and it stops
                 // prefilling, which is the trade for not asking the reporter to look them up.
                 Link("Report a bug", destination: AppInfo.bugReportURL)
+                Link("Request a feature", destination: AppInfo.featureRequestURL)
             } header: {
                 Text("Links")
             } footer: {
@@ -206,13 +207,24 @@ enum AppInfo {
     }
 
     static var bugReportURL: URL {
-        var components = URLComponents(string: Branding.issuesURL + "/new")!
-        components.queryItems = [
-            URLQueryItem(name: "template", value: "bug_report.yml"),
-            URLQueryItem(name: "build", value: versionLine),
+        issueURL(template: "bug_report.yml", extra: [
             URLQueryItem(name: "macos", value: osVersion),
             URLQueryItem(name: "mac", value: architecture)
-        ]
+        ])
+    }
+
+    /// A feature request, prefilled with the build so a request from an old version is legible as
+    /// one rather than looking like a comment on the current app.
+    static var featureRequestURL: URL {
+        issueURL(template: "feature_request.yml")
+    }
+
+    private static func issueURL(template: String, extra: [URLQueryItem] = []) -> URL {
+        var components = URLComponents(string: Branding.issuesURL + "/new")!
+        components.queryItems = [
+            URLQueryItem(name: "template", value: template),
+            URLQueryItem(name: "build", value: versionLine)
+        ] + extra
         return components.url ?? URL(string: Branding.issuesURL)!
     }
 }

@@ -3265,6 +3265,20 @@ struct ContentView: View {
                 // so the menu is the last place someone looks. Two preferences that change what
                 // happens to your files live in there; they should not be a thing you have to
                 // already know about.
+                // Next to Settings, because the two things someone wants after using an app for ten
+                // minutes are to change something and to ask for something. A pre-alpha with no
+                // route for the second is one that only hears from people annoyed enough to go
+                // looking for the repository.
+                Button(action: { NSWorkspace.shared.open(AppInfo.featureRequestURL) }) {
+                    Image(systemName: "lightbulb")
+                        .font(.system(size: 11))
+                        .foregroundColor(Theme.inkDim)
+                        .padding(.horizontal, 6).padding(.vertical, 4)
+                        .background(Capsule().stroke(Theme.hairline, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .help("Request a feature")
+
                 SettingsLink {
                     Image(systemName: "gearshape")
                         .font(.system(size: 11))

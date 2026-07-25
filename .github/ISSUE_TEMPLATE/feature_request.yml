@@ -1,0 +1,53 @@
+name: Feature request
+description: Something Kelvin should do that it doesn't
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before writing: [`docs/DECISIONS.md`](../blob/main/docs/DECISIONS.md) records what has
+        already been considered and rejected, and why — generative editing, cross-image style
+        learning, and several others are deliberate omissions rather than gaps. Disagreeing with one
+        is welcome; starting from what is written there makes the conversation shorter.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: >
+        The problem, not the solution. "I shoot 400-frame events and culling takes an evening" leads
+        somewhere; "add a rating system" assumes the answer.
+    validations:
+      required: true
+
+  - type: textarea
+    id: currently
+    attributes:
+      label: How do you handle it now?
+      description: In Kelvin, or in whatever you use instead. What specifically is slow or annoying?
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What did you have in mind?
+      description: Optional. A rough shape is fine — it does not have to be a design.
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: How often would this matter?
+      options:
+        - Every shoot
+        - Most shoots
+        - Occasionally
+        - Once, but it mattered a lot
+    validations:
+      required: true
+
+  - type: input
+    id: build
+    attributes:
+      label: Version
+      description: From Settings → About. Prefilled if you came from inside the app.
