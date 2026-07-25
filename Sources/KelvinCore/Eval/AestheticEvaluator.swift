@@ -20,7 +20,9 @@ import CoreImage
 public enum AestheticEvaluator {
 
     /// A specific, fixable defect — so the UI can offer a one-click correction, not just a warning.
-    public enum Issue: String, Sendable, Equatable {
+    /// `CaseIterable` so the fix audit can assert that EVERY issue has a working correction —
+    /// adding an issue without a fix then fails a test rather than shipping a dead button.
+    public enum Issue: String, Sendable, Equatable, CaseIterable {
         case blownHighlights, crushedShadows, flat, colorCast, shadowDetailLost
         case skinOverSaturated, skinAshy, skinHue
         case subjectFlat, subjectTooDark, subjectBlown

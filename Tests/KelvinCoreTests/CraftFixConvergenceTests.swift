@@ -245,8 +245,15 @@ final class CraftFixConvergenceTests: XCTestCase {
     /// fires and the fix still runs, and when the person check is wrong the failure is a skipped
     /// correction rather than a wrong number applied to somebody's face.
     func testSkinNudgesDoNotFireWithoutAPerson() throws {
+        // Fur as Vision reports it: a face, metered — under-saturated and outside the natural skin
+        // arc, so all three skin rules would fire on it. Measured values rather than `.empty`
+        // because `.skinHue` is now directional: it reads the hue to know which way to correct, and
+        // with nothing metered there is nothing to correct toward.
+        let fur = FaceSkin.Reading(faceCount: 1, skinLuma: 0.42, skinHueDegrees: 44,
+                                   skinSaturation: 0.06, skinRange: 0.2,
+                                   skinClipHigh: 0, skinClipLow: 0)
         let reading = CraftFix.Reading(
-            stats: try ImageStatistics.compute(TestSupport.makeGradientImage()), face: .empty)
+            stats: try ImageStatistics.compute(TestSupport.makeGradientImage()), face: fur)
         for issue in [AestheticEvaluator.Issue.skinAshy, .skinOverSaturated, .skinHue] {
             XCTAssertNil(CraftFix.step(for: issue, reading: reading, subjectIsPerson: false),
                          "\(issue.rawValue) must not adjust an animal's fur")

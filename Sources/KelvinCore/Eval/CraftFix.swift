@@ -36,6 +36,11 @@ import Foundation
 ///      This is the brake that catches the cat: the fourth pass cut highlight clipping from 7.6%
 ///      to 1.5% — a huge win on the target — while colour clipping went 0.0% → 7.6%.
 ///
+/// Those three bound one click. A fourth, `Ceiling`, bounds a sequence of them: the first nudge of
+/// every click is kept whether or not it earns its place, so on a defect that no slider can finish
+/// each click bought another and five of them walked contrast to +80. The ceiling is where an
+/// automatic correction stops being a correction, and it is not a limit on the slider itself.
+///
 /// Kept in Core, away from the UI, so the convergence behaviour is testable against the real
 /// renderer rather than only reachable by clicking a button.
 public enum CraftFix {
@@ -56,6 +61,32 @@ public enum CraftFix {
     /// photographer may want a look out there; an *automatic* correction that walks past 9500 K is
     /// not correcting a cast any more, it is inventing one, and the UI could not show it.
     public static let whiteBalanceCorrection: ClosedRange<Double> = 2500 ... 9500
+
+    /// The same idea as `whiteBalanceCorrection`, for the tone and colour controls: how far from
+    /// neutral an *automatic* correction may leave a slider, whatever the photo.
+    ///
+    /// The three brakes below bound ONE click. They do not bound a sequence of clicks, and the
+    /// first nudge of every click is deliberately kept whether or not it earns its place ("the
+    /// correction the button promises"). On an issue where each nudge genuinely helps a little but
+    /// can never finish — a very flat frame, where contrast scales the range by only
+    /// (1 + 0.6·c/100) — that leaks: measured, five clicks of the old `.flat` fix walked contrast
+    /// to +80 with the flag still up. A photograph at contrast +80 is a different photograph.
+    ///
+    /// These are ceilings on the *automatic excursion*, not limits on the slider: a value the user
+    /// has already set beyond one of them is left where they put it (see `autoClamp`).
+    public enum Ceiling {
+        /// 50 rather than something rounder: a genuinely flat frame needs two clicks of the flat
+        /// step to clear (measured, contrast +48 on a frame with dynamic range 0.32), and a ceiling
+        /// that stops short of a correction which demonstrably works would be a different bug.
+        public static let contrast = 50.0
+        public static let highlights = 60.0
+        public static let shadows = 60.0
+        public static let whites = 40.0
+        public static let blacks = 40.0
+        public static let vibrance = 45.0
+        public static let saturation = 45.0
+        public static let tint = 60.0
+    }
 
     // MARK: - Step
 
@@ -116,23 +147,59 @@ public enum CraftFix {
             return s
         }
 
-        /// Apply to a recipe's global block, clamped to each field's legal range.
+        /// Apply to a recipe's global block, clamped to each field's legal range and to the
+        /// automatic-correction ceiling for that field.
         public func applied(to g: GlobalAdjustments) -> GlobalAdjustments {
             var out = g
-            out.contrast = clamp(g.contrast + contrast, Ranges.signed100)
-            out.highlights = clamp(g.highlights + highlights, Ranges.signed100)
-            out.shadows = clamp(g.shadows + shadows, Ranges.signed100)
-            out.whites = clamp(g.whites + whites, Ranges.signed100)
-            out.blacks = clamp(g.blacks + blacks, Ranges.signed100)
-            out.tint = clamp(g.tint + tint, Ranges.tint)
-            out.vibrance = clamp(g.vibrance + vibrance, Ranges.signed100)
-            out.saturation = clamp(g.saturation + saturation, Ranges.signed100)
+            out.contrast = autoClamp(g.contrast + contrast, from: g.contrast, Ceiling.contrast)
+            out.highlights = autoClamp(g.highlights + highlights, from: g.highlights, Ceiling.highlights)
+            out.shadows = autoClamp(g.shadows + shadows, from: g.shadows, Ceiling.shadows)
+            out.whites = autoClamp(g.whites + whites, from: g.whites, Ceiling.whites)
+            out.blacks = autoClamp(g.blacks + blacks, from: g.blacks, Ceiling.blacks)
+            out.tint = autoClamp(g.tint + tint, from: g.tint, Ceiling.tint, Ranges.tint)
+            out.vibrance = autoClamp(g.vibrance + vibrance, from: g.vibrance, Ceiling.vibrance)
+            out.saturation = autoClamp(g.saturation + saturation, from: g.saturation, Ceiling.saturation)
             if temperatureK != 0 {
                 // The renderer's neutral is 6500 K; "as shot" (nil) starts from there.
                 out.temperatureK = clamp((g.temperatureK ?? 6500) + temperatureK,
                                          CraftFix.whiteBalanceCorrection)
             }
             return out
+        }
+
+        /// True when `out` sits exactly one whole step away from `g` — nothing absorbed by a legal
+        /// range or by a ceiling.
+        ///
+        /// A partly-clamped pass is refused rather than applied. Two reasons: the excursion budget
+        /// charges for the whole step whether or not it landed, so accepting halves of steps lets a
+        /// click do more than its budget; and a ceiling that has begun to bite is the ceiling saying
+        /// stop. Measured: without this, a click whose `highlights` had reached the ceiling still
+        /// applied its `whites` half, and repeated clicking walked whites from −16 to −40 while
+        /// highlights stood still.
+        func fullyLands(from g: GlobalAdjustments, to out: GlobalAdjustments) -> Bool {
+            func ok(_ delta: Double, _ before: Double, _ after: Double) -> Bool {
+                abs((after - before) - delta) < 1e-6
+            }
+            return ok(contrast, g.contrast, out.contrast)
+                && ok(highlights, g.highlights, out.highlights)
+                && ok(shadows, g.shadows, out.shadows)
+                && ok(whites, g.whites, out.whites)
+                && ok(blacks, g.blacks, out.blacks)
+                && ok(tint, g.tint, out.tint)
+                && ok(vibrance, g.vibrance, out.vibrance)
+                && ok(saturation, g.saturation, out.saturation)
+                && (temperatureK == 0
+                    || ok(temperatureK, g.temperatureK ?? 6500, out.temperatureK ?? 6500))
+        }
+
+        /// Clamp to the field's legal range, then to ±`ceiling` — but never pull a value BACK from
+        /// somewhere the user already put it. The ceiling exists to stop the fix button walking a
+        /// slider somewhere extreme over many clicks; a photographer who has deliberately set
+        /// contrast to +70 has not made a mistake for the fix button to undo.
+        private func autoClamp(_ v: Double, from start: Double, _ ceiling: Double,
+                               _ range: ClosedRange<Double> = Ranges.signed100) -> Double {
+            let lo = min(-ceiling, start), hi = max(ceiling, start)
+            return min(hi, max(lo, clamp(v, range)))
         }
 
         private func clamp(_ v: Double, _ r: ClosedRange<Double>) -> Double {
@@ -206,17 +273,58 @@ public enum CraftFix {
             s.saturation = -16; s.vibrance = -12
         case .skinAshy:
             guard subjectIsPerson else { return nil }
-            s.vibrance = 12
+            // Sized from the deficit rather than fixed. Measured through the renderer on a skin
+            // patch, vibrance buys about 0.0007 of HSV saturation per unit, near enough constant
+            // from saturation 0.03 to 0.09 — so a flat +12 delivers +0.011 and clears only a face
+            // that was a whisker under the 0.10 floor. Anything genuinely ashy got a nudge that
+            // could not reach, three times, and stopped.
+            let deficit = reading.excess(.skinAshy) ?? 0
+            s.vibrance = min(30, max(12, deficit / 0.0007))
         case .skinHue:
-            guard subjectIsPerson else { return nil }
-            s.saturation = -10          // ease the push that skewed the hue
-            s.tint = -4
+            guard subjectIsPerson, let hue = reading.face.skinHueDegrees else { return nil }
+            // WHICH WAY, and how far. The old step was `saturation −10, tint −4`, and both halves
+            // were inert: saturation scales colour toward grey without rotating hue at all
+            // (measured: −32 moved a 47.1° patch to 47.2°), and `tint` rendered nothing whatsoever
+            // while temperature was as-shot — a renderer bug, now fixed. The step was also
+            // one-directional for a two-sided fault: the same −4 was applied to a face that had
+            // gone yellow and to one that had gone magenta.
+            //
+            // Tint is the right control: skin drifting yellow-green or magenta IS the green↔magenta
+            // white-balance axis, and it is the strongest thing that moves hue here — measured
+            // 0.19–0.37° per unit against 0.17° for an HSL band shift. Positive tint raises hue,
+            // negative lowers it, so `delta` carries the direction.
+            // Aim just INSIDE the natural arc rather than onto its edge.
+            let target: Double? = hue > 300 ? 358       // magenta side: the arc wraps through 360
+                                : hue < 6    ? 8
+                                : hue > 32   ? 30 : nil
+            guard let target else { return nil }        // already natural — nothing to correct
+            let delta = target - hue
+            // 2.5 units per degree deliberately under-shoots the measured 3–5 that would land it
+            // exactly: overshooting past the arc reads as a NEW cast, and the loop can take a
+            // second pass but cannot take back a pass it has accepted.
+            s.tint = min(25, max(-25, delta * 2.5))
         case .crushedShadows:
             s.shadows = 22; s.blacks = 10; s.contrast = -8
         case .blownHighlights:
             s.highlights = -26; s.whites = -8
         case .flat:
-            s.contrast = 16; s.whites = 6; s.blacks = -6
+            // `blacks −6` is gone: it is a no-op. The endpoint curve moves the quarter tone by
+            // blacks/100 × 0.22, so −6 asks for 0.013 — under the resolution of an 8-bit render.
+            // Measured, `blacks −6` on its own returns a BYTE-IDENTICAL frame, on a flat fixture
+            // and on a full-range one. It was decoration: it consumed excursion budget, and it made
+            // the step look like it was doing three things when it was doing two.
+            //
+            // The other two are measured and left alone. Contrast scales dynamic range by
+            // (1 + 0.6·c/100) to within 1% on every fixture tried, and `whites` adds to that
+            // whenever the frame's tones reach the quarter point the curve moves (dynamic range
+            // 0.322 → 0.369 with whites against 0.352 for contrast alone). A step sized from the
+            // deficit instead was tried and measured WORSE: a bigger step meets the ceiling below
+            // sooner, and a step the ceiling would truncate is refused outright.
+            //
+            // What was wrong here was never the amounts but that nothing stopped them — each click
+            // gained a little, so each click bought another, and five clicks reached contrast +80
+            // with the flag still up. `Ceiling` is what fixes that.
+            s.contrast = 16; s.whites = 6
         case .colorCast:
             // Derived from what is actually on screen, as a DELTA on the current white balance —
             // the measured image already carries it, so taking the neutralising value as an
@@ -230,6 +338,48 @@ public enum CraftFix {
             return nil                  // fixed on the subject mask, not globally
         }
         return s.isEmpty ? nil : s
+    }
+
+    // MARK: - The subject family
+
+    /// One click's correction for a subject issue, as a delta on the SUBJECT MASK's adjustments —
+    /// the frame as a whole is not the problem, the person in it is, so a global slider is the
+    /// wrong instrument (`step(for:)` returns nil for these three).
+    ///
+    /// Here rather than in the app so the amounts can be measured against the real renderer. They
+    /// were in the view, where nothing could test them, and one of them was actively destructive:
+    /// mask contrast ran in scene-linear, where the 0.5 pivot lands at display 0.73, so "add
+    /// modelling to the face" crushed 44% of a dark subject to black at +14 and 94% at +42 — while
+    /// the modelling metric it was aimed at went UP, so it read as a success. The renderer now does
+    /// masked contrast display-referred, like the global tone stage.
+    public struct SubjectStep: Sendable, Equatable {
+        /// Delta on the mask's `exposure_ev`, and the furthest an automatic correction may take it.
+        public var exposureEV = 0.0
+        public var exposureLimit = 2.0
+        /// Delta on the mask's `contrast`, and its ceiling. Lower than the global contrast ceiling
+        /// because this contrast pivots at mid grey while a face rarely sits there: measured, +42
+        /// on the mask took a dark subject from luma 0.185 to 0.108, which trades "flat" for
+        /// "too dark".
+        public var contrast = 0.0
+        public var contrastLimit = 30.0
+
+        /// The mask's new values after this step, each held inside its ceiling.
+        public func applied(exposureEV e: Double, contrast c: Double) -> (exposureEV: Double, contrast: Double) {
+            (min(max(e + exposureEV, -exposureLimit), max(exposureLimit, e)),
+             min(max(c + contrast, -contrastLimit), max(contrastLimit, c)))
+        }
+    }
+
+    /// nil for anything that is not a subject issue — those go through `step(for:)`.
+    public static func subjectStep(for issue: AestheticEvaluator.Issue) -> SubjectStep? {
+        var s = SubjectStep()
+        switch issue {
+        case .subjectTooDark:   s.exposureEV = 0.35
+        case .subjectBlown:     s.exposureEV = -0.3
+        case .subjectFlat:      s.contrast = 14      // modelling comes from contrast IN the face
+        default:                return nil
+        }
+        return s
     }
 
     // MARK: - The loop
@@ -290,8 +440,12 @@ public enum CraftFix {
             let wouldSpend = spent.adding(s)
             guard wouldSpend.within(budget) else { outcome = .budgetSpent; break }
 
+            // Everything clamped, or only part of the step survived the ceiling — either way this
+            // click is spent (see `fullyLands`).
             let trial = s.applied(to: accepted)
-            guard trial != accepted else { outcome = .budgetSpent; break }   // everything clamped
+            guard trial != accepted, s.fullyLands(from: accepted, to: trial) else {
+                outcome = .budgetSpent; break
+            }
             let trialReading = try measure(trial)
 
             // BRAKE 3 — collateral. Refuse a pass that destroys colour or invents a new defect,

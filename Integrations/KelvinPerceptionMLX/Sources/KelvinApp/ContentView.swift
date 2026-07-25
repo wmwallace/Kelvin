@@ -839,20 +839,18 @@ final class AppState: ObservableObject {
     /// only the settled result comes back. It used to be driven from `scheduleCommit`, which fires
     /// after *any* edit — so a slider the user dragged afterwards could trigger another nudge.
     func applyFix(_ issue: AestheticEvaluator.Issue) {
-        // Subject problems are fixed ON THE SUBJECT, not globally, and their masks already carry
-        // their own ceilings — one bounded step per click, no loop.
-        switch issue {
-        case .subjectTooDark:
-            adjustSubjectMask { $0.exposure = min(2.0, $0.exposure + 0.35) }
+        // Subject problems are fixed ON THE SUBJECT, not globally — one bounded step per click, no
+        // loop. The amounts and their ceilings live in `CraftFix.subjectStep`, in Core, where they
+        // are measured against the real renderer: written out here they could not be tested, and
+        // one of them (contrast inside the mask) was crushing a dark subject to solid black while
+        // the metric it targets read as improved.
+        if let step = CraftFix.subjectStep(for: issue) {
+            adjustSubjectMask { mask in
+                let next = step.applied(exposureEV: mask.exposure, contrast: mask.contrast)
+                mask.exposure = next.exposureEV
+                mask.contrast = next.contrast
+            }
             onEdit(); return
-        case .subjectFlat:
-            // Modelling comes back from contrast within the face, not from global contrast.
-            adjustSubjectMask { $0.contrast = min(60, $0.contrast + 14) }
-            onEdit(); return
-        case .subjectBlown:
-            adjustSubjectMask { $0.exposure = max(-2.0, $0.exposure - 0.3) }
-            onEdit(); return
-        default: break
         }
 
         guard !fixInProgress, let proxy = proxyCI, let recipe = activeRecipe else { return }

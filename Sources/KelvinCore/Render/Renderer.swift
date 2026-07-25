@@ -34,11 +34,22 @@ public enum Renderer {
             img = applyHeal(img, spot: spot)
         }
 
-        // White balance. temperature_k neutral is "as-shot" (nil) → skip entirely when nil.
-        if let temperatureK = g.temperatureK {
+        // White balance. temperature_k neutral is "as-shot" (nil); tint's neutral is 0. EITHER one
+        // alone has to render.
+        //
+        // Gating the whole filter on `temperatureK != nil` made `tint` a dead control on every
+        // photo whose temperature was left as-shot — which is most of them. Measured on a skin
+        // patch: tint −4, −20 and −60 all returned hue 47.143°, identical to no adjustment at all,
+        // while the same values with temperature written as 6500 moved it to 46.3/43.4/36.3°. The
+        // `.skinHue` fix corrects on tint, so its correction was silently discarded; the Tint
+        // slider in the UI was equally inert.
+        //
+        // Skipped only when BOTH are neutral, so an all-neutral recipe is still a byte-identical
+        // no-op (RECIPE-SCHEMA.md invariant #1).
+        if g.temperatureK != nil || g.tint != 0 {
             img = img.applyingFilter("CITemperatureAndTint", parameters: [
                 "inputNeutral": CIVector(x: 6500, y: 0),
-                "inputTargetNeutral": CIVector(x: temperatureK, y: g.tint)
+                "inputTargetNeutral": CIVector(x: g.temperatureK ?? 6500, y: g.tint)
             ])
         }
 
@@ -424,11 +435,26 @@ public enum Renderer {
             ])
         }
         if (a["contrast"] ?? 0) != 0 || (a["saturation"] ?? 0) != 0 {
-            layer = layer.applyingFilter("CIColorControls", parameters: [
-                kCIInputContrastKey: 1.0 + (a["contrast"] ?? 0) / 100.0 * 0.6,
-                kCIInputSaturationKey: 1.0 + (a["saturation"] ?? 0) / 100.0,
-                kCIInputBrightnessKey: 0.0
-            ])
+            // Display-referred, for exactly the reason the global tone stage is (see above):
+            // CIColorControls pivots contrast at 0.5 of the WORKING space, and the working space is
+            // scene-linear, where 0.5 is display 0.73. A contrast pivot that should sit on mid grey
+            // actually sits up in the highlights, so the control is mostly a shadow-crusher.
+            //
+            // The global stage was corrected for this; masks were not, and that is where it hurts
+            // most. Measured on a dark subject (face luma 0.217) through the subject mask, in
+            // linear: `contrast +14` → luma 0.040 with 44% of the face crushed to black; +42 →
+            // 94% crushed. The face's tonal RANGE went up (0.184 → 0.282), so the "subject looks
+            // flat" flag cleared while the subject was being destroyed — and it destroys a darker
+            // face far more readily than a lighter one, which is the exact bias this codebase
+            // measures everything relatively to avoid.
+            layer = layer
+                .applyingFilter("CILinearToSRGBToneCurve")
+                .applyingFilter("CIColorControls", parameters: [
+                    kCIInputContrastKey: 1.0 + (a["contrast"] ?? 0) / 100.0 * 0.6,
+                    kCIInputSaturationKey: 1.0 + (a["saturation"] ?? 0) / 100.0,
+                    kCIInputBrightnessKey: 0.0
+                ])
+                .applyingFilter("CISRGBToneCurveToLinear")
         }
         if let vib = a["vibrance"], vib != 0 {
             layer = layer.applyingFilter("CIVibrance", parameters: ["inputAmount": vib / 100.0])

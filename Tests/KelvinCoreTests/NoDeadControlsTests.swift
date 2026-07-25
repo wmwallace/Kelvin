@@ -51,6 +51,11 @@ final class NoDeadControlsTests: XCTestCase {
             ("blacks",      { $0.blacks = -40 }),
             ("temperature_k", { $0.temperatureK = 3200 }),
             ("tint",        { $0.temperatureK = 5500; $0.tint = 40 }),
+            // Tint ON ITS OWN, with temperature left as-shot — which is how nearly every photo
+            // arrives. The case above hid a real dead control for weeks by writing a temperature
+            // first: the renderer gated the entire white-balance filter on `temperature_k != nil`,
+            // so dragging Tint on an untouched photo did nothing at all.
+            ("tint (as-shot temperature)", { $0.tint = 40 }),
             ("vibrance",    { $0.vibrance = 60 }),
             ("saturation",  { $0.saturation = 60 }),
             ("clarity",     { $0.clarity = 70 }),
