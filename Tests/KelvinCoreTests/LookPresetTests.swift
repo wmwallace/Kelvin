@@ -53,6 +53,26 @@ final class LookPresetTests: XCTestCase {
         var warmed = GlobalAdjustments.neutral
         warmed.temperatureK = 5500
         LookPreset.named("golden")!.apply(to: &warmed)
-        XCTAssertGreaterThan(warmed.temperatureK ?? 0, 5500, "golden hour warms")
+        // Lower, not higher: the renderer's temperatureK is a target where a lower Kelvin warms
+        // the image (WhiteBalanceDirectionTests). This assertion pointed the other way and was
+        // certifying the bug it existed to prevent — Golden hour shipped cooling photographs.
+        XCTAssertLessThan(warmed.temperatureK ?? 9999, 5500, "golden hour warms, and warmer is LOWER")
+    }
+
+    /// The direction rule, checked for the whole library at once, so the next look with a
+    /// temperature cannot re-invert it: positive shift is warmth is a lower Kelvin target.
+    func testEveryWarmingLookLowersTheKelvinTarget() {
+        for look in LookPreset.library where look.temperatureShift != 0 {
+            var g = GlobalAdjustments.neutral
+            g.temperatureK = 6000
+            look.apply(to: &g)
+            if look.temperatureShift > 0 {
+                XCTAssertLessThan(g.temperatureK ?? 9999, 6000,
+                                  "\(look.id) has a positive (warming) shift and must lower Kelvin")
+            } else {
+                XCTAssertGreaterThan(g.temperatureK ?? 0, 6000,
+                                     "\(look.id) has a negative (cooling) shift and must raise Kelvin")
+            }
+        }
     }
 }

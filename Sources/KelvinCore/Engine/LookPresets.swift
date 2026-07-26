@@ -31,7 +31,17 @@ public struct LookPreset: Sendable, Equatable, Identifiable {
     public var texture: Double = 0
     public var whites: Double = 0
     public var blacks: Double = 0
-    /// Kelvin offset — positive warms, negative cools. Applied only if the recipe has a temperature.
+    /// Warmth shift — **positive warms, negative cools**, the direction every photographer's
+    /// temperature slider moves. Applied only if the recipe has a temperature.
+    ///
+    /// `apply` SUBTRACTS this from `temperatureK`, because the renderer's value is a *target*
+    /// where a lower Kelvin warms the image (verified by `WhiteBalanceDirectionTests`; the same
+    /// convention `CandidateStyle.temperatureShiftK` documents). This field carried the intuitive
+    /// sign while `apply` added it raw — so "Golden hour" COOLED every photo it touched by 420 K
+    /// and Cross process warmed, each the exact opposite of its blurb, with a unit test asserting
+    /// the wrong direction as if it were right. The same inversion was found and fixed once
+    /// before, in the Warm and Cool candidate styles. Twice now: any new code touching
+    /// `temperatureK` must state which way is warm and point at the direction tests.
     public var temperatureShift: Double = 0
     public var mono: BlackAndWhiteMix?
     public var hsl: [String: HSLAdjustment]?
@@ -47,7 +57,8 @@ public struct LookPreset: Sendable, Equatable, Identifiable {
         g.whites = c(g.whites + whites, -100...100)
         g.blacks = c(g.blacks + blacks, -100...100)
         if temperatureShift != 0, let t = g.temperatureK {
-            g.temperatureK = c(t + temperatureShift, 2000...11000)
+            // Subtraction is the fix, not a quirk: positive shift = warmer = LOWER Kelvin target.
+            g.temperatureK = c(t - temperatureShift, 2000...11000)
         }
     }
 }
@@ -100,7 +111,30 @@ public extension LookPreset {
                    contrast: 14, saturation: 6, blacks: -8, temperatureShift: -260,
                    hsl: ["aqua": HSLAdjustment(h: -10, s: 26, l: -4),
                          "blue": HSLAdjustment(h: -14, s: 20, l: -6),
-                         "yellow": HSLAdjustment(h: 8, s: 16, l: 6)])
+                         "yellow": HSLAdjustment(h: 8, s: 16, l: 6)]),
+
+        // — Retro. Each one names the artefact it imitates, because "vintage" alone promises
+        //   nothing. Kept apart from Faded film: that is the matte PRINT; these are the
+        //   transparency, the darkroom process, and the print that spent a decade in the sun.
+        LookPreset(id: "chrome", name: "Chrome slide", group: .creative,
+                   blurb: "Slide-film punch — dense colour, deep blacks, a touch of warmth.",
+                   contrast: 16, vibrance: 4, saturation: 10, clarity: 6,
+                   whites: 6, blacks: -10, temperatureShift: 180,
+                   hsl: ["red": HSLAdjustment(h: 0, s: 10, l: 0),
+                         "blue": HSLAdjustment(h: 0, s: 12, l: -6)]),
+
+        LookPreset(id: "bleach", name: "Bleach bypass", group: .creative,
+                   blurb: "Silver left in the print — drained colour under hard contrast.",
+                   contrast: 20, vibrance: -10, saturation: -35, clarity: 12,
+                   whites: 6, blacks: -12),
+
+        LookPreset(id: "sunfade", name: "Vintage warm", group: .creative,
+                   blurb: "A print that spent years in the sun — warm, gentle, blacks gone soft.",
+                   contrast: -6, vibrance: -4, saturation: -12, clarity: -4,
+                   whites: -8, blacks: 12, temperatureShift: 300,
+                   hsl: ["yellow": HSLAdjustment(h: -4, s: 10, l: 2),
+                         "orange": HSLAdjustment(h: 0, s: 8, l: 2),
+                         "blue": HSLAdjustment(h: 0, s: -20, l: 0)])
     ]
 
     static func named(_ id: String) -> LookPreset? { library.first { $0.id == id } }

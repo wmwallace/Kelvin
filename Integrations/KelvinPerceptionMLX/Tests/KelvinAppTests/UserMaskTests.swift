@@ -70,8 +70,19 @@ final class UserMaskTests: XCTestCase {
     }
 
     private let allKinds: [UserMaskVM.Kind] = [
-        .radial, .linear, .brush, .colorRange, .luminance, .skin, .background, .subject, .instance
+        .radial, .linear, .brush, .colorRange, .luminance, .skin, .background, .subject, .instance,
+        .sky
     ]
+
+    /// `.sky` hands the photographer the same region the engine's own sky treatment uses — the
+    /// segmentation bitmap under the type key the renderer already speaks.
+    func testSkyIsTheSkyRegionFromSegmentation() {
+        let mask = UserMaskVM(kind: .sky).toMask()
+        XCTAssertEqual(mask.type, "sky")
+        XCTAssertEqual(mask.source, "segmentation")
+        XCTAssertNil(mask.selection, "no selection: the region comes from segmentation")
+        XCTAssertGreaterThan(mask.feather, 0, "a hard-edged sky line is the giveaway of a bad mask")
+    }
 
     // MARK: One primitive, several presets
 

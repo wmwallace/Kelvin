@@ -2388,6 +2388,53 @@ final class AppState: ObservableObject {
         withMask(id) { $0.angle = (ang < 0 ? ang + 360 : ang) }
     }
 
+    /// The user's saved mask presets, loaded once and written through on every change.
+    @Published var customMaskPresets: [MaskPreset] = MaskPresetStore.load()
+
+    /// Start a mask from a preset — an ordinary mask wearing the preset's settings and name.
+    func addPresetMask(_ preset: MaskPreset) {
+        let m = preset.instantiate()
+        userMasks.append(m)
+        selectedUserMaskId = m.id
+        showMaskOverlay = true
+        onEdit()
+        statusMessage = "\(preset.name) added — tune it like any other mask"
+    }
+
+    /// Name and keep the current mask's settings. An AppKit alert rather than a SwiftUI sheet for
+    /// the same reason the panel accessories are AppKit: it is modal, tiny, and needs a first
+    /// responder, and that is what NSAlert is for.
+    func promptSaveMaskPreset(_ mask: UserMaskVM) {
+        guard MaskPreset.isCapturable(mask.kind) else { return }
+        let alert = NSAlert()
+        alert.messageText = "Save as preset"
+        alert.informativeText = "These settings become a reusable starting point in the preset "
+            + "menu, stored on this Mac."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 22))
+        field.stringValue = mask.name ?? ""
+        field.placeholderString = "Preset name"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else {
+            statusMessage = "A preset needs a name — nothing was saved"
+            return
+        }
+        customMaskPresets.append(.capturing(mask, name: name))
+        MaskPresetStore.save(customMaskPresets)
+        statusMessage = "Saved “\(name)” — it's in the preset menu now"
+    }
+
+    func deleteMaskPreset(_ id: UUID) {
+        guard let removed = customMaskPresets.first(where: { $0.id == id }) else { return }
+        customMaskPresets.removeAll { $0.id == id }
+        MaskPresetStore.save(customMaskPresets)
+        statusMessage = "Removed the “\(removed.name)” preset"
+    }
+
     /// Add a hand-drawn gradient mask, centred, with a gentle starting darken so the user sees it.
     func addUserMask(_ kind: UserMaskVM.Kind) {
         var m = UserMaskVM(kind: kind)
@@ -3199,6 +3246,7 @@ final class AppState: ObservableObject {
     /// Whether a person was segmented in this photo. Skin and Background masks are built from that
     /// segmentation, so without it they can't do anything — the UI says so rather than going quiet.
     var hasPerson: Bool { proxyMaskBitmaps["subject"] != nil }
+    var hasSky: Bool { proxyMaskBitmaps["sky"] != nil }
 
     /// A binding for the white-balance slider (absolute Kelvin; nil → as-shot shown as 5500).
     var temperatureBinding: Binding<Double> {
@@ -3766,7 +3814,7 @@ struct ContentView: View {
                     SubjectHighlight(instance: instance, imageFrame: rect,
                                      normToView: { appState.normToView($0, $1, in: rect) })
                 }
-            case .brush, .colorRange, .luminance, .background, .subject:
+            case .brush, .colorRange, .luminance, .background, .subject, .sky:
                 EmptyView()
             }
         }
@@ -4324,7 +4372,9 @@ struct ContentView: View {
                             brushRadius: Binding(get: { appState.brushRadius },
                                                  set: { appState.brushRadius = $0 }),
                             hasPerson: appState.hasPerson,
+                            hasSky: appState.hasSky,
                             people: appState.subjectInstances.filter { $0.kind == .person },
+                            onSavePreset: { appState.promptSaveMaskPreset(m) },
                             onAdjustBegin: { appState.isAdjustingMaskTone = true },
                             onAdjustEnd: { appState.isAdjustingMaskTone = false },
                             canMoveUp: appState.userMasks.first?.id != m.id,
@@ -4351,7 +4401,37 @@ struct ContentView: View {
                         HStack(spacing: 6) {
                             Button(action: { appState.addUserMask(.subject) }) { addMaskLabel("Subject", icon: "person.fill") }.buttonStyle(.plain)
                             Button(action: { appState.addUserMask(.background) }) { addMaskLabel("Background", icon: "photo") }.buttonStyle(.plain)
-                            Color.clear.frame(maxWidth: .infinity)
+                            Button(action: { appState.addUserMask(.sky) }) { addMaskLabel("Sky", icon: "cloud.sun") }.buttonStyle(.plain)
+                        }
+                        // Presets: the same masks with the settings already in them. Built-ins
+                        // ship a few honest starting points; the star of the show is "save as
+                        // preset" on any mask you have tuned, which lands in these menus.
+                        Text("OR START FROM A PRESET")
+                            .font(Theme.mono(9)).tracking(1.4).foregroundColor(Theme.inkFaint)
+                            .padding(.top, 4)
+                        HStack(spacing: 6) {
+                            ForEach(MaskPreset.grouped(withCustom: appState.customMaskPresets), id: \.label) { group in
+                                Menu {
+                                    ForEach(group.presets) { preset in
+                                        Button(preset.name) { appState.addPresetMask(preset) }
+                                    }
+                                    let customs = group.presets.filter { !$0.builtIn }
+                                    if !customs.isEmpty {
+                                        Divider()
+                                        Menu("Remove a saved preset") {
+                                            ForEach(customs) { preset in
+                                                Button(preset.name, role: .destructive) {
+                                                    appState.deleteMaskPreset(preset.id)
+                                                }
+                                            }
+                                        }
+                                    }
+                                } label: {
+                                    addMaskLabel(group.label, icon: group.icon)
+                                }
+                                .menuStyle(.borderlessButton)
+                                .menuIndicator(.hidden)
+                            }
                         }
                     }
                 }
@@ -5026,7 +5106,7 @@ struct EditSnapshot: Equatable {
 
 struct UserMaskVM: Identifiable, Equatable, Codable {
     enum Kind: String, Codable {
-        case radial, linear, brush, colorRange, luminance, skin, background, subject, instance
+        case radial, linear, brush, colorRange, luminance, skin, background, subject, instance, sky
     }
     var id = UUID()
     var kind: Kind
@@ -5157,7 +5237,7 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
         switch kind {
         case .radial: return "Radial"; case .linear: return "Graduated"; case .brush: return "Brush"
         case .colorRange: return "Colour range"; case .luminance: return "Luminance"; case .skin: return "Skin"
-        case .background: return "Background"
+        case .background: return "Background"; case .sky: return "Sky"
         case .subject: return "Subject"
         case .instance: return instanceLabel ?? "Subject"
         }
@@ -5278,6 +5358,13 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
             return Mask(id: instanceId ?? id.uuidString, type: "instance", source: "segmentation",
                         invert: inv, feather: finalFeather, opacity: 1, adjustments: adj, tightness: t,
                         refine: ref)
+        case .sky:
+            // The renderer already speaks "sky" — the engine's own sky treatment uses the same
+            // segmentation bitmap under the same type key. This kind just puts that region in the
+            // photographer's hands, which is what makes a "Stormy sky" preset a plain mask.
+            return Mask(id: id.uuidString, type: "sky", source: "segmentation", invert: inv,
+                        feather: f != 0 ? f : 20, opacity: 1, adjustments: adj, tightness: t,
+                        refine: ref)
         }
     }
 }
@@ -5297,9 +5384,15 @@ struct UserMaskEditor: View {
     var clearStrokes: () -> Void = {}
     var brushRadius: Binding<Double> = .constant(0.09)
     var hasPerson = true
+    /// The detected sky, for the same class of warning as `hasPerson`: a sky mask on a frame
+    /// with no sky found is quietly inert, and quiet inertness is this session's most-reported
+    /// bug shape.
+    var hasSky = true
     /// The detected people on this frame, for the skin mask's "whose skin" choice. Empty means
     /// no choice to offer.
     var people: [SubjectInstances.Instance] = []
+    /// Save these settings as a preset — wired by the owner of the mask list.
+    var onSavePreset: () -> Void = {}
     /// Bracket a tone drag so the overlay steps aside while the photograph is being judged —
     /// otherwise you are grading 60% red and the slider appears to do nothing useful.
     var onAdjustBegin: () -> Void = {}
@@ -5314,6 +5407,8 @@ struct UserMaskEditor: View {
     private var needsPersonButHasNone: Bool {
         (mask.kind == .skin || mask.kind == .background || mask.kind == .subject) && !hasPerson
     }
+
+    private var needsSkyButHasNone: Bool { mask.kind == .sky && !hasSky }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -5357,18 +5452,31 @@ struct UserMaskEditor: View {
                 }
                 .buttonStyle(.plain).disabled(!canMoveDown)
                 .help("Move this mask down the stack")
+                // Keep this tuning: the mask's settings become a named preset in the add menu.
+                // Absent on brush and per-person masks — strokes and people belong to one
+                // photograph, and a preset that silently dropped them would be a lie.
+                if MaskPreset.isCapturable(mask.kind) {
+                    Button(action: onSavePreset) {
+                        Image(systemName: "text.badge.plus")
+                            .font(.system(size: 11)).foregroundColor(Theme.inkDim)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Save these settings as a preset")
+                }
                 Button(action: onDelete) {
                     Image(systemName: "trash").font(.system(size: 11)).foregroundColor(Theme.inkDim)
                 }.buttonStyle(.plain)
             }
 
-            if needsPersonButHasNone {
+            if needsPersonButHasNone || needsSkyButHasNone {
                 // Same glyph and colour as the craft flags under the preview — one visual language
                 // for "look at this", wherever it turns up.
                 HStack(alignment: .firstTextBaseline, spacing: 5) {
                     Image(systemName: "exclamationmark.triangle")
                         .font(.system(size: 9)).foregroundColor(Theme.warn)
-                    Text("No person detected in this photo — this mask has nothing to act on.")
+                    Text(needsSkyButHasNone
+                         ? "No sky detected in this photo — this mask has nothing to act on."
+                         : "No person detected in this photo — this mask has nothing to act on.")
                         .font(Theme.mono(9)).foregroundColor(Theme.inkDim)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -5460,6 +5568,9 @@ struct UserMaskEditor: View {
                     .font(Theme.mono(9)).foregroundColor(Theme.inkDim).fixedSize(horizontal: false, vertical: true)
             case .instance:
                 Text("Just this one — everything else in the frame is untouched.")
+                    .font(Theme.mono(9)).foregroundColor(Theme.inkDim).fixedSize(horizontal: false, vertical: true)
+            case .sky:
+                Text("The detected sky — darken it, cool it, or bring the weather in, without touching the land.")
                     .font(Theme.mono(9)).foregroundColor(Theme.inkDim).fixedSize(horizontal: false, vertical: true)
             }
 

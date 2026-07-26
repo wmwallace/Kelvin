@@ -4,7 +4,7 @@
 
 **Please do not open a public issue for a security problem.** Use GitHub's private vulnerability
 reporting on this repository (Security → Report a vulnerability), which is visible only to the
-maintainer.
+maintainer. If you can't use GitHub, email `contact@usekelvin.app`.
 
 Expect an acknowledgement within a week. This is a one-person project, so there is no formal SLA
 beyond that, and there is no bounty.
