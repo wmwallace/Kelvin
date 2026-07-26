@@ -83,17 +83,13 @@ The differentiator is recipe quality. Until that works, there is no story, and l
 a half-working editor into a space where RapidRAW has 8.6k stars means launching from
 behind.
 
-## D8 — License choice · ~~Deferred~~ **SUPERSEDED — see "D8 — Licence: AGPL-3.0 plus a contributor agreement" below**
+## D8 — Licence choice · **Superseded**
 
-> **This entry is history.** It is kept because the file is append-only, but its instruction
-> ("do not add a LICENSE file") is no longer operative: the licence was decided on
-> 25 July 2026 as AGPL-3.0-only plus a CLA. Read the later D8 entry instead.
+Left open at the time. Settled on 25 July 2026 as AGPL-3.0-only plus a contributor licence
+agreement — the full reasoning is in the second D8 entry, near the end of this file.
 
-Deliberately open. Interacts with D1 and with whether a hosted or paid tier is ever
-wanted. Do not add a LICENSE file until the owner decides.
-
-Note that the decision is effectively one-way once contributors exist. *(This turned out
-to be the load-bearing sentence — see the later entry on why a CLA was needed.)*
+The one line here worth keeping: the choice is effectively one-way once contributors exist. That
+is why a CLA came with it.
 
 ## D9 — Naming · ~~Deferred~~ **RESOLVED 25 July 2026 — Kelvin, with the collision risk accepted**
 
@@ -246,19 +242,16 @@ of the existing endpoints. That changes the schema, so it is the owner's call (C
 
 ## D-model-3 — Perception model: measured alternatives, July 2026
 
-**The early default model is licensed for research and evaluation only, and needs replacing.**
+**Decided: `mlx-community/Qwen3.5-2B-MLX-4bit`, Apache-2.0.**
 
-`Qwen/Qwen2.5-VL-3B-Instruct` is under `qwen-research`, whose text reads: *"You are granted a
-… limited license … FOR NON-COMMERCIAL PURPOSES ONLY"*, with *"Non-Commercial" defined as *"for
-research or evaluation purposes only"*, and *"If you are commercially using the Materials, you
-shall request a license from us."*
+The default during early development was `Qwen/Qwen2.5-VL-3B-Instruct`, which is licensed
+`qwen-research` — research and evaluation only, with a separate licence required to use it
+commercially. It is the only model in its family carrying that licence: the 7B, the 32B and every
+Qwen2-VL including the 2B are Apache-2.0. It had been chosen for size and capability before the
+licences were compared, and it was replaced once they were — before any release, and without its
+weights ever being committed here (nothing in this repository has ever contained model weights).
 
-It is the **only** model in its family with that licence. The 7B, the 32B, and every Qwen2-VL
-including the 2B are Apache 2.0. The default was picked for size and capability before anyone
-checked, and D-model-2's commercially-clean requirement is therefore not yet met. Nothing about this is urgent for a private repo and all of it is blocking before a
-first external user — the same deadline as the rename.
-
-**RESOLVED — the default is now `mlx-community/Qwen3.5-2B-MLX-4bit` (Apache 2.0).**
+That satisfies D-model-2's requirement that everything shipped be commercially clean.
 
 The prompt work succeeded, so the 7B's ~1.8x cost was not needed. Qwen3.5-2B initially answered
 "golden-hour" on an overcast frame; the cause was a prompt bug rather than the model — nothing

@@ -43,6 +43,8 @@ build/
 # Pre-launch working notes. Deliberately not published: working notes,
 # what to do about specific commits, and personal details — internal judgement calls, not decisions.
 # The decisions themselves live in docs/DECISIONS.md, and the release *process* is docs/RELEASING.md.
+# Working notes kept out of the repository. A pattern rather than a filename: an ignore
+# rule naming one file tells every reader that that exact file exists.
 *.local.md
 
 # Built application bundles and disk images. 1.7 GB of app does not belong in git — it is

@@ -167,10 +167,8 @@ product name lives in `Branding`; the unit is physics.
 
 ## Repository status
 
-**Private, preparing to go public** under **AGPL-3.0-only** with a contributor licence
-agreement (D8). `LICENSE`, `CLA.md`, `CONTRIBUTING.md`, `SECURITY.md` and CI now exist
-and are current — earlier revisions of this file said not to add them, which was true
-while the licence was undecided and is not any more.
+**AGPL-3.0-only**, with a contributor licence agreement (D8). `LICENSE`, `CLA.md`,
+`CONTRIBUTING.md` and `SECURITY.md` are current, and CI runs on every pull request.
 
 How to build and ship a release is in `docs/RELEASING.md`.
 
@@ -186,10 +184,9 @@ Ask. Do not guess at the following, ever:
 - Anything frozen by a shipped build: the bundle identifier, the sidecar extension, or
   the Sparkle appcast URL once one exists
 
-The licence question is **closed** — AGPL-3.0-only plus a CLA (D8). Do not reopen it, and
-do not add a differently-licensed dependency without checking compatibility first: every
-current dependency is MIT or Apache-2.0, and Apache-2.0 is compatible with GPLv3 but
-**not** GPLv2.
+Check licence compatibility before adding a dependency. Everything here is currently MIT
+or Apache-2.0. Apache-2.0 is compatible with GPLv3 and **not** with GPLv2, which is the
+one that catches people out.
 
 Read `docs/ARCHITECTURE.md` for the pipeline, `docs/RECIPE-SCHEMA.md` for the data
 model, `docs/LANDSCAPE.md` for what already exists and why we are not copying it.
