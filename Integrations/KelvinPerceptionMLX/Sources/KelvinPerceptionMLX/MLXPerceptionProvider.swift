@@ -175,10 +175,19 @@ public actor MLXPerceptionProvider: @preconcurrency PerceptionProvider {
     }
 
     public func perceive(_ image: CIImage) async throws -> Perception {
+        // An actor serialises these calls, and generation costs seconds — so a read whose
+        // photograph has already been left behind must die HERE, before it spends them. Without
+        // this, arrowing through five unread frames queued five full generations, and the frame
+        // actually on screen waited behind four abandoned ones: reported as "gets hung up
+        // reading the scene". The caller cancels the superseded task; this is where it lands.
+        try Task.checkCancellation()
         var timing = Timing()
         let loadStart = Date()
         let container = try await loadedContainer()
         timing.modelLoad = Date().timeIntervalSince(loadStart)
+        // The model load can take fifteen seconds on first call — long enough for the user to
+        // have moved on. Check again before paying for a generation.
+        try Task.checkCancellation()
 
         // The model never sees full resolution — only the 768px proxy (non-negotiable #4).
         let proxyStart = Date()

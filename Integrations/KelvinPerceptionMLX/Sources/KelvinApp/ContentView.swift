@@ -1674,9 +1674,22 @@ final class AppState: ObservableObject {
                 perceptionRead = shared
                 statusMessage = "Same scene as a frame already read — reusing it"
             } else {
+                // ONE read in flight, ever. The provider is an actor, so reads queue — and a read
+                // for a photograph the user has already arrowed away from would still burn its
+                // seconds of generation ahead of the frame on screen. Cancelling the previous
+                // task makes the abandoned read throw at the actor's door instead of running.
+                perceiveTask?.cancel()
+                let job = Task { [perceptionProvider] in
+                    try await perceptionProvider.perceive(perceptionProxy)
+                }
+                perceiveTask = job
                 do {
-                    perceptionRead = try await perceptionProvider.perceive(perceptionProxy)
+                    perceptionRead = try await job.value
                     rememberPerception(perceptionRead, for: url)
+                } catch is CancellationError {
+                    // A newer photo superseded this one mid-read. Its own load owns the window
+                    // now — same contract as every `imageURL == url` guard in this function.
+                    return
                 } catch {
                     perceptionRead = Self.conservativeRead
                     statusMessage = "Couldn't run the perception model — using a conservative read"
@@ -2488,12 +2501,27 @@ final class AppState: ObservableObject {
                 bitmap = (proxyCI ?? CIImage()).applyingFilter("CIColorCubeWithColorSpace", parameters: [
                     "inputCubeDimension": SelectionMask.dimension,
                     "inputCubeData": cube,
-                    "inputColorSpace": CGColorSpace(name: CGColorSpace.sRGB)!
+                    "inputColorSpace": ImageWriter.outputColorSpace
                 ]).cropped(to: extent)
             } else {
                 bitmap = bitmaps[maskStruct.id] ?? bitmaps[maskStruct.type]
             }
-            if let b = bitmap {
+            if var b = bitmap {
+                // The red must show what the mask will EDIT. The renderer narrows a refined mask
+                // (skin = the subject ∩ skin hues) before applying its adjustments — but this
+                // overlay skipped the refinement, so a Skin mask painted the entire person and was
+                // reported as "the same as the person mask". The pixels it edited were right all
+                // along; the pixels it CLAIMED were wrong.
+                if let refine = maskStruct.refine, let cube = SelectionMask.makeData(refine),
+                   let proxy = proxyCI {
+                    let selected = proxy.applyingFilter("CIColorCubeWithColorSpace", parameters: [
+                        "inputCubeDimension": SelectionMask.dimension,
+                        "inputCubeData": cube,
+                        "inputColorSpace": ImageWriter.outputColorSpace
+                    ]).cropped(to: extent)
+                    b = selected.applyingFilter("CIMultiplyCompositing", parameters: [
+                        kCIInputBackgroundImageKey: b])
+                }
                 return (b, maskStruct.invert, maskStruct.feather, maskStruct.tightness ?? 0)
             }
         }
@@ -2507,6 +2535,11 @@ final class AppState: ObservableObject {
         // means nothing drawn, so the overlay always answers to something the user can point at.
         return nil
     }
+
+    /// The scene read currently in flight, so opening a newer photo can cancel it. See the
+    /// perceive site in `loadPhoto` — an actor queues reads, and only cancellation stops an
+    /// abandoned one from spending real seconds ahead of the photo on screen.
+    private var perceiveTask: Task<Perception, Error>?
 
     /// The last rendered proxy (for the histogram + the debounced craft check).
     @Published var lastRenderedCI: CIImage?
