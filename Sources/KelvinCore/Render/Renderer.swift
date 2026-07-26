@@ -665,17 +665,17 @@ public enum Renderer {
             guard pair.count >= 2 else { return nil }
             return (clamp01(pair[0] / 255.0), clamp01(pair[1] / 255.0))
         }.sorted { $0.x < $1.x }
-        guard pts.count >= 2 else { return nil }
+        guard pts.count >= 2, let firstPt = pts.first, let lastPt = pts.last else { return nil }
 
         func sample(_ x: Double) -> Double {
-            if x <= pts.first!.x { return pts.first!.y }
-            if x >= pts.last!.x { return pts.last!.y }
+            if x <= firstPt.x { return firstPt.y }
+            if x >= lastPt.x { return lastPt.y }
             for i in 1..<pts.count where x <= pts[i].x {
                 let a = pts[i - 1], b = pts[i]
                 let t = (b.x - a.x) > 1e-9 ? (x - a.x) / (b.x - a.x) : 0
                 return a.y + t * (b.y - a.y)
             }
-            return pts.last!.y
+            return lastPt.y
         }
 
         let xs = [0.0, 0.25, 0.5, 0.75, 1.0]
@@ -698,16 +698,16 @@ public enum Renderer {
             let clean = pts.compactMap { p -> (x: Double, y: Double)? in
                 p.count >= 2 ? (clamp01(p[0] / 255.0), clamp01(p[1] / 255.0)) : nil
             }.sorted { $0.x < $1.x }
-            guard clean.count >= 2 else { return nil }
+            guard clean.count >= 2, let first = clean.first, let last = clean.last else { return nil }
             return { x in
-                if x <= clean.first!.x { return clean.first!.y }
-                if x >= clean.last!.x { return clean.last!.y }
+                if x <= first.x { return first.y }
+                if x >= last.x { return last.y }
                 for i in 1..<clean.count where x <= clean[i].x {
                     let a = clean[i - 1], b = clean[i]
                     let t = (b.x - a.x) > 1e-9 ? (x - a.x) / (b.x - a.x) : 0
                     return a.y + t * (b.y - a.y)
                 }
-                return clean.last!.y
+                return last.y
             }
         }
 

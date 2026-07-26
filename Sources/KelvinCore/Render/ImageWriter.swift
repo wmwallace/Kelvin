@@ -171,7 +171,7 @@ public enum ImageWriter {
         return CIContext(options: [.useSoftwareRenderer: true])
     }()
 
-    static let outputColorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+    static let outputColorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
 
     public static func write(_ image: CIImage, to url: URL, format: Format? = nil,
                             metadata: MetadataPolicy = .asShot,

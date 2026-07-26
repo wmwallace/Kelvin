@@ -421,8 +421,10 @@ case "triage-compare":
         // change for the person using it.
         let flipped = fast.focus.isSoft != full.focus.isSoft
         if flipped { verdictChanges += 1 }
-        print(String(format: "%-28s %6.2f  %6.2f  %+6.2f  %8.0f  %8.0f%@",
-                     (file.lastPathComponent as NSString).utf8String!,
+        let name = file.lastPathComponent
+        let padded = name.count < 28 ? name + String(repeating: " ", count: 28 - name.count) : name
+        print(String(format: "%@ %6.2f  %6.2f  %+6.2f  %8.0f  %8.0f%@",
+                     padded,
                      fast.focus.acuity, full.focus.acuity, delta, fastMs, fullMs,
                      flipped ? "   ← SOFT FLAG FLIPPED" : ""))
     }

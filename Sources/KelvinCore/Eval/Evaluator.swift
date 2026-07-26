@@ -185,9 +185,8 @@ public enum Evaluator {
     }
 
     private static func medianChroma(_ chromas: [(a: Double, b: Double)]) -> (a: Double, b: Double)? {
-        guard !chromas.isEmpty else { return nil }
-        let a = median(chromas.map { $0.a })!
-        let b = median(chromas.map { $0.b })!
+        guard let a = median(chromas.map { $0.a }),
+              let b = median(chromas.map { $0.b }) else { return nil }
         return (a, b)
     }
 

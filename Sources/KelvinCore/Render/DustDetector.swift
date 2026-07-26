@@ -300,7 +300,7 @@ public enum DustDetector {
             let colourCost = (dr * dr + dg * dg + db * db).squareRoot()
             // Colour match dominates; a little weight on residual roughness.
             let cost = colourCost + 0.5 * std
-            if best == nil || cost < best!.cost {
+            if cost < (best?.cost ?? .infinity) {
                 best = (Offset(dx: ox, dy: oy), cost)
             }
         }
