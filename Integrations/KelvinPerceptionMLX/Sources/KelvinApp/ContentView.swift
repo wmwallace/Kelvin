@@ -1055,6 +1055,25 @@ final class AppState: ObservableObject {
     /// what it will actually do rather than making someone guess.
     var editedCount: Int { folderPhotos.filter { editedURLs.contains($0) }.count }
 
+    /// Not persisted, on purpose: which photos to export is a per-shoot decision, and a remembered
+    /// "kept only" from last week is how someone exports three photos and believes they exported
+    /// thirty.
+    @Published var exportKeepersOnly = false
+
+    /// Edited AND flagged Keep — what "kept only" export would write. Named so the checkbox can
+    /// show its count, because a scope control that doesn't say how many is a guessing game.
+    var editedKeeperCount: Int {
+        folderPhotos.filter { editedURLs.contains($0) && flags[$0] == .keep }.count
+    }
+
+    /// The photos an "Export edited" run will write, in filmstrip order. Pure and separated from
+    /// the export loop so the rule is testable without rendering anything.
+    func exportTargets(keepersOnly: Bool) -> [URL] {
+        folderPhotos.filter { url in
+            editedURLs.contains(url) && (!keepersOnly || flags[url] == .keep)
+        }
+    }
+
     var keeperCount: Int { folderPhotos.filter { flags[$0] == .keep }.count }
     var rejectCount: Int { folderPhotos.filter { flags[$0] == .reject }.count }
 
@@ -2782,9 +2801,11 @@ final class AppState: ObservableObject {
     /// Masks are re-measured per photograph, exactly as batch does: a subject mask is measured on
     /// the proxy and must be re-found at full resolution, and the frames differ.
     func exportEdited(to directory: URL) async {
-        let targets = folderPhotos.filter { editedURLs.contains($0) }
+        let targets = exportTargets(keepersOnly: exportKeepersOnly)
         guard !targets.isEmpty else {
-            statusMessage = "Nothing edited in this shoot yet"
+            statusMessage = exportKeepersOnly
+                ? "No edited photos are flagged Keep — press K on the ones you want, or untick Kept only"
+                : "Nothing edited in this shoot yet"
             return
         }
 
@@ -2800,13 +2821,16 @@ final class AppState: ObservableObject {
         }
 
         isProcessing = true
-        var written = 0, failed = 0
+        var written = 0, failed = 0, unreadable = 0
         var needsReopening: [String] = []
         let size = exportSize, space = exportColorSpace, scheme = exportNaming
 
         for (index, url) in targets.enumerated() {
             statusMessage = "Exporting \(index + 1) of \(targets.count)…"
-            guard let saved = EditStore.load(for: url) else { continue }
+            // Counted, not `continue`d silently: a sidecar that exists but won't decode used to
+            // vanish from the arithmetic entirely, and "Exported 0" with no reason attached reads
+            // as a broken button — which is exactly how its own developer read it.
+            guard let saved = EditStore.load(for: url) else { unreadable += 1; continue }
             // A sidecar written before recipes were stored cannot be reproduced without re-running
             // perception. Say which ones, rather than exporting something that is not what they saw.
             guard let recipe = saved.recipe else {
@@ -2837,8 +2861,24 @@ final class AppState: ObservableObject {
         }
 
         isProcessing = false
+        // When nothing was written, the REASON is the message — "Exported 0" with the explanation
+        // trailing after a folder name is how a working feature gets reported as a broken one.
+        if written == 0 {
+            if !needsReopening.isEmpty {
+                statusMessage = "Nothing exported — \(needsReopening.count) of these edits were saved "
+                    + "before looks were stored inside them. Open each photo once (it re-saves in "
+                    + "the current form), then export again"
+            } else if unreadable > 0 {
+                statusMessage = "Nothing exported — \(unreadable) saved edit\(unreadable == 1 ? "" : "s") "
+                    + "could not be read back. Open those photos once to re-save them"
+            } else {
+                statusMessage = "Nothing exported — \(failed) failed to render or write"
+            }
+            return
+        }
         var message = "Exported \(written) edited photo\(written == 1 ? "" : "s") to \(directory.lastPathComponent)"
         if failed > 0 { message += " · \(failed) failed" }
+        if unreadable > 0 { message += " · \(unreadable) unreadable — open those photos once to re-save" }
         if !needsReopening.isEmpty {
             message += " · \(needsReopening.count) saved before this version — open each once to include it"
         }
@@ -4427,7 +4467,7 @@ struct ContentView: View {
         if let folder = appState.imageURL?.deletingLastPathComponent() {
             panel.directoryURL = folder
         }
-        panel.accessoryView = PanelAccessories.exportOptions(appState)
+        panel.accessoryView = PanelAccessories.exportOptions(appState, showScope: true)
         guard panel.runModal() == .OK, let target = panel.url else { return }
         Task { await appState.exportEdited(to: target) }
     }

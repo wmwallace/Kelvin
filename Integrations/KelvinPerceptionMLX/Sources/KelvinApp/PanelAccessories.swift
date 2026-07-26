@@ -74,7 +74,9 @@ enum PanelAccessories {
 
     // MARK: Export
 
-    static func exportOptions(_ state: AppState) -> NSView {
+    /// `showScope` adds the "kept only" row and belongs only on the export-EDITED panel — a scope
+    /// choice over many photos is meaningless when the panel is exporting exactly one.
+    static func exportOptions(_ state: AppState, showScope: Bool = false) -> NSView {
         let container = FlippedView()
         let target = ExportTarget.shared
         target.state = state
@@ -108,18 +110,39 @@ enum PanelAccessories {
         target.qualityLabel = qualityLabel
         target.refresh()
 
-        let grid = NSGridView(views: [
+        var rows: [[NSView]] = [
             [NSTextField(labelWithString: "Format:"), format,
              NSTextField(labelWithString: "Size:"), size],
             [NSTextField(labelWithString: "Colour:"), space,
              NSTextField(labelWithString: "Quality:"), stack(quality, qualityLabel)],
             [NSGridCell.emptyContentView, location, NSGridCell.emptyContentView, NSGridCell.emptyContentView]
-        ])
+        ]
+        if showScope {
+            // Which photos, chosen with the flags the filmstrip already has: K marks a keeper, and
+            // this exports only those. The count is in the title because a scope control that
+            // doesn't say how many it selects is a guessing game.
+            let keepers = NSButton(
+                checkboxWithTitle: "Only photos flagged Keep (\(state.editedKeeperCount) of \(state.editedCount) edited)",
+                target: target, action: #selector(ExportTarget.keepersChanged(_:)))
+            keepers.state = state.exportKeepersOnly ? .on : .off
+            if state.editedKeeperCount == 0 {
+                keepers.isEnabled = false
+                keepers.state = .off
+                state.exportKeepersOnly = false
+                keepers.toolTip = "Flag edited photos with K first, and this becomes a choice"
+            }
+            rows.append([NSGridCell.emptyContentView, keepers,
+                         NSGridCell.emptyContentView, NSGridCell.emptyContentView])
+        }
+        let grid = NSGridView(views: rows)
         grid.rowSpacing = 10
         grid.columnSpacing = 8
         grid.column(at: 1).width = 150
         grid.column(at: 3).width = 150
-        grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3), verticalRange: NSRange(location: 2, length: 1))
+        for mergedRow in 2..<rows.count {
+            grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3),
+                            verticalRange: NSRange(location: mergedRow, length: 1))
+        }
 
         container.addSubview(grid)
         grid.translatesAutoresizingMaskIntoConstraints = false
@@ -167,6 +190,9 @@ enum PanelAccessories {
         }
         @objc func locationChanged(_ sender: NSButton) {
             state?.stripLocationOnExport = (sender.state == .on)
+        }
+        @objc func keepersChanged(_ sender: NSButton) {
+            state?.exportKeepersOnly = (sender.state == .on)
         }
 
         /// A quality control beside PNG or TIFF is a control that does nothing, which is the exact

@@ -423,6 +423,31 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(s.pan, .zero)
     }
 
+    // MARK: Export scope — which photos "Export edited" writes
+
+    /// The keepers-only switch narrows an export to edited frames flagged Keep; off, every edited
+    /// frame goes. A photographer who flagged three keepers and exported expects three files, and
+    /// order follows the filmstrip either way.
+    func testKeptOnlyExportsTheEditedKeepersAndNothingElse() {
+        let a = url("a.ARW"), b = url("b.ARW"), c = url("c.ARW"), d = url("d.ARW")
+        let s = state(with: [a, b, c, d])
+        s.editedURLs = [a, b, c]           // d edited nothing
+        s.flags = [b: .keep, d: .keep]     // d is kept but has no edit
+        XCTAssertEqual(s.exportTargets(keepersOnly: false), [a, b, c])
+        XCTAssertEqual(s.exportTargets(keepersOnly: true), [b])
+        XCTAssertEqual(s.editedKeeperCount, 1)
+    }
+
+    /// A rejected frame that still carries an edit exports in the everything scope — rejection
+    /// curates the strip, it does not silently veto an export the user asked for by name.
+    func testARejectedEditStillExportsWhenAllEditedIsAsked() {
+        let a = url("a.ARW"), b = url("b.ARW")
+        let s = state(with: [a, b])
+        s.editedURLs = [a, b]
+        s.flags = [a: .reject]
+        XCTAssertEqual(s.exportTargets(keepersOnly: false), [a, b])
+    }
+
     // MARK: Small readouts
 
     /// A restored edit should say *when*, in words a person reads, and should still say something
