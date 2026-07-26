@@ -136,7 +136,7 @@ frame (backlit, high ISO, no clear subject) is usually enough to reproduce it sy
 
 ## Licence and the contributor agreement
 
-This project is **AGPL-3.0** ([`LICENSE`](LICENSE)). Your contribution is released under the same
+This project is **AGPL-3.0-only** ([`LICENSE`](LICENSE)). Your contribution is released under the same
 terms, and every published release stays under them permanently.
 
 There is also a **contributor licence agreement** ([`CLA.md`](CLA.md)), and it is worth two minutes of

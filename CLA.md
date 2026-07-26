@@ -9,7 +9,7 @@
 
 ## Why this exists
 
-Kelvin is licensed to you under the **AGPL-3.0** (see [`LICENSE`](LICENSE)). That means nobody —
+Kelvin is licensed to you under the **AGPL-3.0-only** (see [`LICENSE`](LICENSE)). That means nobody —
 including a well-funded competitor — can take this work, close it, and ship it. That protection is
 the point.
 
