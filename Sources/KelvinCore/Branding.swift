@@ -75,10 +75,16 @@ public enum Branding {
     /// and both enforcing it and ever relicensing under D8 depend on it being legible who that is.
     public static let copyright = "© 2026 William Wallace"
 
-    /// Where "Support development" points, once there is somewhere to point.
+    /// Where "Support development" points: the owner's GitHub Sponsors page, the same one the
+    /// repository's Sponsor button uses (`.github/FUNDING.yml`). Optional because the settings
+    /// pane hides the whole Support section if it is ever unset again.
+    public static let sponsorURL: String? = "https://github.com/sponsors/wmwallace"
+
+    /// Sponsors thanked inside the app, in the order they arrived.
     ///
-    /// `nil` on purpose, and the settings pane hides the whole section while it is nil — an empty
-    /// "Sponsors" heading in a pre-alpha app reads as unfinished, and it would be the first thing
-    /// in a screenshot. Set it when sponsorship actually exists; nothing else needs to change.
-    public static let sponsorURL: String? = nil
+    /// Compiled in and updated by hand at each release, deliberately: the app promises to make
+    /// no network requests, and a thank-you list is not worth an exception. So this is the list
+    /// as of the build the user is running — the settings pane says so rather than implying it
+    /// is live.
+    public static let sponsors: [String] = []
 }

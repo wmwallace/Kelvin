@@ -177,8 +177,12 @@ private struct AboutSettings: View {
             }
 
             Section {
-                Link("Source code", destination: URL(string: Branding.repositoryURL)!)
-                Link("Releases", destination: URL(string: Branding.releasesURL)!)
+                if let source = URL(string: Branding.repositoryURL) {
+                    Link("Source code", destination: source)
+                }
+                if let releases = URL(string: Branding.releasesURL) {
+                    Link("Releases", destination: releases)
+                }
                 // Prefilled with the three things a report is useless without, and which nobody
                 // enjoys typing: the build, the macOS version and the chip. The field names match
                 // the ids in .github/ISSUE_TEMPLATE/bug_report.yml — rename one there and it stops
@@ -195,8 +199,18 @@ private struct AboutSettings: View {
             if let sponsor = Branding.sponsorURL, let url = URL(string: sponsor) {
                 Section {
                     Link("Support development", destination: url)
+                    // The names ship inside the build (Branding.sponsors) rather than being
+                    // fetched, because "no network requests" does not have a thank-you exception.
+                    ForEach(Branding.sponsors, id: \.self) { name in
+                        Text(name)
+                    }
                 } header: {
-                    Text("Support")
+                    Text(Branding.sponsors.isEmpty ? "Support" : "Support — with thanks to")
+                } footer: {
+                    if !Branding.sponsors.isEmpty {
+                        Text("Sponsors as of this release. The list ships in the app and is never fetched.")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
                 }
             }
         }
@@ -242,11 +256,13 @@ enum AppInfo {
     }
 
     private static func issueURL(template: String, extra: [URLQueryItem] = []) -> URL {
-        var components = URLComponents(string: Branding.issuesURL + "/new")!
+        // Branding's URLs are compile-time constants, so neither fallback is reachable — they
+        // exist because the convention is no force-unwraps outside tests, without exceptions.
+        var components = URLComponents(string: Branding.issuesURL + "/new") ?? URLComponents()
         components.queryItems = [
             URLQueryItem(name: "template", value: template),
             URLQueryItem(name: "build", value: versionLine)
         ] + extra
-        return components.url ?? URL(string: Branding.issuesURL)!
+        return components.url ?? URL(fileURLWithPath: "/")
     }
 }
