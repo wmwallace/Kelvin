@@ -668,7 +668,10 @@ case "bench-focus":
         guard let dir = value(for: "--in-dir", in: rest) else { fail("bench-focus requires --in-dir") }
         let files = try BatchApply.imageFiles(in: URL(fileURLWithPath: dir)).sorted { $0.path < $1.path }
         guard !files.isEmpty else { fail("no readable images in \(dir)") }
-        func read(_ url: URL) -> FocusMeasure.Reading? {
+        // @Sendable, because this is called from a global-queue closure below. Top-level code is
+        // main-actor isolated, so a plain local function inherits that isolation and the call is a
+        // hard error on the SDK CI builds against. It reads nothing shared — a URL in, a struct out.
+        @Sendable func read(_ url: URL) -> FocusMeasure.Reading? {
             if let fast = PerceptionProxy.fromFile(url, maxEdge: 1200) { return FocusMeasure.read(fast) }
             guard let full = try? ImageDecoder.decode(url: url) else { return nil }
             let lazy = PerceptionProxy.downsample(full, maxEdge: 1200)

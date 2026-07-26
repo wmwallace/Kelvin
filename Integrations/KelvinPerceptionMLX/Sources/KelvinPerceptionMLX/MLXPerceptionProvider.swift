@@ -1,4 +1,7 @@
-import CoreImage
+// @preconcurrency: CIImage is Sendable on the macOS 27 SDK and not on the one CI builds
+// against, and `perceive` takes one across an actor boundary. Same reason as the notes in
+// KelvinCore/Render — see ImageWriter.
+@preconcurrency import CoreImage
 import Foundation
 import KelvinCore
 
