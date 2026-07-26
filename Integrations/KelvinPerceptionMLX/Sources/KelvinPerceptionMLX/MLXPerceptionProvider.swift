@@ -32,7 +32,11 @@ import Tokenizers
 ///
 /// An `actor` so the expensive model container loads once and is reused; a fresh `ChatSession`
 /// per image keeps each photo's judgment independent (no conversation carryover).
-public actor MLXPerceptionProvider: PerceptionProvider {
+// @preconcurrency on the CONFORMANCE, not just the import. `perceive` takes a CIImage across
+// this actor's boundary; where the SDK does not call CIImage Sendable that is an error at the
+// witness, which an @preconcurrency import does not reach. Nothing crosses but the image, and
+// the caller hands over a proxy it has already stopped using.
+public actor MLXPerceptionProvider: @preconcurrency PerceptionProvider {
 
     /// Apache-2.0, 4-bit, pre-quantised for MLX.
     ///
