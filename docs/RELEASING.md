@@ -82,11 +82,10 @@ Two things freeze the moment a binary leaves this machine, and neither can be ad
 - **Generate the Sparkle EdDSA key pair**, and keep the private half out of the repository. The
   appcast URL is compiled into every build; ship one without it and that build can never update
   itself.
-- **Adding Sparkle makes two published claims false, and both must change in the same commit.**
-  The README's Privacy section says released builds "make no network requests at all", and the
-  Settings ▸ Perception pane says the same to the user's face. An update check is a network
-  request. Say what it actually is — a version check that sends no data about the photographs —
-  rather than leaving a sentence that a packet capture disproves.
+- **Check what the app says about the network once an update check exists.** The README and the
+  Settings ▸ Perception pane are both worded as "needs no network to read a photograph", which
+  stays true with Sparkle in the build. Anything you add that phrases it as *makes* no network
+  requests would not.
 - **Back up the `.p12` and the `.p8` somewhere other than this Mac.** Apple lets you download a
   `.p8` once, ever.
 

@@ -145,14 +145,18 @@ enum PerceptionInfo {
         return "Downloaded once to ~/.cache/huggingface"
     }
 
+    /// Said as a CAPABILITY — "needs no network" — rather than as a promise about behaviour.
+    /// "Makes no network requests" is true today and would quietly become false the moment an
+    /// update check ships, and a claim a packet capture can disprove is worth more trouble than
+    /// it buys. What the user actually wants to know is that the reading happens here.
     static var networkStatement: String {
         if isBundled {
-            return "This build makes no network requests. The model is inside the app, your photographs never leave this Mac, and there is no account, telemetry or crash reporting."
+            return "The model is inside the app, so reading a photograph needs no network at all. No account, no telemetry."
         }
         if localPath != nil {
-            return "Reading the model from a folder on this Mac, so nothing was downloaded. Your photographs never leave this Mac, and there is no account, telemetry or crash reporting."
+            return "Reading the model from a folder on this Mac — nothing was downloaded. No account, no telemetry."
         }
-        return "Built from source, so the model was downloaded once from Hugging Face at a fixed revision. Your photographs never leave this Mac, and there is no account, telemetry or crash reporting."
+        return "Built from source, so the model was fetched once from Hugging Face at a pinned revision. Reading a photograph runs here. No account, no telemetry."
     }
 }
 

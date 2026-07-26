@@ -63,20 +63,23 @@ make app
 ```
 
 The first run downloads about 1.6 GB of model weights. Released builds include them instead — see
-[Privacy](#privacy). [`CONTRIBUTING.md`](CONTRIBUTING.md) has the details and the gotchas.
+[It runs on your Mac](#it-runs-on-your-mac). [`CONTRIBUTING.md`](CONTRIBUTING.md) has the details and the gotchas.
 
 Opens RAW, JPEG, HEIC, PNG and TIFF.
 
-## Privacy
+## It runs on your Mac
 
-- **Your photographs never leave your Mac.** No upload, no account, no telemetry, no crash reporting.
-  There is no server to send anything to.
-- **Released builds make no network requests at all** — the model ships inside the app. Building from
-  source downloads the weights once, at a fixed revision.
-- **Your originals are never modified.** Edits are kept in Kelvin's own folder, keyed to the
-  photograph's contents — nothing is written beside your files, not even a sidecar.
-- **Exports carry the original photo's metadata by default, including its location.** There is a
-  switch in the export panel to strip that, with tests that read the file back to prove it works.
+The editing and the scene reading both happen locally. There's no account, no upload and no
+telemetry, because there's no server to talk to. If your library already lives in iCloud then it
+lives in iCloud — that's your setup, and Kelvin neither adds to it nor takes it away.
+
+A released build carries the model inside it and needs no network to work. Built from source, it
+fetches the weights once, at a pinned revision.
+
+Your originals are never modified: edits are kept in Kelvin's own folder, keyed to the photograph's
+contents, so nothing is written beside your files. Exports carry the original metadata by default,
+**including location** — there's a switch in the export panel to strip it, with tests that read the
+file back to check.
 
 ## Built with
 
