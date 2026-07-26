@@ -129,14 +129,30 @@ enum PerceptionInfo {
         return id.split(separator: "/").last.map(String.init) ?? id
     }
 
+    /// Weights loaded from an explicit path rather than the Hugging Face cache — what
+    /// `make app-staged` does. Neither bundled nor downloaded, and saying "downloaded" here was
+    /// simply untrue: nothing had been fetched.
+    static var localPath: String? {
+        guard !isBundled,
+              let path = ProcessInfo.processInfo.environment["KELVIN_MODEL_PATH"],
+              !path.isEmpty else { return nil }
+        return (path as NSString).abbreviatingWithTildeInPath
+    }
+
     static var sourceDescription: String {
-        isBundled ? "Included in the app" : "Downloaded once to ~/.cache/huggingface"
+        if isBundled { return "Included in the app" }
+        if let path = localPath { return path }
+        return "Downloaded once to ~/.cache/huggingface"
     }
 
     static var networkStatement: String {
-        isBundled
-            ? "This build makes no network requests. The model is inside the app, your photographs never leave this Mac, and there is no account, telemetry or crash reporting."
-            : "Built from source, so the model was downloaded once from Hugging Face at a fixed revision. Your photographs never leave this Mac, and there is no account, telemetry or crash reporting."
+        if isBundled {
+            return "This build makes no network requests. The model is inside the app, your photographs never leave this Mac, and there is no account, telemetry or crash reporting."
+        }
+        if localPath != nil {
+            return "Reading the model from a folder on this Mac, so nothing was downloaded. Your photographs never leave this Mac, and there is no account, telemetry or crash reporting."
+        }
+        return "Built from source, so the model was downloaded once from Hugging Face at a fixed revision. Your photographs never leave this Mac, and there is no account, telemetry or crash reporting."
     }
 }
 
