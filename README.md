@@ -1,16 +1,32 @@
+<div align="center">
+
+<img src="docs/images/app-icon.png" width="128" alt="The Kelvin app icon">
+
 # Kelvin
 
 **A local-AI photo editor for macOS.**
 
-Drop in a photo. A small vision model reads the scene, and Kelvin hands you three or four finished
+A small vision model reads your photograph. Deterministic code writes the edit.<br>
+Everything runs on your machine — your photographs never leave it.
+
+[![CI](https://github.com/wmwallace/Kelvin/actions/workflows/ci.yml/badge.svg)](https://github.com/wmwallace/Kelvin/actions/workflows/ci.yml)
+[![Licence: AGPL-3.0-only](https://img.shields.io/badge/licence-AGPL--3.0--only-4a7bab)](LICENSE)
+[![macOS 14+](https://img.shields.io/badge/macOS-14%2B-2f2f2f)](#running-it)
+[![Swift 6](https://img.shields.io/badge/Swift-6-F05138)](Package.swift)
+[![Sponsor](https://img.shields.io/badge/%E2%99%A5-sponsor-ea4aaa)](https://github.com/sponsors/wmwallace)
+
+</div>
+
+---
+
+Drop in a photo. Kelvin reads the scene and hands you three or four finished
 edits to choose between. Pick one, tune it, apply it across the shoot.
 
-Everything runs on your machine. Your photographs never leave it.
-
-![One photograph, read once, offered as four finished edits: Natural, Soft, Vivid and Dramatic](docs/images/02-candidates.webp)
-
-<sub>One frame, four candidate edits. Not four filters over the same numbers — four readings of the
-photograph, each computed from its own histogram and EXIF.</sub>
+<p align="center">
+<img src="docs/images/02-candidates.webp" width="745" alt="One photograph, read once, offered as four finished edits: Natural, Soft, Vivid and Dramatic">
+</p>
+<p align="center"><sub>One frame, four candidate edits. Not four filters over the same numbers — four readings of the
+photograph, each computed from its own histogram and EXIF.</sub></p>
 
 ## Why
 
@@ -27,30 +43,38 @@ it will invent one, confidently, and you will never know which answers were gues
 
 ## Status: pre-alpha
 
-**Works:** the editor, with the full adjustment set, colour mixer, geometry and a mask kit (subject,
-sky, radial, graduated, brush, colour range, luminance, skin, per-person). On-device scene reading,
-shown in the panel so you can see what it made of the photograph. Candidate generation. Culling with
-keep/reject, and a filmstrip that groups a shoot by burst, day, place or near-duplicate. A scan that
-measures sharpness, exposure extremes and near-duplicates, and marks the sharpest frame of each
-burst. Batch apply across a folder, and exporting every photo you edited in one go — JPEG, HEIC, PNG
-or 16-bit TIFF, at full size or a chosen long edge, in sRGB, Display P3 or Adobe RGB. Non-destructive
-throughout: your originals are never written to.
+**Works today**
 
-**Not yet:** no public release build. Preference learning exists in the engine but isn't wired into a
-loop. Auto-masks can be refined and inverted but not brushed by hand. Nothing generative, on purpose.
+- The full editor: the adjustment set, colour mixer and geometry, with a mask kit — subject, sky,
+  radial, graduated, brush, colour range, luminance, skin, per-person
+- On-device scene reading, shown in the panel so you can see what it made of the photograph
+- Candidate generation: three or four finished edits per photograph
+- Culling: keep/reject, a filmstrip that groups a shoot by burst, day, place or near-duplicate, and
+  a scan that marks the sharpest frame of each burst
+- Batch apply across a folder, and exporting every photo you edited in one go — JPEG, HEIC, PNG or
+  16-bit TIFF, at full size or a chosen long edge, in sRGB, Display P3 or Adobe RGB
+- Non-destructive throughout: your originals are never written to
+
+**Not yet**
+
+- No public release build
+- Preference learning exists in the engine but isn't wired into a loop
+- Auto-masks can be refined and inverted, but not brushed by hand
+- Nothing generative, on purpose
 
 479 tests — 390 over the core, 89 over the app. CI runs on every pull request.
 
-![The Kelvin window: the photograph, what the model made of the scene, the candidate list, the
-adjustment panel and the filmstrip](docs/images/01-hero.webp)
+<p align="center">
+<img src="docs/images/01-hero.webp" width="900" alt="The Kelvin window: the photograph, what the model made of the scene, the candidate list, the adjustment panel and the filmstrip">
+</p>
+<p align="center"><sub>The scene reading is shown rather than hidden — "landscape · golden hour · object", and a
+sentence explaining what it saw. If it read the photograph wrongly, you can tell at a glance.</sub></p>
 
-<sub>The scene reading is shown rather than hidden — "landscape · golden hour · object", and a
-sentence explaining what it saw. If it read the photograph wrongly, you can tell at a glance.</sub>
-
-![The filmstrip grouped into capture days, each with a frame count](docs/images/04-grouped-by-day.webp)
-
-<sub>A shoot grouped by capture day. It also groups by burst, by place, or by near-duplicate — and
-under burst or near-duplicate it marks the sharpest frame of each run.</sub>
+<p align="center">
+<img src="docs/images/04-grouped-by-day.webp" width="900" alt="The filmstrip grouped into capture days, each with a frame count">
+</p>
+<p align="center"><sub>A shoot grouped by capture day. It also groups by burst, by place, or by near-duplicate — and
+under burst or near-duplicate it marks the sharpest frame of each run.</sub></p>
 
 ## Running it
 
@@ -99,10 +123,14 @@ Mac-only is a choice, not an oversight — see [`docs/DECISIONS.md`](docs/DECISI
 | [docs/EVALUATION](docs/EVALUATION.md) | How edit quality is measured |
 | [docs/RELEASING](docs/RELEASING.md) | Building a signed, notarised release |
 
-## Contributing
+## Contributing and support
 
 Bug reports and reproductions are welcome and carry no licensing question. For patches, see
 [CONTRIBUTING.md](CONTRIBUTING.md).
+
+If Kelvin earns a place in your workflow, you can [sponsor its development](https://github.com/sponsors/wmwallace).
+Sponsors are thanked by name inside the app — the list ships in each release, because Kelvin
+doesn't phone home, not even for a thank-you.
 
 Kelvin is written by its owner working with Claude, and the commit history says so. That history is
 kept rather than squashed — it records what was measured and why decisions went the way they did.
