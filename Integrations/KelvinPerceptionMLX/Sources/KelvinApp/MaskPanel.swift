@@ -66,6 +66,16 @@ private struct SubjectRow: View {
                     .font(Theme.ui(11, isMasked ? .semibold : .regular))
                     .foregroundColor(Theme.ink)
                     .lineLimit(1)
+                // A name the classifier was not sure of says so, with the number. Vision reads a
+                // car correctly at 0.51 and a garden gnome as an owl at 0.46, and nothing in the
+                // score separates them — so the honest thing is to show the guess and let it be
+                // typed over, rather than hide both behind "Subject".
+                if let sure = instance.nameConfidence {
+                    Text("\(Int((sure * 100).rounded()))%?")
+                        .font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
+                        .monospacedDigit()
+                        .help("A guess — rename it after adding the mask")
+                }
                 Spacer(minLength: 6)
                 // Coverage, as a share of the frame. Two rows both called "Person" are otherwise
                 // indistinguishable in a list, and size is usually how you tell the subject from
@@ -87,8 +97,15 @@ private struct SubjectRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(isMasked ? "Already masked — click to select it"
-                       : "Edit \(instance.label) on its own")
+        .help(helpText)
+    }
+
+    private var helpText: String {
+        let what = isMasked ? "Already masked — click to select it"
+                            : "Edit \(instance.label) on its own"
+        guard let sure = instance.nameConfidence else { return what }
+        return what + "\n\nThe name is a guess — \(Int((sure * 100).rounded()))% confident. "
+             + "You can rename the mask once it is added."
     }
 
     /// Rounded to whole percent, floored at 1: a subject that reads "0% of frame" looks like a

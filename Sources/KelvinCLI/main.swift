@@ -328,9 +328,9 @@ case "instances":
         let found = SubjectInstances.detect(in: image)
         print("instances: \(found.count)")
         for i in found {
-            print(String(format: "  %@  label=%@  kind=%@  coverage=%.3f  box=(%.3f,%.3f,%.3f,%.3f)",
-                         i.id, i.label, String(describing: i.kind), i.coverage,
-                         i.boundingBox.minX, i.boundingBox.minY, i.boundingBox.width, i.boundingBox.height))
+            let sure = i.nameConfidence.map { String(format: "guess %.2f", $0) } ?? "certain"
+            print(String(format: "  %@  label=%@ (%@)  kind=%@  coverage=%.3f",
+                         i.id, i.label, sure, String(describing: i.kind), i.coverage))
         }
     } catch { fail("\(error)") }
 

@@ -49,9 +49,26 @@ public enum SubjectInstances {
         /// Normalised bounding box (Vision convention, bottom-left origin), for hit-testing a
         /// click on the photo and for placing a label.
         public let boundingBox: CGRect
+        /// How sure the classifier was about `label`, 0–1, or nil when the name did not come from
+        /// the classifier at all — people and cats/dogs are found by dedicated Vision requests and
+        /// named from what found them, so there is no guess to qualify.
+        ///
+        /// Shown to the user, and that is the point. Vision recognises a car perfectly well
+        /// (automobile 0.51, vehicle 0.51, car 0.47) while failing Apple's calibrated precision
+        /// gate, and the same gate correctly rejects reading a garden gnome as an owl at 0.46.
+        /// Confidence cannot separate those two, so the honest move is to show the guess with its
+        /// number and let the name be corrected, rather than silently show "Subject" for both.
+        public let nameConfidence: Double?
 
         /// This instance's identity without its pixels — cheap to keep in a session and to hand
         /// back at export time. See `reidentify`.
+        public init(id: String, label: String, kind: Kind, mask: CIImage, coverage: Double,
+                    boundingBox: CGRect, nameConfidence: Double? = nil) {
+            self.id = id; self.label = label; self.kind = kind; self.mask = mask
+            self.coverage = coverage; self.boundingBox = boundingBox
+            self.nameConfidence = nameConfidence
+        }
+
         public var reference: Reference { Reference(id: id, kind: kind, boundingBox: boundingBox) }
     }
 
@@ -223,9 +240,11 @@ public enum SubjectInstances {
                     // out a jellyfish, a frog, or the one rock the photograph is actually about —
                     // but it cannot say what it found, and a list of rows all reading "Subject" is
                     // barely better than not separating them. So classify the crop.
+                    let named = name(of: mask, in: image, box: box)
                     found.append(Instance(id: "instance\(index)",
-                                          label: name(of: mask, in: image, box: box) ?? Kind.object.noun,
-                                          kind: .object, mask: mask, coverage: cover, boundingBox: box))
+                                          label: named?.label ?? Kind.object.noun,
+                                          kind: .object, mask: mask, coverage: cover, boundingBox: box,
+                                          nameConfidence: named?.confidence))
                 }
             }
         }
@@ -264,7 +283,10 @@ public enum SubjectInstances {
     /// Returns nil rather than guessing. A confidently wrong label ("Banana" on your hero rock) is
     /// worse than the honest fallback of "Subject", because the label is what the photographer
     /// clicks on to find the thing they mean.
-    private static func name(of mask: CIImage, in image: CIImage, box: CGRect) -> String? {
+    /// The name for one instance, and how sure it is — nil confidence means the classifier
+    /// cleared Apple's precision gate and the name is not presented as a guess.
+    private static func name(of mask: CIImage, in image: CIImage,
+                             box: CGRect) -> (label: String, confidence: Double?)? {
         let ext = image.extent
         // Crop to the instance, with a little margin — classifiers do better with some context
         // than with a shape shaved to its outline.
@@ -281,11 +303,22 @@ public enum SubjectInstances {
         guard (try? handler.perform([request])) != nil,
               let results = request.results else { return nil }
 
-        // Precision over recall: this names a UI row, so a wrong name is costlier than none.
-        let candidates = results
-            .filter { $0.hasMinimumPrecision(0.7, forRecall: 0.1) }
-            .filter { !generic.contains($0.identifier) }
-        return preferredLabel(from: candidates.map { ($0.identifier, Double($0.confidence)) })
+        // The precision gate USED to be a veto, and it silently swallowed correct answers: a car
+        // that Vision reads as automobile 0.51 / vehicle 0.51 / car 0.47 fails it outright, so the
+        // row said "Subject". It is not useless though — it is what stops a garden gnome in a tree
+        // being confidently labelled "Owl" at 0.46, and no confidence threshold separates those
+        // two cases because the wrong one scores as highly as the right one.
+        //
+        // So it stops being a veto and becomes a measurement. Anything past the gate is trusted
+        // outright; anything short of it is still offered, with its confidence, for the user to
+        // accept or type over. A visible guess that can be corrected beats a hidden one.
+        let usable = results.filter { !generic.contains($0.identifier) }
+        let trusted = usable.filter { $0.hasMinimumPrecision(0.7, forRecall: 0.1) }
+        let pool = trusted.isEmpty ? usable : trusted
+        guard let name = preferredLabel(from: pool.map { ($0.identifier, Double($0.confidence)) })
+        else { return nil }
+        let confidence = pool.map { Double($0.confidence) }.max() ?? 0
+        return (name, trusted.isEmpty ? confidence : nil)
     }
 
     /// Choose which surviving classification to show, and format it for a mask row.
@@ -314,6 +347,7 @@ public enum SubjectInstances {
     /// Labels that are true but useless on a mask row — they describe the picture, not the thing.
     private static let generic: Set<String> = [
         "outdoor", "indoor", "nature", "landscape", "sky", "plant", "material", "structure",
+        "machine", "device", "equipment",
         "abstract", "art", "light", "shape", "pattern", "texture", "surface", "background",
         "macro", "close_up", "photography", "still_life", "reflection", "shadow", "colour", "color"
     ]
