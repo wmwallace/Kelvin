@@ -151,13 +151,21 @@ public enum ImageWriter {
     /// A shared software CIContext. Software rendering keeps output deterministic and
     /// headless-safe — the byte-exact raster helpers (`rgba8Bytes`/`rgba8Sampled`) and the no-op
     /// invariant test must not depend on a GPU being present. CIContext is thread-safe.
-    static let context = CIContext(options: [.useSoftwareRenderer: true])
+    ///
+    /// KEEP `nonisolated(unsafe)`, even though a recent Xcode calls it unnecessary. It is
+    /// unnecessary *on the macOS 27 SDK*, where CIContext gained Sendable. On the SDK CI runs
+    /// (Xcode 16), it has not, and Swift 6 mode rejects the declaration outright. Removing it on
+    /// the strength of that warning is what broke the build for everyone but the author once
+    /// already — the warning is local and the error is everybody else's.
+    nonisolated(unsafe) static let context = CIContext(options: [.useSoftwareRenderer: true])
 
     /// GPU-accelerated context for encoding EXPORTS. High-quality resampling + full precision, but
     /// hardware-backed so a full-resolution write uses the Metal GPU instead of the CPU — much
     /// faster on a big RAW, and visually identical to the software path (only the byte-exact test
     /// helpers above need determinism). Falls back to software if no GPU is present (headless CI).
-    static let exportContext: CIContext = {
+    ///
+    /// `nonisolated(unsafe)` is load-bearing on the CI SDK — see the note on `context` above.
+    nonisolated(unsafe) static let exportContext: CIContext = {
         let opts: [CIContextOption: Any] = [.highQualityDownsample: true, .allowLowPower: false]
         if let device = MTLCreateSystemDefaultDevice() { return CIContext(mtlDevice: device, options: opts) }
         return CIContext(options: [.useSoftwareRenderer: true])

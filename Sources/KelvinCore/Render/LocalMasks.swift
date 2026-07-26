@@ -1,5 +1,9 @@
 import Foundation
-import CoreImage
+// @preconcurrency because CoreImage's Sendable annotations differ by SDK: on the macOS 27
+// SDK CIImage is Sendable and this is a no-op, while on the SDK shipped with Xcode 16 —
+// which is what CI runs — it is not, and Swift 6 mode rejects the stored properties below.
+// Without this the project builds on the author's Mac and fails for everybody else.
+@preconcurrency import CoreImage
 
 /// One place that segments an image into the local masks the pipeline understands (subject, sky)
 /// and measures each region's mean luminance. Both numbers the *engine* needs to size a local
