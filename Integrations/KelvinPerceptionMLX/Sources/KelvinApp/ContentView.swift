@@ -2166,9 +2166,24 @@ final class AppState: ObservableObject {
             let deg = await Task.detached(priority: .userInitiated) {
                 HorizonDetector.levelingAngle(in: input.image)
             }.value
-            guard let self, let deg, self.imageURL == photo else { return }
-            self.straighten = min(15, max(-15, deg))
+            guard let self, self.imageURL == photo else { return }
+            // EVERY outcome says something. This returned silently when no horizon was found and
+            // rotated by ~0° when the frame was already level — two different kinds of nothing,
+            // both indistinguishable from a broken button. Reported as exactly that.
+            guard let deg else {
+                self.statusMessage = "No clear horizon on this frame — drag Straighten by eye instead"
+                return
+            }
+            let target = min(15, max(-15, deg))
+            if abs(target - self.straighten) < 0.05 {
+                self.statusMessage = abs(target) < 0.05
+                    ? "Already level — no rotation needed"
+                    : String(format: "Already levelled at %+.1f° — nothing to change", target)
+                return
+            }
+            self.straighten = target
             self.onEdit()
+            self.statusMessage = String(format: "Levelled — rotated %+.1f°", target)
         }
     }
 
