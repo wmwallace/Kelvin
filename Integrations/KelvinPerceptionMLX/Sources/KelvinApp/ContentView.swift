@@ -416,7 +416,8 @@ final class AppState: ObservableObject {
 
     init() {
         Self.assertCoversTheContract()
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let appSupport = (FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support"))
             .appendingPathComponent(Branding.displayName)
         let logURL = appSupport.appendingPathComponent("preferences.jsonl")
         self.store = PreferenceStore(logFileURL: logURL)
@@ -2688,6 +2689,15 @@ final class AppState: ObservableObject {
         // The user is left believing they exported something.
         guard let fullRes = fullResCI, let recipe = activeRecipe else {
             statusMessage = "Still preparing this photo — try the export again in a moment"
+            return
+        }
+        // Refuse a destination that is one of the source photographs. Batch export refuses this
+        // inside `Destination.prepare`; the single-photo path has only the save panel's generic
+        // "Replace?" prompt, which is no defence against writing over the original being edited.
+        let target = exportURL.standardizedFileURL.resolvingSymlinksInPath()
+        let sources = folderPhotos + (imageURL.map { [$0] } ?? [])
+        if sources.contains(where: { $0.standardizedFileURL.resolvingSymlinksInPath() == target }) {
+            statusMessage = "That would overwrite an original — choose a different name or folder"
             return
         }
         isProcessing = true

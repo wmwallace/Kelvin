@@ -18,6 +18,6 @@ public enum RecipeIO {
     }
 
     public static func save(_ recipe: Recipe, to url: URL) throws {
-        try data(for: recipe).write(to: url)
+        try data(for: recipe).write(to: url, options: .atomic)
     }
 }

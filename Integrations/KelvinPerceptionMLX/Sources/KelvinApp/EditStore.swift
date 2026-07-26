@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import KelvinCore
+import os
 
 /// What the user did to a photo, in a form that survives quitting the app.
 ///
@@ -47,8 +48,13 @@ struct SavedEdit: Codable {
 /// surprise.
 enum EditStore {
 
+    private static let log = Logger(subsystem: Branding.bundleIdentifier, category: "EditStore")
+
     static let directory: URL = {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory,
+                                                  in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
+        let base = appSupport
             .appendingPathComponent(Branding.displayName)
             .appendingPathComponent("edits")
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
@@ -67,8 +73,14 @@ enum EditStore {
     static func save(_ edit: SavedEdit, for photo: URL) {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(edit) else { return }
-        try? data.write(to: url(for: photo), options: .atomic)
+        do {
+            try encoder.encode(edit).write(to: url(for: photo), options: .atomic)
+        } catch {
+            // A save that fails silently loses someone's edit. There is no UI to reach from
+            // here, but the failure at least lands somewhere findable. The filename stays
+            // redacted by default — the log must not leak what the app promises not to.
+            log.error("Failed to save edit for \(photo.lastPathComponent): \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     static func load(for photo: URL) -> SavedEdit? {
@@ -116,9 +128,14 @@ enum FlagStore {
     }
 
     private static func persist() {
-        try? FileManager.default.createDirectory(at: EditStore.directory,
-                                                 withIntermediateDirectories: true)
-        try? JSONEncoder().encode(cache).write(to: url, options: .atomic)
+        do {
+            try FileManager.default.createDirectory(at: EditStore.directory,
+                                                    withIntermediateDirectories: true)
+            try JSONEncoder().encode(cache).write(to: url, options: .atomic)
+        } catch {
+            Logger(subsystem: Branding.bundleIdentifier, category: "FlagStore")
+                .error("Failed to save keep/reject flags: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     static func flag(for photo: URL) -> PhotoFlag? {

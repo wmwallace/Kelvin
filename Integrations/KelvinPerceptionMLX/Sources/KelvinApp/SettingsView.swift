@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import KelvinCore
+import KelvinPerceptionMLX
 
 /// Settings — ⌘, — which the app did not have.
 ///
@@ -125,7 +126,8 @@ enum PerceptionInfo {
 
     static var modelName: String {
         // The repo id without the org prefix: "Qwen3.5-2B-MLX-4bit" is the useful half.
-        let id = ProcessInfo.processInfo.environment["KELVIN_MODEL"] ?? "mlx-community/Qwen3.5-2B-MLX-4bit"
+        let id = ProcessInfo.processInfo.environment["KELVIN_MODEL"]
+            ?? MLXPerceptionProvider.defaultModelID
         return id.split(separator: "/").last.map(String.init) ?? id
     }
 

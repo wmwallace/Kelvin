@@ -28,10 +28,9 @@ enum PanelAccessories {
         let checkbox = NSButton(checkboxWithTitle: "Include the rest of the folder",
                                 target: OpenTarget.shared, action: #selector(OpenTarget.toggled(_:)))
         OpenTarget.shared.state = state
-        OpenTarget.shared.explanation = NSTextField(wrappingLabelWithString: "")
+        let explanation = NSTextField(wrappingLabelWithString: "")
+        OpenTarget.shared.explanation = explanation
         checkbox.state = state.includeFolderOnOpen ? .on : .off
-
-        let explanation = OpenTarget.shared.explanation!
         explanation.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         explanation.textColor = .secondaryLabelColor
         OpenTarget.shared.refresh()

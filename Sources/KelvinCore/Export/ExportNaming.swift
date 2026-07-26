@@ -141,7 +141,11 @@ public enum ExportNaming {
                 .appendingPathExtension(ext)
             if !exists(candidate) { return candidate }
         }
-        return first
+        // A thousand collisions on one stem. Whatever is happening, returning an existing URL
+        // would overwrite; a unique suffix keeps the no-clobber promise at the cost of an ugly name.
+        return directory
+            .appendingPathComponent("\(stem)-\(UUID().uuidString)")
+            .appendingPathExtension(ext)
     }
 
     // MARK: - Vocabulary
