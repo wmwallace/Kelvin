@@ -30,6 +30,7 @@ func printUsage() {
       \(tool) corpus-degrade --in-dir <good-photos> --out-dir <corpus>
       \(tool) eval --corpus <dir> [--out <report.json>] [--engine-version <v>]
       \(tool) triage-compare --in-dir <dir> [--limit <n>]
+      \(tool) instances --in <image>
 
     triage-compare options:
       --in-dir   Directory of photographs to measure. Required.
@@ -315,6 +316,23 @@ case "corpus-degrade":
     } catch {
         fail("\(error)")
     }
+
+case "instances":
+    // Debug/inspection: what SubjectInstances finds, and what it decided to call each one.
+    // The naming is Vision's classifier over a crop, gated on precision and confidence, so when a
+    // row reads "Subject" it means the gate rejected everything — this prints what it rejected.
+    do {
+        let rest = Array(arguments.dropFirst())
+        guard let inPath = value(for: "--in", in: rest) else { fail("instances requires --in") }
+        let image = try ImageDecoder.decode(url: URL(fileURLWithPath: inPath))
+        let found = SubjectInstances.detect(in: image)
+        print("instances: \(found.count)")
+        for i in found {
+            print(String(format: "  %@  label=%@  kind=%@  coverage=%.3f  box=(%.3f,%.3f,%.3f,%.3f)",
+                         i.id, i.label, String(describing: i.kind), i.coverage,
+                         i.boundingBox.minX, i.boundingBox.minY, i.boundingBox.width, i.boundingBox.height))
+        }
+    } catch { fail("\(error)") }
 
 case "mask":
     // Debug/inspection: segment the subject and preview a local lift through the mask.

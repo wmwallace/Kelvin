@@ -164,4 +164,40 @@ final class SubjectInstancesTests: XCTestCase {
     func testInfiniteExtentIsHandled() {
         XCTAssertTrue(SubjectInstances.detect(in: CIImage(color: .white)).isEmpty)
     }
+
+    // MARK: - Which of the equally-confident labels gets shown
+
+    /// Measured on a real frame: Vision returns a whole taxonomy for one squirrel, every level at
+    /// the same confidence. Picking the first meant the row read "Animal" — true, and useless for
+    /// telling one mask from another.
+    func testPrefersTheMostSpecificOfEquallyConfidentLabels() {
+        let observed: [(String, Double)] = [
+            ("animal", 0.991), ("mammal", 0.991), ("rodent", 0.991), ("squirrel", 0.991)
+        ]
+        XCTAssertEqual(SubjectInstances.preferredLabel(from: observed), "Squirrel")
+    }
+
+    /// Specificity is a tie-break and nothing more. A less confident but more specific guess must
+    /// never win, or one bad frame renames a subject to something it plainly is not.
+    func testConfidenceStillBeatsSpecificity() {
+        let candidates: [(String, Double)] = [("car", 0.62), ("sportscar", 0.31)]
+        XCTAssertEqual(SubjectInstances.preferredLabel(from: candidates), "Car")
+    }
+
+    /// Float confidences that print the same can differ in the last bit; near-ties count as ties.
+    func testNearIdenticalConfidencesCountAsTied() {
+        let candidates: [(String, Double)] = [("bird", 0.8001), ("owl", 0.8)]
+        XCTAssertEqual(SubjectInstances.preferredLabel(from: candidates), "Owl")
+    }
+
+    /// A guess too weak to show is no guess. The row falls back to "Subject" rather than inventing.
+    func testNothingConfidentEnoughIsNotNamed() {
+        XCTAssertNil(SubjectInstances.preferredLabel(from: [("flower", 0.20), ("lily", 0.19)]))
+        XCTAssertNil(SubjectInstances.preferredLabel(from: []))
+    }
+
+    /// Identifiers are lowercase and sometimes compound.
+    func testCompoundIdentifiersAreReadable() {
+        XCTAssertEqual(SubjectInstances.preferredLabel(from: [("sea_turtle", 0.9)]), "Sea turtle")
+    }
 }

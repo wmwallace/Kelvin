@@ -285,10 +285,29 @@ public enum SubjectInstances {
         let candidates = results
             .filter { $0.hasMinimumPrecision(0.7, forRecall: 0.1) }
             .filter { !generic.contains($0.identifier) }
-        guard let top = candidates.max(by: { $0.confidence < $1.confidence }),
-              top.confidence > 0.25 else { return nil }
+        return preferredLabel(from: candidates.map { ($0.identifier, Double($0.confidence)) })
+    }
+
+    /// Choose which surviving classification to show, and format it for a mask row.
+    ///
+    /// Vision answers with a taxonomy rather than one label: a single squirrel comes back as
+    /// `animal`, `mammal`, `rodent` and `squirrel` at *identical* confidence — 0.991 each,
+    /// measured — ordered general to specific. `max(by:)` keeps the FIRST of equal elements, so
+    /// every such row read "Animal" while "Squirrel" sat in the same list at the same confidence.
+    ///
+    /// Among candidates that are equally confident, the most specific one is the one worth
+    /// showing: "Squirrel" tells you which mask you are about to edit and "Animal" does not.
+    /// Ties only — this never trades confidence for specificity.
+    static func preferredLabel(from candidates: [(identifier: String, confidence: Double)],
+                               minimumConfidence: Double = 0.25) -> String? {
+        guard let best = candidates.max(by: { $0.confidence < $1.confidence }),
+              best.confidence > minimumConfidence else { return nil }
+        // Float confidences that print identically can differ in the last bit, so compare with a
+        // tolerance rather than for exact equality.
+        let tied = candidates.filter { $0.confidence >= best.confidence - 0.0005 }
+        let chosen = tied.last ?? best
         // Identifiers are lowercase, sometimes compound ("sea_turtle").
-        let words = top.identifier.replacingOccurrences(of: "_", with: " ")
+        let words = chosen.identifier.replacingOccurrences(of: "_", with: " ")
         return words.prefix(1).uppercased() + words.dropFirst()
     }
 
