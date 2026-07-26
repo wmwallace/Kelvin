@@ -322,7 +322,7 @@ final class AppState: ObservableObject {
     /// that misses someone once does not destroy the work — reopening after it comes back finds
     /// it again.
     private func rekeyInstanceMasks() {
-        let saved = userMasks.enumerated().filter { $0.element.kind == .instance }
+        let saved = userMasks.enumerated().filter { $0.element.boundInstanceId != nil }
         guard !saved.isEmpty, !subjectInstances.isEmpty else { return }
         let references = saved.compactMap { entry -> SubjectInstances.Reference? in
             guard let id = entry.element.instanceId, let box = entry.element.instanceBox else { return nil }
@@ -342,7 +342,9 @@ final class AppState: ObservableObject {
 
     /// Add (or re-select) the mask for one detected subject.
     func addInstanceMask(_ instance: SubjectInstances.Instance) {
-        if let existing = userMasks.first(where: { $0.instanceId == instance.id }) {
+        // Kind-checked: a SKIN mask scoped to this person is a different tool, and its existence
+        // must not make the pick-list refuse to create the person's lift mask.
+        if let existing = userMasks.first(where: { $0.kind == .instance && $0.instanceId == instance.id }) {
             selectedUserMaskId = existing.id
             onEdit()          // selecting is not creating — do not re-arm the overlay
             return
@@ -2719,7 +2721,7 @@ final class AppState: ObservableObject {
     /// dropping a local edit from an export is the failure worth avoiding here.
     private func fullResolutionMaskBitmaps(for fullRes: CIImage) -> [String: CIImage] {
         var bitmaps = LocalMasks.measure(in: fullRes).bitmaps
-        let wanted = Set(userMasks.compactMap { $0.kind == .instance ? $0.instanceId : nil })
+        let wanted = Set(userMasks.compactMap(\.boundInstanceId))
         guard !wanted.isEmpty else { return bitmaps }
 
         let references = subjectInstances.filter { wanted.contains($0.id) }.map(\.reference)
@@ -2778,7 +2780,7 @@ final class AppState: ObservableObject {
         // passes are, and they are the expensive part.
         let masksNeeded = recipe.masks?.isEmpty == false
         let references = subjectInstances.filter { inst in
-            userMasks.contains { $0.kind == .instance && $0.instanceId == inst.id }
+            userMasks.contains { $0.boundInstanceId == inst.id }
         }.map(\.reference)
         let input = ExportInput(fullRes: fullRes, recipe: recipe, url: exportURL,
                                 metadata: exportMetadata, format: exportFormat,
@@ -3723,10 +3725,12 @@ struct ContentView: View {
                 handle(at: CGPoint(x: center.x + dir.x * 54, y: center.y + dir.y * 54), small: true) {
                     appState.rotateLinear(mid, handleAt: $0, in: rect)
                 }
-            case .instance:
+            case .instance, .skin:
                 // No handles — the shape is the subject's, not something to drag. But show WHICH
                 // subject: the sliders below say "Exposure", and on a frame with three people
-                // there is otherwise nothing on screen saying whose.
+                // there is otherwise nothing on screen saying whose. A skin mask scoped to one
+                // person gets the same box for the same reason; scoped to everyone it has no
+                // instanceId, the lookup below finds nothing, and no box is drawn.
                 //
                 // GATED ON THE OVERLAY TOGGLE, and that is the fix for a real complaint: this box
                 // used to be drawn for as long as the mask was selected, with nothing anywhere
@@ -3741,7 +3745,7 @@ struct ContentView: View {
                     SubjectHighlight(instance: instance, imageFrame: rect,
                                      normToView: { appState.normToView($0, $1, in: rect) })
                 }
-            case .brush, .colorRange, .luminance, .skin, .background, .subject:
+            case .brush, .colorRange, .luminance, .background, .subject:
                 EmptyView()
             }
         }
@@ -4299,6 +4303,7 @@ struct ContentView: View {
                             brushRadius: Binding(get: { appState.brushRadius },
                                                  set: { appState.brushRadius = $0 }),
                             hasPerson: appState.hasPerson,
+                            people: appState.subjectInstances.filter { $0.kind == .person },
                             onAdjustBegin: { appState.isAdjustingMaskTone = true },
                             onAdjustEnd: { appState.isAdjustingMaskTone = false },
                             canMoveUp: appState.userMasks.first?.id != m.id,
@@ -5041,6 +5046,14 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
     var refinement: Refinement = .none
     var refineCenter = 0.06, refineRange = 0.12, refineSoftness = 0.06
 
+    /// The subject this mask is bound to, when it is bound to one — `.instance` always, `.skin`
+    /// when scoped to a single person. Every site that re-identifies subjects (export at full
+    /// resolution, re-keying after a fresh detection) must use THIS rather than testing the kind,
+    /// so a new instance-bound kind cannot be silently left out of re-identification again.
+    var boundInstanceId: String? {
+        (kind == .instance || kind == .skin) ? instanceId : nil
+    }
+
     enum CodingKeys: String, CodingKey {
         case id, kind, cx, cy, radius, angle, softness, stamps, selCenter, selRange, selSoftness
         case exposure, contrast, saturation, instanceId, instanceLabel, instanceBox, instanceKind
@@ -5188,18 +5201,28 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
                         selection: MaskSelection(kind: k, center: selCenter, range: selRange, softness: selSoftness), tightness: t,
                         refine: ref)
         case .skin:
-            // NOT a kind any more — the subject region, narrowed to skin hues. Identical pixels to
-            // the old bespoke path; it is just said in the general vocabulary now.
+            // NOT a kind any more — a region narrowed to skin hues. Identical pixels to the old
+            // bespoke path; it is just said in the general vocabulary now.
             //
             // `ref` wins when the user has set one. The editor shows the REFINE picker on every
             // kind, and this case used to ignore it and build a colour selection from the legacy
             // skin fields regardless — so choosing "Light" on a skin mask silently gave you a
             // colour narrowing instead. Worse than a dead control: the picture changed, just not
             // in the way that was asked for.
+            let skinRef = ref ?? MaskSelection(kind: .color, center: selCenter,
+                                               range: selRange, softness: selSoftness)
+            if let inst = instanceId {
+                // ONE person's skin: that subject's region, narrowed the same way. The mask's id
+                // IS the instance id — the same contract as `.instance`, which is how the
+                // renderer finds the bitmap and how export re-identifies the person at full
+                // resolution. On a frame with three people, brightening the bride's skin must
+                // not also brighten the groom's.
+                return Mask(id: inst, type: "instance", source: "segmentation", invert: inv,
+                            feather: f != 0 ? f : 30, opacity: 1, adjustments: adj, tightness: t,
+                            refine: skinRef)
+            }
             return Mask(id: id.uuidString, type: "subject", source: "segmentation", invert: inv,
-                        feather: f, opacity: 1, adjustments: adj, tightness: t,
-                        refine: ref ?? MaskSelection(kind: .color, center: selCenter,
-                                                     range: selRange, softness: selSoftness))
+                        feather: f, opacity: 1, adjustments: adj, tightness: t, refine: skinRef)
         case .background:
             // Also not a kind: the subject region, inverted. `invert` was always the modifier
             // doing the work — this case existed only to set it for you.
@@ -5237,6 +5260,9 @@ struct UserMaskEditor: View {
     var clearStrokes: () -> Void = {}
     var brushRadius: Binding<Double> = .constant(0.09)
     var hasPerson = true
+    /// The detected people on this frame, for the skin mask's "whose skin" choice. Empty means
+    /// no choice to offer.
+    var people: [SubjectInstances.Instance] = []
     /// Bracket a tone drag so the overlay steps aside while the photograph is being judged —
     /// otherwise you are grading 60% red and the slider appears to do nothing useful.
     var onAdjustBegin: () -> Void = {}
@@ -5350,8 +5376,44 @@ struct UserMaskEditor: View {
                 ToneSlider(label: "Range", value: $mask.selRange, range: 0.01...0.5, step: 0.005, unit: "", onChange: onChange, neutral: 0.1)
                 ToneSlider(label: "Softness", value: $mask.selSoftness, range: 0...0.3, step: 0.005, unit: "", onChange: onChange)
             case .skin:
-                Text("Skin tones within the detected person, fair across complexions.")
+                Text(mask.instanceId == nil
+                     ? "Skin tones within the detected person, fair across complexions."
+                     : "Skin tones within \(mask.instanceLabel ?? "this person") only — nobody else's.")
                     .font(Theme.mono(9)).foregroundColor(Theme.inkDim).fixedSize(horizontal: false, vertical: true)
+                // WHOSE skin, when the frame offers a choice. On a frame with three people a
+                // skin edit lands on all of them unless it is told otherwise, and brightening
+                // the bride must not also brighten the groom. Hidden with one person — a picker
+                // with one real answer is furniture.
+                if people.count > 1 {
+                    HStack {
+                        Text("Whose skin").font(Theme.ui(11)).foregroundColor(Theme.inkDim)
+                        Spacer()
+                        Picker("", selection: Binding(
+                            get: { mask.instanceId ?? "" },
+                            set: { chosen in
+                                if let person = people.first(where: { $0.id == chosen }) {
+                                    mask.instanceId = person.id
+                                    mask.instanceLabel = person.label
+                                    mask.instanceBox = person.boundingBox
+                                    mask.instanceKind = person.kind
+                                    if mask.name == nil || mask.name?.hasPrefix("Skin") == true {
+                                        mask.name = "Skin — \(person.label)"
+                                    }
+                                } else {
+                                    mask.instanceId = nil; mask.instanceLabel = nil
+                                    mask.instanceBox = nil; mask.instanceKind = nil
+                                    if mask.name?.hasPrefix("Skin") == true { mask.name = nil }
+                                }
+                                onChange()
+                            })) {
+                            Text("Everyone").tag("")
+                            ForEach(people, id: \.id) { person in
+                                Text(person.label).tag(person.id)
+                            }
+                        }
+                        .pickerStyle(.menu).labelsHidden().frame(maxWidth: 170)
+                    }
+                }
                 ToneSlider(label: "Tolerance", value: $mask.selRange, range: 0.02...0.18, step: 0.005, unit: "", onChange: onChange, neutral: 0.06)
             case .background:
                 Text("Everything except the detected subject — darken or desaturate it to make the subject pop.")

@@ -113,6 +113,27 @@ final class UserMaskTests: XCTestCase {
                        + "complexions, not a second opinion about it")
     }
 
+    /// A skin mask scoped to one person is THAT subject's region narrowed to skin hues — same id
+    /// contract as a per-subject mask, so the renderer finds the person's bitmap and export
+    /// re-identifies them at full resolution. Brightening the bride's skin must not brighten the
+    /// groom's.
+    func testSkinScopedToOnePersonBecomesThatInstanceStillNarrowedToColour() {
+        var vm = UserMaskVM(kind: .skin)
+        vm.selCenter = 0.06; vm.selRange = 0.06; vm.selSoftness = 0.05
+        vm.instanceId = "person0"
+        let mask = vm.toMask()
+        XCTAssertEqual(mask.type, "instance")
+        XCTAssertEqual(mask.id, "person0",
+                       "the mask's id must BE the instance id — that is how the renderer looks up "
+                       + "the person's bitmap")
+        XCTAssertEqual(mask.refine, Mask.skinRefinement,
+                       "scoping to one person must not lose the skin narrowing — that would be a "
+                       + "person mask wearing a skin mask's name")
+        XCTAssertEqual(vm.boundInstanceId, "person0",
+                       "export re-identification walks boundInstanceId; a scoped skin mask must "
+                       + "be visible to it or the edit silently vanishes from full-size output")
+    }
+
     /// The skin range the app hands a new mask is Core's, not a private copy that can drift from it.
     @MainActor
     func testANewSkinMaskUsesCoresDocumentedSkinRange() throws {
