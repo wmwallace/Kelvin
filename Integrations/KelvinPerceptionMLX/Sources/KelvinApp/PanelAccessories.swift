@@ -88,7 +88,8 @@ enum PanelAccessories {
             keepers.isEnabled = false
             keepers.state = .off
             state.batchKeepersOnly = false
-            keepers.toolTip = "Flag photos with K first, and this becomes a choice"
+            keepers.toolTip = "Flag photos first — press P on each, or click the flag on its "
+                + "filmstrip tile — and this becomes a choice"
         }
         container.addSubview(keepers)
         keepers.translatesAutoresizingMaskIntoConstraints = false
@@ -145,9 +146,11 @@ enum PanelAccessories {
             [NSGridCell.emptyContentView, location, NSGridCell.emptyContentView, NSGridCell.emptyContentView]
         ]
         if showScope {
-            // Which photos, chosen with the flags the filmstrip already has: K marks a keeper, and
-            // this exports only those. The count is in the title because a scope control that
-            // doesn't say how many it selects is a guessing game.
+            // Which photos, chosen with the flags the filmstrip already has: P marks a keeper
+            // (the culling keys are P/X, straight from the shortcuts sheet — a string here once
+            // said K, promising a key nobody bound, which is a mistake this codebase has already
+            // paid for once). The count is in the title because a scope control that doesn't say
+            // how many it selects is a guessing game.
             let keepers = NSButton(
                 checkboxWithTitle: "Only photos flagged Keep (\(state.editedKeeperCount) of \(state.editedCount) edited)",
                 target: target, action: #selector(ExportTarget.keepersChanged(_:)))
@@ -156,7 +159,8 @@ enum PanelAccessories {
                 keepers.isEnabled = false
                 keepers.state = .off
                 state.exportKeepersOnly = false
-                keepers.toolTip = "Flag edited photos with K first, and this becomes a choice"
+                keepers.toolTip = "Flag edited photos first — press P on each, or click the flag on "
+                + "its filmstrip tile — and this becomes a choice"
             }
             rows.append([NSGridCell.emptyContentView, keepers,
                          NSGridCell.emptyContentView, NSGridCell.emptyContentView])

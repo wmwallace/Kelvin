@@ -2813,7 +2813,7 @@ final class AppState: ObservableObject {
         let targets = exportTargets(keepersOnly: exportKeepersOnly)
         guard !targets.isEmpty else {
             statusMessage = exportKeepersOnly
-                ? "No edited photos are flagged Keep — press K on the ones you want, or untick Kept only"
+                ? "No edited photos are flagged Keep — press P on the ones you want, or untick Kept only"
                 : "Nothing edited in this shoot yet"
             return
         }
@@ -2931,7 +2931,7 @@ final class AppState: ObservableObject {
         }
         guard !files.isEmpty else {
             statusMessage = batchKeepersOnly
-                ? "No photos are flagged Keep — press K on the ones you want, or untick Kept only"
+                ? "No photos are flagged Keep — press P on the ones you want, or untick Kept only"
                 : "Nothing to batch — the folder has no photos Kelvin can read"
             return
         }
