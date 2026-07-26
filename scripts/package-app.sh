@@ -275,7 +275,10 @@ fi
 if [ "${KELVIN_DMG:-1}" = "1" ] && command -v hdiutil >/dev/null; then
   DMG="$OUT/$NAME-$VERSION.dmg"
   STAGE="$OUT/.dmg-stage"
-  echo "▸ Building $DMG…"
+  # Braces are load-bearing: bash treats the bytes of the following ellipsis as part of the
+  # identifier, so "$DMG…" expands a variable called DMG… — unset, and fatal under set -u.
+  # This line is why the disk image had never once been built.
+  echo "▸ Building ${DMG}…"
   rm -rf "$STAGE" "$DMG"; mkdir -p "$STAGE"
   cp -Rc "$APP" "$STAGE/" 2>/dev/null || cp -R "$APP" "$STAGE/"
   ln -s /Applications "$STAGE/Applications"
