@@ -74,6 +74,33 @@ enum PanelAccessories {
 
     // MARK: Export
 
+    /// The one control Batch apply needs: which frames of the open shoot. Same Keep flag the
+    /// filmstrip and export scope already use — K is the selection mechanism everywhere.
+    static func batchOptions(_ state: AppState) -> NSView {
+        let container = FlippedView()
+        let target = ExportTarget.shared
+        target.state = state
+        let keepers = NSButton(
+            checkboxWithTitle: "Only photos flagged Keep (\(state.keeperCount) of \(state.folderPhotos.count))",
+            target: target, action: #selector(ExportTarget.batchKeepersChanged(_:)))
+        keepers.state = state.batchKeepersOnly ? .on : .off
+        if state.keeperCount == 0 {
+            keepers.isEnabled = false
+            keepers.state = .off
+            state.batchKeepersOnly = false
+            keepers.toolTip = "Flag photos with K first, and this becomes a choice"
+        }
+        container.addSubview(keepers)
+        keepers.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            container.widthAnchor.constraint(equalToConstant: 520),
+            keepers.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
+            keepers.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
+            keepers.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12)
+        ])
+        return container
+    }
+
     /// `showScope` adds the "kept only" row and belongs only on the export-EDITED panel — a scope
     /// choice over many photos is meaningless when the panel is exporting exactly one.
     static func exportOptions(_ state: AppState, showScope: Bool = false) -> NSView {
@@ -193,6 +220,9 @@ enum PanelAccessories {
         }
         @objc func keepersChanged(_ sender: NSButton) {
             state?.exportKeepersOnly = (sender.state == .on)
+        }
+        @objc func batchKeepersChanged(_ sender: NSButton) {
+            state?.batchKeepersOnly = (sender.state == .on)
         }
 
         /// A quality control beside PNG or TIFF is a control that does nothing, which is the exact

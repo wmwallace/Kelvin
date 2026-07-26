@@ -448,6 +448,16 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(s.exportTargets(keepersOnly: false), [a, b])
     }
 
+    /// Batch over the open shoot: everything by default, keepers when asked — and no edit is
+    /// required, because a batch is how the edits get made in the first place.
+    func testBatchTargetsNeedNoEditAndHonourTheKeepFlag() {
+        let a = url("a.ARW"), b = url("b.ARW"), c = url("c.ARW")
+        let s = state(with: [a, b, c])
+        s.flags = [b: .keep, c: .reject]
+        XCTAssertEqual(s.batchTargets(keepersOnly: false), [a, b, c])
+        XCTAssertEqual(s.batchTargets(keepersOnly: true), [b])
+    }
+
     // MARK: Small readouts
 
     /// A restored edit should say *when*, in words a person reads, and should still say something

@@ -1074,6 +1074,15 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Same idea for Batch apply. Not persisted, same reason as `exportKeepersOnly`.
+    @Published var batchKeepersOnly = false
+
+    /// The photos a batch run over the open shoot will adapt, in filmstrip order. An edit is not
+    /// required — batch creates edits — so the only narrowing is the Keep flag when asked.
+    func batchTargets(keepersOnly: Bool) -> [URL] {
+        folderPhotos.filter { !keepersOnly || flags[$0] == .keep }
+    }
+
     var keeperCount: Int { folderPhotos.filter { flags[$0] == .keep }.count }
     var rejectCount: Int { folderPhotos.filter { flags[$0] == .reject }.count }
 
@@ -2904,11 +2913,26 @@ final class AppState: ObservableObject {
     /// and scene — copying identical slider values would wreck half of them. The manual tweaks
     /// you made on the reference photo ride along on top of each adapted recipe.
     func runBatchApply(inputDir: URL, outputDir: URL) async {
-        // Same silent guard as the export path had, and worse here: the user has already chosen an
-        // input folder AND an output folder before anything checks whether a look is selected.
+        do {
+            let files = try BatchApply.imageFiles(in: inputDir)
+            await runBatchApply(files: files, outputDir: outputDir)
+        } catch {
+            statusMessage = "Batch failed — \(error)"
+        }
+    }
+
+    func runBatchApply(files: [URL], outputDir: URL) async {
+        // Backstop only — the panel checks this before it opens, so nobody chooses folders for a
+        // batch that was never going to run.
         guard let styleId = selectedCandidateId,
               let style = CandidateStyle.all.first(where: { $0.id == styleId }) else {
-            statusMessage = "Pick a look first — Batch apply propagates the one you have chosen"
+            statusMessage = "Pick a look first — Batch apply adapts the one you have chosen"
+            return
+        }
+        guard !files.isEmpty else {
+            statusMessage = batchKeepersOnly
+                ? "No photos are flagged Keep — press K on the ones you want, or untick Kept only"
+                : "Nothing to batch — the folder has no photos Kelvin can read"
             return
         }
         let tweaks = manualTweaks()
@@ -2919,7 +2943,6 @@ final class AppState: ObservableObject {
                              maskStrength: maskStrength, userMasks: userMasks)
         isProcessing = true
         do {
-            let files = try BatchApply.imageFiles(in: inputDir)
             // THE DESTINATION IS CHECKED BEFORE A SINGLE BYTE IS WRITTEN. Measured in Core: the
             // CLI's batch, pointed at its own source folder, silently rewrote every original in
             // place — shasums before and after. Non-negotiable #3 says the original is never
@@ -4473,12 +4496,46 @@ struct ContentView: View {
     }
 
     private func openBatchPanel() {
+        // The look is checked BEFORE any panel opens. The old order let someone choose two
+        // folders and only then learn nothing would happen — the guard inside runBatchApply
+        // even complained about it in a comment, while still being the only guard.
+        guard let styleId = appState.selectedCandidateId,
+              let style = CandidateStyle.all.first(where: { $0.id == styleId }) else {
+            appState.statusMessage = "Pick a look first — Batch apply adapts the one you have chosen"
+            return
+        }
+
+        // A shoot is already open, so it IS the input — asking someone to re-choose the folder
+        // they are looking at reads as a different feature. One panel: where the copies go.
+        if appState.folderPhotos.count > 1 {
+            let output = NSOpenPanel()
+            output.title = "Batch apply \(style.label)"
+            output.message = "Each of the \(appState.folderPhotos.count) photos in this shoot is read "
+                + "and corrected on its own — \(style.label) and your tweaks are adapted per frame, "
+                + "not copied. Choose where the edited copies go; your originals are never touched."
+            output.prompt = "Apply \(style.label)"
+            output.canChooseDirectories = true; output.canChooseFiles = false
+            output.canCreateDirectories = true
+            output.accessoryView = PanelAccessories.batchOptions(appState)
+            output.isAccessoryViewDisclosed = true
+            guard output.runModal() == .OK, let outputDir = output.url else { return }
+            let files = appState.batchTargets(keepersOnly: appState.batchKeepersOnly)
+            Task { await appState.runBatchApply(files: files, outputDir: outputDir) }
+            return
+        }
+
+        // No shoot open: the original two-panel flow, which now says what each panel is for.
         let input = NSOpenPanel()
-        input.title = "Choose the shoot folder"
+        input.title = "Batch apply \(style.label) — choose the shoot folder"
+        input.message = "Every photo in the folder you choose is read and corrected on its own, "
+            + "with \(style.label) and your tweaks adapted to each frame."
+        input.prompt = "Choose shoot"
         input.canChooseDirectories = true; input.canChooseFiles = false
         guard input.runModal() == .OK, let inputDir = input.url else { return }
         let output = NSOpenPanel()
-        output.title = "Choose where to write edits"
+        output.title = "Choose where to write the edited copies"
+        output.message = "Copies land here; the originals in the shoot folder are never touched."
+        output.prompt = "Apply \(style.label)"
         output.canChooseDirectories = true; output.canChooseFiles = false; output.canCreateDirectories = true
         guard output.runModal() == .OK, let outputDir = output.url else { return }
         Task { await appState.runBatchApply(inputDir: inputDir, outputDir: outputDir) }
