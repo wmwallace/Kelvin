@@ -1100,9 +1100,14 @@ final class AppState: ObservableObject {
         guard !thumbnailsInFlight.contains(url) else { return nil }
         thumbnailsInFlight.insert(url)
         Task { [weak self] in
-            let image = await Task.detached(priority: .utility) {
-                PhotoBrowser.thumbnail(for: url)
+            // Returns a CGImage rather than an NSImage: NSImage's Sendable conformance exists on
+            // the macOS 27 SDK and is unavailable on the one CI builds against, so handing one out
+            // of a detached task compiles here and fails there. CGImage is Sendable on both, and
+            // the NSImage is wanted on the main actor anyway.
+            let cg = await Task.detached(priority: .utility) {
+                PhotoBrowser.thumbnailCG(for: url)
             }.value
+            let image = cg.map { NSImage(cgImage: $0, size: .zero) }
             guard let self else { return }
             self.thumbnailsInFlight.remove(url)
             if let image { self.thumbnails[url] = image }
@@ -3096,7 +3101,12 @@ final class AppState: ObservableObject {
 
     /// Shared with the background candidate build — a CIContext is thread-safe and expensive to
     /// create, so one instance serves both.
-    nonisolated static let sharedContext: CIContext = {
+    ///
+    /// KEEP the `(unsafe)`. Xcode 27 reports it as unnecessary because the macOS 27 SDK marks
+    /// CIContext Sendable; the SDK CI builds against does not, and there plain `nonisolated`
+    /// cannot be applied to a non-Sendable constant at all. Same trap as
+    /// KelvinCore/Render/ImageWriter — this site is where it was taken.
+    nonisolated(unsafe) static let sharedContext: CIContext = {
         let opts: [CIContextOption: Any] = [.cacheIntermediates: true, .highQualityDownsample: false]
         if let device = MTLCreateSystemDefaultDevice() { return CIContext(mtlDevice: device, options: opts) }
         return CIContext(options: opts)

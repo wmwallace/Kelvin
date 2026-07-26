@@ -28,14 +28,23 @@ enum PhotoBrowser {
     ///   roughly a second of work *per thumbnail*, for a 160 px image. `IfAbsent` takes the embedded
     ///   preview when there is one (there almost always is) and only decodes as a fallback.
     static func thumbnail(for url: URL, maxPixel: Int = 160) -> NSImage? {
+        thumbnailCG(for: url, maxPixel: maxPixel).map { NSImage(cgImage: $0, size: .zero) }
+    }
+
+    /// The same work, stopping at the CGImage.
+    ///
+    /// Thumbnails are decoded off the main actor and the result has to cross back. NSImage's
+    /// Sendable conformance is available on the macOS 27 SDK and unavailable on the one CI builds
+    /// against, so returning one from a detached task compiles on this Mac and fails everywhere
+    /// else. CGImage is Sendable on both, and the wrapper costs nothing on the main actor.
+    static func thumbnailCG(for url: URL, maxPixel: Int = 160) -> CGImage? {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: maxPixel
         ]
-        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
-        return NSImage(cgImage: cg, size: .zero)
+        return CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
     }
 }
 
