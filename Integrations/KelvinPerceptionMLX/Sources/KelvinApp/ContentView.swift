@@ -1,5 +1,8 @@
 import SwiftUI
-import CoreImage
+// @preconcurrency: this file hands CIImages to detached tasks in several places. CIImage is
+// Sendable on the macOS 27 SDK and not on the one CI builds against, so those crossings are
+// clean here and data-race errors there. See KelvinCore/Render/ImageWriter for the full note.
+@preconcurrency import CoreImage
 import CryptoKit
 import UniformTypeIdentifiers
 import Metal
