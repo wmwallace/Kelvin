@@ -76,8 +76,8 @@ lives in iCloud — that's your setup, and Kelvin neither adds to it nor takes i
 A released build carries the model inside it and needs no network to work. Built from source, it
 fetches the weights once, at a pinned revision.
 
-Your originals are never modified: edits are kept in Kelvin's own folder, keyed to the photograph's
-contents, so nothing is written beside your files. Exports carry the original metadata by default,
+Your originals are never modified: edits are kept in Kelvin's own folder, never beside your
+files. Exports carry the original metadata by default,
 **including location** — there's a switch in the export panel to strip it, with tests that read the
 file back to check.
 

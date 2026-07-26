@@ -3,10 +3,10 @@
 This is the contract between the model and the renderer. Get it right early; it is
 expensive to change once saved edits exist in the wild.
 
-(Where a saved edit lives: JSON in Application Support, keyed by a hash of the photograph's
-contents, so it survives the file being renamed or moved. **No `.kelvin` file is written next to
-anyone's originals** — `Branding.sidecarExtension` is reserved for the day that changes and frozen
-in advance. The schema below is the same either way; only its address would move.)
+(Where a saved edit lives: JSON in Kelvin's own Application Support folder, keyed to the
+photograph. **No `.kelvin` file is written next to anyone's originals** —
+`Branding.sidecarExtension` is reserved for the day that changes and frozen in advance. The
+schema below is the same either way; only its address would move.)
 
 There are two documents, and the split between them is the whole architecture.
 

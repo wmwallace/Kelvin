@@ -54,8 +54,8 @@ The unit of work is a **recipe** — a small struct of numbers — not pixels. R
 serialize to JSON. The original is never written to.
 
 Where that JSON lives has moved once already and may move again: today an edit is written to
-Application Support under a hash of the photograph's contents, so it survives the file being
-renamed or moved, and nothing is ever dropped beside someone's originals without being asked.
+Kelvin's own Application Support folder, keyed to the photograph, and nothing is ever dropped
+beside someone's originals without being asked.
 `Branding.sidecarExtension` is reserved for the day sidecars ship and is deliberately frozen now,
 before anything in the wild depends on it. Do not write a `.kelvin` file next to a photo without a
 conversation — the current behaviour is a promise the app makes on the Privacy line of its README.
@@ -95,7 +95,7 @@ longer than it was true — every row below is now load-bearing in a signed, not
 | Render | Metal / Core Image kernels | Same memory as the decoder, no copy |
 | Inference | MLX Swift | On-device, no Python in the bundle |
 | Perception model | Qwen3.5-2B-MLX-4bit, Apache-2.0, pinned revision | Fits in memory alongside image buffers; bundled, so a release downloads nothing |
-| Persistence | JSON edits in Application Support, keyed by the photo's content hash | Human-readable, and an edit survives its photo being renamed or moved |
+| Persistence | JSON edits in Kelvin's Application Support folder, keyed to the photograph | Human-readable, and never written beside anyone's originals |
 
 **Known cost of this stack:** Metal shaders do not port. This is a Mac-only app unless
 rewritten. That is accepted — Mac-only is positioning, not a limitation.
