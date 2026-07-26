@@ -253,10 +253,47 @@ public enum CraftFix {
         public let face: FaceSkin.Reading
         public let issues: [AestheticEvaluator.Issue]
 
-        public init(stats: ImageStatistics, face: FaceSkin.Reading) {
+        /// `condition` is what the scene reading made of the light. Supply it wherever it is known:
+        /// it is the only thing that can tell warm light somebody chose from a white balance
+        /// somebody got wrong, and without it the cast flag fires on golden hour.
+        public init(stats: ImageStatistics, face: FaceSkin.Reading,
+                    condition: Condition? = nil) {
             self.stats = stats
             self.face = face
-            self.issues = AestheticEvaluator.score(stats: stats, face: face).issues
+            let measured = AestheticEvaluator.score(stats: stats, face: face).issues
+            self.issues = measured.filter {
+                !($0 == .colorCast && Reading.warmthIsThePoint(stats: stats, condition: condition))
+            }
+        }
+
+        /// Whether a warm cast is the photograph rather than a fault in it.
+        ///
+        /// Measured on a real golden-hour frame: a*=+4.4, b*=+23.3, magnitude 23.7 against a
+        /// threshold of 22 — flagged "strong colour cast", with a Fix button offering to take the
+        /// golden hour out of a golden-hour photograph. The measurement is not wrong; the light
+        /// really is that warm. Calling it a defect is what is wrong.
+        ///
+        /// No statistic settles this. Warm light genuinely tints the neutrals, so measuring the
+        /// neutrals flags it too, and a magnitude threshold cannot separate a sunset from an
+        /// uncorrected tungsten room. What settles it is what kind of light the scene reading saw
+        /// — which is exactly the division of labour this app is built on: the model judges the
+        /// scene, arithmetic does the numbers.
+        ///
+        /// Deliberately narrow. It only ever excuses WARMTH, and only in the conditions where warm
+        /// light is the subject. A green cast under those same conditions still gets flagged,
+        /// because nothing makes a green cast intentional.
+        static func warmthIsThePoint(stats: ImageStatistics,
+                                     condition: Condition?) -> Bool {
+            guard let condition else { return false }
+            switch condition {
+            case .goldenHour, .indoorTungsten, .nightAmbient:
+                break
+            default:
+                return false
+            }
+            // Warm means yellow-dominant: b* well positive, and not overwhelmed by a green or
+            // magenta a* that would make this something other than warmth.
+            return stats.chromaB > 0 && stats.chromaB > abs(stats.chromaA) * 1.5
         }
 
         /// How far past its professional floor `issue` currently sits — 0 when it is inside the

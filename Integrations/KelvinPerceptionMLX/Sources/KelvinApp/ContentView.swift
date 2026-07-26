@@ -2617,7 +2617,12 @@ final class AppState: ObservableObject {
             guard let stats = try? ImageStatistics.compute(r) else {
                 self.lastCraftReading = nil; self.activeCraftIssues = []; return
             }
-            let reading = CraftFix.Reading(stats: stats, face: FaceSkin.read(in: r))
+            // The scene reading goes in with the measurement. Warm light measures exactly like a
+            // white-balance error, and only the perception layer knows which one this is — without
+            // it, every golden-hour frame is told it has a "strong colour cast" and offered a Fix
+            // button that would take the golden hour out of it.
+            let reading = CraftFix.Reading(stats: stats, face: FaceSkin.read(in: r),
+                                           condition: self.perception?.lighting.condition)
             self.lastCraftReading = reading
             self.activeCraftIssues = reading.issues
         }

@@ -317,6 +317,19 @@ case "corpus-degrade":
         fail("\(error)")
     }
 
+case "cast":
+    // Debug/inspection: the colour-cast measurement behind the "strong colour cast" warning,
+    // split into its direction so a warm scene can be told from a white-balance error.
+    do {
+        let rest = Array(arguments.dropFirst())
+        guard let inPath = value(for: "--in", in: rest) else { fail("cast requires --in") }
+        let image = try ImageDecoder.decode(url: URL(fileURLWithPath: inPath))
+        let s = try ImageStatistics.compute(image)
+        let mag = (s.chromaA * s.chromaA + s.chromaB * s.chromaB).squareRoot()
+        print(String(format: "  a*=%+6.2f (green-/red+)  b*=%+6.2f (blue-/yellow+)  magnitude=%5.2f%@",
+                     s.chromaA, s.chromaB, mag, mag > 22 ? "  FLAGGED" : ""))
+    } catch { fail("\(error)") }
+
 case "instances":
     // Debug/inspection: what SubjectInstances finds, and what it decided to call each one.
     // The naming is Vision's classifier over a crop, gated on precision and confidence, so when a
