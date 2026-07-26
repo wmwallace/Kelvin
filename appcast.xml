@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Kelvin's update feed. Served at https://usekelvin.app/appcast.xml via a redirect to this
+     file on main — so a release updates this by a commit, and the website is never touched.
+     Each enclosure is signed with the Sparkle EdDSA key (docs/RELEASING.md); installed copies
+     verify against the public key baked into their Info.plist. -->
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>Kelvin</title>
+    <link>https://usekelvin.app</link>
+    <description>Updates for Kelvin, the local-AI photo editor for macOS.</description>
+    <item>
+      <title>Kelvin 0.1.0 — first public build</title>
+      <pubDate>Sun, 26 Jul 2026 11:03:27 -0700</pubDate>
+      <sparkle:version>191</sparkle:version>
+      <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <link>https://github.com/wmwallace/Kelvin/releases/tag/v0.1.0</link>
+      <enclosure
+        url="https://github.com/wmwallace/Kelvin/releases/download/v0.1.0/Kelvin-0.1.0.dmg"
+        sparkle:edSignature="+qo1mlHzG5EGmrt5CsMDymQyvK0OKU2p1hM7608atbl4W6TCY+3DnkkABsgTHp1lLJizoxD5yYSoXaJSpQGxCg=="
+        length="1515611940"
+        type="application/octet-stream"/>
+    </item>
+  </channel>
+</rss>
