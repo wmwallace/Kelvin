@@ -51,7 +51,14 @@ If you find yourself writing a demosaicing algorithm, stop and ask.
 ### 3. Edits are parametric and non-destructive, always
 
 The unit of work is a **recipe** — a small struct of numbers — not pixels. Recipes
-serialize to a sidecar file. The original is never written to.
+serialize to JSON. The original is never written to.
+
+Where that JSON lives has moved once already and may move again: today an edit is written to
+Application Support under a hash of the photograph's contents, so it survives the file being
+renamed or moved, and nothing is ever dropped beside someone's originals without being asked.
+`Branding.sidecarExtension` is reserved for the day sidecars ship and is deliberately frozen now,
+before anything in the wild depends on it. Do not write a `.kelvin` file next to a photo without a
+conversation — the current behaviour is a promise the app makes on the Privacy line of its README.
 
 Generative pixel editing (inpainting, object removal) is a *separate, later* feature
 that operates on top of a recipe. It is never part of the base edit path.
@@ -77,7 +84,8 @@ and when an edit comes out ugly you cannot tell which one failed.
 
 ## Stack
 
-**Proposed, not yet confirmed with the owner. Confirm before the first real commit.**
+**Settled and shipped.** This said "proposed, confirm before the first real commit" for far
+longer than it was true — every row below is now load-bearing in a signed, notarised build.
 
 | Layer | Choice | Why |
 |---|---|---|
@@ -86,8 +94,8 @@ and when an edit comes out ugly you cannot tell which one failed.
 | RAW decode | Core Image (`CIRAWFilter`) | Apple's decoder + camera profiles, zero cost |
 | Render | Metal / Core Image kernels | Same memory as the decoder, no copy |
 | Inference | MLX Swift | On-device, no Python in the bundle |
-| Perception model | Small open VLM, 4B-class, 4-bit | Fits in memory alongside image buffers |
-| Persistence | JSON sidecars + SQLite index | Human-readable edits, fast library |
+| Perception model | Qwen3.5-2B-MLX-4bit, Apache-2.0, pinned revision | Fits in memory alongside image buffers; bundled, so a release downloads nothing |
+| Persistence | JSON edits in Application Support, keyed by the photo's content hash | Human-readable, and an edit survives its photo being renamed or moved |
 
 **Known cost of this stack:** Metal shaders do not port. This is a Mac-only app unless
 rewritten. That is accepted — Mac-only is positioning, not a limitation.

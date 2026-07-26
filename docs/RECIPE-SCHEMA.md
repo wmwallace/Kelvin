@@ -1,7 +1,12 @@
 # Recipe schema
 
 This is the contract between the model and the renderer. Get it right early; it is
-expensive to change once sidecar files exist in the wild.
+expensive to change once saved edits exist in the wild.
+
+(Where a saved edit lives: JSON in Application Support, keyed by a hash of the photograph's
+contents, so it survives the file being renamed or moved. **No `.kelvin` file is written next to
+anyone's originals** — `Branding.sidecarExtension` is reserved for the day that changes and frozen
+in advance. The schema below is the same either way; only its address would move.)
 
 There are two documents, and the split between them is the whole architecture.
 
@@ -68,7 +73,7 @@ scene-agnostic recipes rather than committing to a scene-specific look.
 
 ## Stage 2 — Recipe (the engine writes this)
 
-Fully numeric. Renderer-agnostic. Serializes to the sidecar.
+Fully numeric. Renderer-agnostic. Serializes with the saved edit.
 
 ```json
 {
@@ -164,7 +169,7 @@ These are tests, not suggestions.
    `Renderer.sourceNormalized` / `framedNormalized` are that exact inverse pair, and are
    round-trip tested against the renderer.
 6. **Masks are references, not bitmaps.** The recipe stores mask *type and parameters*;
-   the actual mask is regenerated or cached separately. A sidecar must stay small enough
+   the actual mask is regenerated or cached separately. A saved edit must stay small enough
    to sit in git. This holds for every mask kind — see below.
 
 ### Mask kinds

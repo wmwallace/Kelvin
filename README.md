@@ -39,7 +39,7 @@ throughout: your originals are never written to.
 **Not yet:** no public release build. Preference learning exists in the engine but isn't wired into a
 loop. Auto-masks can be refined and inverted but not brushed by hand. Nothing generative, on purpose.
 
-467 tests — 378 over the core, 89 over the app. CI runs on every pull request.
+479 tests — 390 over the core, 89 over the app. CI runs on every pull request.
 
 ![The Kelvin window: the photograph, what the model made of the scene, the candidate list, the
 adjustment panel and the filmstrip](docs/images/01-hero.webp)
@@ -73,7 +73,8 @@ Opens RAW, JPEG, HEIC, PNG and TIFF.
   There is no server to send anything to.
 - **Released builds make no network requests at all** — the model ships inside the app. Building from
   source downloads the weights once, at a fixed revision.
-- **Your originals are never modified.** Edits are stored separately.
+- **Your originals are never modified.** Edits are kept in Kelvin's own folder, keyed to the
+  photograph's contents — nothing is written beside your files, not even a sidecar.
 - **Exports carry the original photo's metadata by default, including its location.** There is a
   switch in the export panel to strip that, with tests that read the file back to prove it works.
 

@@ -75,14 +75,45 @@ The app is about 1.7 GB with the weights inside; the DMG about 1.4 GB. **GitHub 
 at 2 GB.** The packaging script warns if the bundle crosses it. A larger perception model would not
 fit, and would force a split-asset design.
 
+## Before the FIRST published release
+
+Two things freeze the moment a binary leaves this machine, and neither can be added later:
+
+- **Generate the Sparkle EdDSA key pair**, and keep the private half out of the repository. The
+  appcast URL is compiled into every build; ship one without it and that build can never update
+  itself.
+- **Adding Sparkle makes two published claims false, and both must change in the same commit.**
+  The README's Privacy section says released builds "make no network requests at all", and the
+  Settings ▸ Perception pane says the same to the user's face. An update check is a network
+  request. Say what it actually is — a version check that sends no data about the photographs —
+  rather than leaving a sentence that a packet capture disproves.
+- **Back up the `.p12` and the `.p8` somewhere other than this Mac.** Apple lets you download a
+  `.p8` once, ever.
+
 ## First-run check
 
-Confirm the thing a stranger will actually get:
+Check the app, then check the thing a stranger actually downloads — they are not the same artifact,
+and only the second one has been through the image:
 
 ```sh
 xcrun stapler validate dist/Kelvin.app     # works offline?
-spctl -a -vvv -t exec dist/Kelvin.app      # should say: accepted, source=Notarized Developer ID
+spctl -a -vvv -t exec dist/Kelvin.app      # accepted, source=Notarized Developer ID
+
+MP=$(hdiutil attach dist/Kelvin-*.dmg -nobrowse -readonly | tail -1 | awk '{print $NF}')
+spctl -a -vvv -t exec "$MP/Kelvin.app"     # the copy a user drags to /Applications
+xcrun stapler validate "$MP/Kelvin.app"
+hdiutil detach "$MP"
 ```
+
+Then launch the bundled binary directly, so its stderr is visible, and give it a photograph:
+
+```sh
+KELVIN_DEMO_IMAGE=~/somewhere/a-photo.jpg dist/Kelvin.app/Contents/MacOS/kelvin-app
+```
+
+Watch it read the scene. The failure this catches — resource bundles in the wrong place — lets the
+app launch, show its empty state and its icon, and then die on the first photo. Opening the `.app`
+by double-clicking hides the one line of stderr that says why.
 
 ## Troubleshooting
 

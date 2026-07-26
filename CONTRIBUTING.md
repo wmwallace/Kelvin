@@ -21,6 +21,22 @@ enforced: `scripts/package-app.sh` refuses to produce a signed build without sta
 **Requirements:** macOS 14+, Xcode 16.3+ (Swift 6.1 for the app package; the core package needs
 only Swift 6.0).
 
+### It has to build on an older Xcode than yours, and CI is the judge
+
+Apple gave CoreImage's `CIImage` and `CIContext`, and AppKit's `NSImage`, their `Sendable`
+conformances in the macOS 27 SDK. CI builds against the SDK in Xcode 16, where they do not have
+them, and under Swift 6 that difference is not cosmetic — it is a dozen hard errors in code that
+compiles perfectly on a current Mac.
+
+Two consequences worth knowing before they cost you an afternoon:
+
+- Several files import CoreImage `@preconcurrency`, and a few declarations carry
+  `nonisolated(unsafe)`. **A recent Xcode will tell you these are unnecessary and offer to remove
+  them.** They are unnecessary *on that SDK only*. Removing them breaks the build for everyone
+  else, which has already happened once. Each site says so in a comment.
+- A green build on your machine proves less than you would like. If you cannot run the CI SDK
+  locally, push to a branch and let CI answer — it is the only place both toolchains are checked.
+
 ## Build and test
 
 The repository is two packages, deliberately:
@@ -31,11 +47,11 @@ The repository is two packages, deliberately:
 | `Integrations/KelvinPerceptionMLX` | The SwiftUI app and the on-device vision model backend | minutes |
 
 ```sh
-make build && make test      # the core package: 369 tests, ~18s
+make build && make test      # the core package: 390 tests, ~15s
 make app                     # launch the editor
 make open PHOTO=~/path/to/photo.ARW    # launch it on one frame
 
-cd Integrations/KelvinPerceptionMLX && swift build && swift test    # the app package: 85 tests
+cd Integrations/KelvinPerceptionMLX && swift build && swift test    # the app package: 89 tests
 ```
 
 `make` builds into `$TMPDIR` rather than `.build`. That is not a preference — this repository may sit
