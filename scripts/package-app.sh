@@ -308,10 +308,21 @@ if [ "${KELVIN_DMG:-1}" = "1" ] && command -v hdiutil >/dev/null; then
   echo "✓ $DMG ($(du -sh "$DMG" | cut -f1))"
 fi
 touch "$APP"   # nudge Finder/LaunchServices to refresh the icon
-SIZE="$(du -sh "$APP" | cut -f1)"
-echo "✓ $APP ($SIZE)"
-# GitHub caps a release asset at 2 GB. With the weights inside, the bundle is ~1.6 GB — fine today,
+echo "✓ $APP ($(du -sh "$APP" | cut -f1))"
+
+# GitHub caps a release asset at 2 GB. With the weights inside the bundle is ~1.7 GB — fine today,
 # and the number to watch if the model is ever replaced with a larger one.
-case "$SIZE" in *G) [ "${SIZE%G}" -ge 2 ] 2>/dev/null && \
-  echo "  WARNING: over GitHub's 2 GB release-asset limit — this cannot be attached to a release" >&2 ;;
-esac
+#
+# Measured in whole megabytes, because `test` compares integers only: the previous version read
+# `[ "${SIZE%G}" -ge 2 ]` against a du -sh string of "1.7", which is not an integer. So the guard
+# never fired — and worse, `test` exits 2 on a malformed comparison, and this was the last command
+# in the file, so a build that signed, notarised, stapled and passed Gatekeeper still reported
+# failure to anything reading the exit code.
+MEGABYTES="$(du -sm "$APP" | cut -f1)"
+if [ "$MEGABYTES" -ge 2048 ]; then
+  echo "  WARNING: ${MEGABYTES} MB is over GitHub's 2 GB release-asset limit — this cannot be" >&2
+  echo "  attached to a release. Ship the disk image, or host the download off GitHub." >&2
+fi
+
+# Explicitly, so that a warning check can never again decide the exit status of the whole build.
+exit 0
