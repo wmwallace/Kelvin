@@ -7,12 +7,10 @@ edits to choose between. Pick one, tune it, apply it across the shoot.
 
 Everything runs on your machine. Your photographs never leave it.
 
-<!--
-SCREENSHOTS GO HERE — the highest-value thing missing from this file. For a photo editor, one image
-of the candidate picker beside a real photograph does more than every paragraph below it. Worth
-having: the candidate picker on a real frame, the mask panel with a subject selected, and the
-filmstrip grouped into bursts.
--->
+![One photograph, read once, offered as four finished edits: Natural, Soft, Vivid and Dramatic](docs/images/02-candidates.webp)
+
+<sub>One frame, four candidate edits. Not four filters over the same numbers — four readings of the
+photograph, each computed from its own histogram and EXIF.</sub>
 
 ## Why
 
@@ -42,6 +40,17 @@ throughout: your originals are never written to.
 loop. Auto-masks can be refined and inverted but not brushed by hand. Nothing generative, on purpose.
 
 467 tests — 378 over the core, 89 over the app. CI runs on every pull request.
+
+![The Kelvin window: the photograph, what the model made of the scene, the candidate list, the
+adjustment panel and the filmstrip](docs/images/01-hero.webp)
+
+<sub>The scene reading is shown rather than hidden — "landscape · golden hour · object", and a
+sentence explaining what it saw. If it read the photograph wrongly, you can tell at a glance.</sub>
+
+![The filmstrip grouped into capture days, each with a frame count](docs/images/04-grouped-by-day.webp)
+
+<sub>A shoot grouped by capture day. It also groups by burst, by place, or by near-duplicate — and
+under burst or near-duplicate it marks the sharpest frame of each run.</sub>
 
 ## Running it
 
