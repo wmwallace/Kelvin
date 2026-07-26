@@ -66,6 +66,15 @@ public enum Branding {
     // when clicked — the app itself never fetches them.
 
     public static let repositoryURL = "https://github.com/wmwallace/Kelvin"
+
+    /// Where a released copy checks for updates (Sparkle's SUFeedURL, injected into the
+    /// Info.plist by scripts/package-app.sh — dev builds have no plist and no updater).
+    ///
+    /// FROZEN THE MOMENT THE FIRST BINARY SHIPS, like the bundle identifier: every installed
+    /// copy checks this exact URL forever, which is why the domain was bought before any
+    /// release and why its auto-renew matters (D11). Do not change it even if the product is
+    /// renamed.
+    public static let appcastURL = "https://usekelvin.app/appcast.xml"
     public static let releasesURL = repositoryURL + "/releases"
     public static let issuesURL = repositoryURL + "/issues"
     public static let licenceName = "AGPL-3.0-only"

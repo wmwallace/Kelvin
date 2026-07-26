@@ -98,7 +98,8 @@ telemetry, because there's no server to talk to. If your library already lives i
 lives in iCloud — that's your setup, and Kelvin neither adds to it nor takes it away.
 
 A released build carries the model inside it and needs no network to work. Built from source, it
-fetches the weights once, at a pinned revision.
+fetches the weights once, at a pinned revision. The one thing a release will ever ask the network
+is whether an update exists — and it asks you before it starts asking that.
 
 Your originals are never modified: edits are kept in Kelvin's own folder, never beside your
 files. Exports carry the original metadata by default,

@@ -64,10 +64,36 @@ Measured on a release with the weights inside:
 Two notarisation submissions is unavoidable: the app's ticket can't cover an image that didn't exist
 when it was issued.
 
-## Version numbers
+## Version scheme
 
-`KELVIN_VERSION` sets the version string (default `0.1.0`). The build number comes from the commit
-count, so it always increases — which Sparkle requires and which nothing else has to remember.
+Decided before the first tag, so it never has to be re-decided under release pressure:
+
+- **Marketing version** (`CFBundleShortVersionString`, set by `KELVIN_VERSION`, default `0.1.0`):
+  `MAJOR.MINOR.PATCH`. Pre-1.0, a MINOR bump means features, a PATCH bump means fixes only.
+- **Build number** (`CFBundleVersion`): the commit count, emitted by the packaging script —
+  monotonic by construction, which is what Sparkle requires, and nothing has to remember to bump it.
+- **Tags**: `vX.Y.Z` on the exact commit the release was built from. Cut the tag when the DMG is
+  uploaded, not before. Never reuse a tag, never move one — Sparkle, GitHub Releases and anyone's
+  clone all treat a tag as permanent.
+
+## Updates (Sparkle)
+
+The app carries Sparkle; a released copy checks `Branding.appcastURL`
+(`https://usekelvin.app/appcast.xml`) — only after the user consents, and that URL is frozen the
+moment the first binary ships. The plumbing:
+
+- **Key pair**: generated 26 July 2026 with Sparkle's `generate_keys` (it lives in the build
+  artifacts: `.build/artifacts/sparkle/Sparkle/bin/`). The private half lives in the login
+  Keychain ("Private key for signing Sparkle updates") — never in the repository. Back it up
+  with the release identity; losing it means shipped copies refuse all future updates.
+- **Public key**: baked into the packaging script (it is what shipped copies verify against, and
+  it is not a secret); `KELVIN_SPARKLE_PUBKEY` overrides it if the pair is ever regenerated.
+- **Appcast**: served from the domain (a few KB, permanent URL); the DMG itself is a GitHub
+  release asset. Each release's appcast entry is signed with `sign_update` (same artifacts
+  directory) using the Keychain key.
+- **Binary deltas, before the SECOND release**: with the weights inside, a full update is a
+  1.4 GB download. Sparkle's `BinaryDelta` makes a code-only update a few MB. Getting this wrong
+  once teaches users the app is expensive to keep updated.
 
 ## Sizes
 
@@ -79,15 +105,15 @@ fit, and would force a split-asset design.
 
 Three things need doing before a binary leaves this machine, and none can be done later:
 
-- **Generate the Sparkle EdDSA key pair**, and keep the private half out of the repository. The
-  appcast URL is compiled into every build; ship one without it and that build can never update
-  itself.
-- **Check what the app says about the network once an update check exists.** The README and the
-  Settings ▸ Perception pane are both worded as "needs no network to read a photograph", which
-  stays true with Sparkle in the build. Anything you add that phrases it as *makes* no network
-  requests would not.
+- ~~Generate the Sparkle EdDSA key pair~~ — done 26 July 2026 (see Updates above). The private
+  half is in the login Keychain and still needs backing up with the release identity.
+- ~~Check what the app says about the network once an update check exists.~~ Done with the
+  Sparkle integration: SECURITY.md scopes the appcast check as the one allowed request, the
+  README says a release asks before it ever checks, and Sparkle's standard permission prompt
+  gates automatic checking (`SUEnableAutomaticChecks` is deliberately not set — writing `false`
+  would suppress the prompt rather than defer to it).
 - **Back up the `.p12` and the `.p8` somewhere other than this Mac.** Apple lets you download a
-  `.p8` once, ever.
+  `.p8` once, ever. Back up the Sparkle private key alongside them.
 
 ## First-run check
 

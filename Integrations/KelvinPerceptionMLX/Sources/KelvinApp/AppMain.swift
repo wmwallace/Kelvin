@@ -1,11 +1,25 @@
 import SwiftUI
 import AppKit
 import KelvinCore
+import Sparkle
 
 @main
 struct KelvinApp: App {
     /// Held at App level so both the window and the File menu act on one state.
     @StateObject private var appState = AppState()
+
+    /// Sparkle, but only where Sparkle can mean anything: a bundle whose Info.plist carries
+    /// `SUFeedURL` (scripts/package-app.sh writes it from `Branding.appcastURL`). A `swift run`
+    /// dev build has no plist, so it gets no updater and no menu item rather than a broken one.
+    ///
+    /// Checks are consent-first — Sparkle's standard controller asks the user before it ever
+    /// checks automatically, which is the only stance compatible with SECURITY.md: the update
+    /// check is the one outbound request a released build is allowed, and the user turns it on.
+    private let updaterController: SPUStandardUpdaterController? =
+        Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil
+            ? SPUStandardUpdaterController(startingUpdater: true,
+                                           updaterDelegate: nil, userDriverDelegate: nil)
+            : nil
 
     init() {
         // Become a regular foreground app even when launched unbundled (`swift run`): otherwise
@@ -47,6 +61,11 @@ struct KelvinApp: App {
                 Button("Close Photo") { appState.closeCurrentPhoto() }
                     .keyboardShortcut("w", modifiers: [.command, .shift])
                     .disabled(appState.imageURL == nil)
+            }
+            if let updater = updaterController?.updater {
+                CommandGroup(after: .appInfo) {
+                    Button("Check for Updates…") { updater.checkForUpdates() }
+                }
             }
             // The Help menu was empty, which is where people look before they look anywhere else.
             CommandGroup(replacing: .help) {

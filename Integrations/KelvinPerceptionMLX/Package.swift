@@ -34,7 +34,13 @@ let package = Package(
         // module, renamed). Versions are chosen to satisfy the macro's API surface
         // (HubClient, Repo.ID, AutoTokenizer.from(modelFolder:)).
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
-        .package(url: "https://github.com/huggingface/swift-huggingface", from: "0.9.0")
+        .package(url: "https://github.com/huggingface/swift-huggingface", from: "0.9.0"),
+        // Auto-update for the released .app. MIT-licensed, GPL-compatible. The updater only
+        // activates inside a bundle whose Info.plist carries SUFeedURL (see AppMain) — a
+        // `swift run` dev build has no plist and therefore no update machinery at all.
+        // Pinned exact like mlx-swift-lm: applications pin, and the version in use is the one
+        // the release process has actually been exercised against. Bump deliberately.
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.8.1")
     ],
     targets: [
         .target(
@@ -59,7 +65,8 @@ let package = Package(
             name: "KelvinApp",
             dependencies: [
                 "KelvinPerceptionMLX",
-                .product(name: "KelvinCore", package: "Kelvin")
+                .product(name: "KelvinCore", package: "Kelvin"),
+                .product(name: "Sparkle", package: "Sparkle")
             ]
             // Icon comes from the packaged .app's .icns (CFBundleIconFile) — no runtime
             // Bundle.module lookup, which fatal-errors inside a hand-assembled bundle.
@@ -79,6 +86,13 @@ let package = Package(
                 "KelvinApp",
                 "KelvinPerceptionMLX",
                 .product(name: "KelvinCore", package: "Kelvin")
+            ],
+            // The test bundle links KelvinApp, which links @rpath/Sparkle.framework — and the
+            // build system copies that framework next to the .xctest, not inside it. Three
+            // levels up from Contents/MacOS/KelvinAppTests is the products directory where it
+            // lives; without this, every test dies in dlopen before one assertion runs.
+            linkerSettings: [
+                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@loader_path/../../.."])
             ]
         )
     ]

@@ -80,6 +80,14 @@ branding_value() {
 }
 NAME="$(branding_value displayName)"
 BUNDLE_ID="$(branding_value bundleIdentifier)"
+APPCAST_URL="$(branding_value appcastURL)"
+
+# Sparkle's EdDSA PUBLIC key — safe to bake in here; the private half lives in the login
+# Keychain ("Private key for signing Sparkle updates", written by Sparkle's generate_keys,
+# 26 July 2026) and must never enter the repository. Every update is signed with the private
+# key and verified by installed copies against this one; leaking the private key lets someone
+# else push updates to every user, and losing it means shipped copies refuse all future updates.
+SPARKLE_PUBKEY="${KELVIN_SPARKLE_PUBKEY:-Xj6oAUueYtrxVSSc0gIp9ykY05r0oNMgDTL6DNgSiPI=}"
 
 VERSION="${KELVIN_VERSION:-0.1.0}"
 # Monotonic without a file to remember to bump. Falls back to 1 outside a git checkout.
@@ -147,6 +155,23 @@ fi
 # too. One `git mv`, and the rest of this script follows the constant.
 cp "$PKG/AppIcon/$NAME.icns" "$APP/Contents/Resources/$NAME.icns"
 
+# SPARKLE TRAVELS AS A FRAMEWORK, and the bundle must carry it: SwiftPM links the executable
+# against @rpath/Sparkle.framework, and the only rpath a user's machine can satisfy is one
+# inside the app. Copied from SwiftPM's artifacts, given an rpath the bundle can honour, and
+# signed inside-out below like everything else that executes.
+SPARKLE_FW="$BUILD/Sparkle.framework"
+if [ ! -d "$SPARKLE_FW" ]; then
+  SPARKLE_FW="$(find "$SCRATCH/artifacts" -type d -name "Sparkle.framework" -path "*macos*" 2>/dev/null | head -1)"
+fi
+if [ -z "$SPARKLE_FW" ] || [ ! -d "$SPARKLE_FW" ]; then
+  echo "package-app.sh: Sparkle.framework not found under $SCRATCH/artifacts" >&2
+  echo "  The app links against it and will not launch without it." >&2
+  exit 1
+fi
+mkdir -p "$APP/Contents/Frameworks"
+cp -R "$SPARKLE_FW" "$APP/Contents/Frameworks/"
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/kelvin-app" 2>/dev/null || true
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -166,8 +191,25 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
+  <!-- Sparkle. The feed URL comes from Branding.appcastURL and is FROZEN once any binary
+       ships — every installed copy checks it forever. SUEnableAutomaticChecks is deliberately
+       ABSENT: writing false would suppress Sparkle's permission prompt entirely, while leaving
+       it unset makes Sparkle ask the user before any automatic checking begins — the
+       consent-first behaviour SECURITY.md promises. -->
+  <key>SUFeedURL</key><string>$APPCAST_URL</string>
+  <key>SUPublicEDKey</key><string>$SPARKLE_PUBKEY</string>
 </dict></plist>
 PLIST
+
+# A signed build with an empty public key would ship an updater that can never verify an
+# update — worse than no updater, because it looks like one. Refuse, same policy as the
+# missing-weights guard above.
+if [ "${KELVIN_SIGN_IDENTITY:--}" != "-" ] && [ -z "$SPARKLE_PUBKEY" ]; then
+  echo "package-app.sh: KELVIN_SPARKLE_PUBKEY is not set, and this is a signed build." >&2
+  echo "  Run Sparkle's generate_keys once (docs/RELEASING.md) and export the public key:" >&2
+  echo "  KELVIN_SPARKLE_PUBKEY='<base64 public key>'" >&2
+  exit 1
+fi
 
 # iCloud/file-provider volumes stamp com.apple.FinderInfo onto build products, and codesign
 # refuses to sign anything carrying it (see the Makefile header). Strip it rather than let the
@@ -210,6 +252,18 @@ while IFS= read -r nested; do
     exit 1
   fi
 done < <(find "$APP/Contents/Resources" -maxdepth 1 -name "*.bundle" -type d)
+
+# Sparkle's framework carries its own executables — the XPC services, Autoupdate, and
+# Updater.app — and each must be signed before the framework that contains it, and the
+# framework before the app. `find -depth` yields children before parents, which is exactly
+# the inside-out order signing needs.
+while IFS= read -r nested; do
+  if ! codesign "${SIGN_OPTS[@]}" "$nested"; then
+    echo "package-app.sh: failed to sign $nested" >&2
+    exit 1
+  fi
+done < <(find "$APP/Contents/Frameworks" -depth \
+           \( -name "*.xpc" -o -name "*.app" -o \( -name "Autoupdate" -type f \) -o -name "*.framework" \) 2>/dev/null)
 
 if ! codesign "${SIGN_OPTS[@]}" "$APP"; then
   echo "package-app.sh: code-signing failed — $APP will not launch" >&2
