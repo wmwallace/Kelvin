@@ -2536,6 +2536,15 @@ final class AppState: ObservableObject {
         let recipe: Recipe; let proxy: CIImage; let bitmaps: [String: CIImage]
     }
     private struct RenderOutput: @unchecked Sendable { let ci: CIImage; let cg: CGImage? }
+    /// The two things the detached render captures that the SDK cannot always vouch for: a
+    /// CIContext, and the overlay bitmap. Both are Sendable on the macOS 27 SDK and neither is
+    /// on the one CI builds against, where capturing them directly makes the closure itself
+    /// non-Sendable — which no @preconcurrency import can reach. Boxing them says once, in one
+    /// place, what is already true: the context is thread-safe and the bitmap is immutable.
+    private struct RenderSideload: @unchecked Sendable {
+        let ctx: CIContext
+        let overlay: (bitmap: CIImage, invert: Bool, feather: Double, tightness: Double)?
+    }
     private var renderInFlight = false
     private var renderDirty = false
 
@@ -2561,7 +2570,6 @@ final class AppState: ObservableObject {
         // Segmentation bitmaps + any pre-baked brush strokes (so a long stroke stays O(1)/frame).
         let bitmaps = proxyMaskBitmaps.merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked }
         let input = RenderInput(recipe: finalRecipe, proxy: proxy, bitmaps: bitmaps)
-        let ctx = context
         // Which photo these pixels are of. A render started before a photo switch can still land
         // after it; tagged, that frame is ignored instead of being shown under the new photo's name.
         let renderedURL = loadedURL
@@ -2574,13 +2582,14 @@ final class AppState: ObservableObject {
         // adjusting one needs the picture visible. So it stays up for the first and gets out of
         // the way for the second, and comes back on its own when you let go.
         let showOverlay = showMaskOverlay && !isAdjustingMaskTone
-        let overlayTarget = showOverlay ? activeSelectedMaskBitmap(extent: proxy.extent) : nil
+        let side = RenderSideload(ctx: context,
+                                  overlay: showOverlay ? activeSelectedMaskBitmap(extent: proxy.extent) : nil)
         Task.detached(priority: .userInitiated) {
             var rendered = Renderer.render(input.proxy, with: input.recipe, maskBitmaps: input.bitmaps)
-            if let ov = overlayTarget {
+            if let ov = side.overlay {
                 rendered = Renderer.renderMaskOverlay(rendered, maskBitmap: ov.bitmap, invert: ov.invert, feather: ov.feather, tightness: ov.tightness, opacity: 0.6)
             }
-            let cg = ctx.createCGImage(rendered, from: rendered.extent)
+            let cg = side.ctx.createCGImage(rendered, from: rendered.extent)
             let out = RenderOutput(ci: rendered, cg: cg)
             await MainActor.run {
                 self.lastRenderedCI = out.ci
