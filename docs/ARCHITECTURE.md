@@ -65,21 +65,28 @@ architecture has been broken.
 ## Module boundaries
 
 ```
-Core/
-  Decode/         file → linear buffer. Knows nothing about recipes.
-  Recipe/         the schema, serialization, validation, composition.
+Sources/KelvinCore/
+  Decode/         file → linear buffer, EXIF. Knows nothing about recipes.
+  Recipe/         the schema, serialization, validation, ranges.
   Render/         buffer + recipe → buffer. Pure. No I/O, no UI, no model.
-  Perception/     proxy → perception JSON. Swappable model backend.
+  Perception/     proxy → perception JSON. Swappable model backend (protocol here,
+                  MLX implementation in Integrations/).
   Engine/         perception + stats → [Recipe]. Pure. Deterministic. No I/O.
-  Preference/     pair logging and, later, reweighting.
-Library/
-  Index/          SQLite catalogue, thumbnails, EXIF.
-  Sidecar/        recipe persistence next to originals.
-App/
-  UI/             SwiftUI. Depends on everything. Nothing depends on it.
-CLI/
-  kelvin-cli      headless entry point for the eval harness.
+  Eval/           the harness: corpus, metrics, baselines, degradation builder.
+  Preference/     pick logging and, later, reweighting.
+  Browse/         folder scan, ordering, triage. Flat and file-based — no catalogue.
+  Batch/          recipe propagation across a folder, with overwrite refusal.
+  Export/         naming and collision policy.
+Sources/KelvinCLI/
+  kelvin-cli      headless entry point: render, engine, eval, corpus tools.
+Integrations/KelvinPerceptionMLX/
+  KelvinPerceptionMLX   the MLX-backed perception provider.
+  KelvinApp             SwiftUI. Depends on everything. Nothing depends on it.
+  kelvin-perceive       headless perception over one image.
 ```
+
+Edits persist as JSON in Kelvin's Application Support folder, keyed to the photograph —
+never as files written next to anyone's originals.
 
 **`Render` and `Engine` must both be pure and independently testable.** They are the two
 places bugs will actually hurt, and they are the two places you can get full test
@@ -90,14 +97,14 @@ Treat it as a first-class target, not a debug affordance.
 
 ## Performance targets
 
-Set these now so regressions are visible.
+Fixed early so regressions are visible.
 
 | Operation | Target | Notes |
 |---|---|---|
 | Slider drag → visible update | < 16 ms | one frame; this is the whole feel of the app |
 | Recipe swap (candidate → candidate) | < 50 ms | resident texture, parameter change only |
 | Cold RAW decode, 45 MP | < 1.5 s | Core Image, cached after |
-| Perception pass | < 2 s | 768px proxy, 4-bit model |
+| Perception pass | < 2 s | 768px proxy, 4-bit model. Currently missed: D-model-3 measured ~4.5–6 s |
 | Full analysis, first open | < 4 s | decode + proxy + perception + 4 candidates |
 | Batch apply, 100 images | < 60 s | GPU-bound, parallel, no perception re-run |
 

@@ -1,6 +1,6 @@
 # Evaluation
 
-**Build this second, immediately after the recipe renderer, and before any model work.**
+**Built second, immediately after the recipe renderer, and before any model work — deliberately.**
 
 Without a way to answer "is recipe A better than recipe B," every subsequent decision
 gets made by looking at a photo and going "hmm, nicer?" That does not converge. It is
@@ -21,20 +21,36 @@ commit.
 
 ## The corpus
 
-**MIT-Adobe FiveK** is the natural starting point: thousands of RAW files, each
-retouched independently by five different expert photographers.
+**Build it from your own photographs.** The academic retouching datasets — MIT-Adobe
+FiveK, PPR10K — are licensed for non-commercial research only, and that restriction
+extends to anything derived from them. The project deliberately does not tune against
+either (`CONTRIBUTING.md` records the stance), which means the corpus has to come from
+photos you own. That turns out to be a feature, not a workaround.
 
-Note what that structure gives you for free — five expert interpretations of the same
-photograph is *literally the candidate-previews feature*, pre-labelled. It is both the
-evaluation set and the proof that the product concept is coherent. Photographers do
-disagree, meaningfully, and the disagreement is the product.
+The trick is that a finished photograph *is* the reference. `corpus-degrade` takes a
+folder of good photos and synthesises degraded versions of each — a known underexposure,
+a colour cast, flatness — as the sources, keeping the original as the truth:
 
-Confirm the licence permits the intended use before building on it.
+```
+kelvin-cli corpus-degrade --in-dir ~/Pictures/keepers --out-dir ./corpus
+kelvin-cli eval --corpus ./corpus
+```
 
-Supplement with a small in-house set of hard cases: mixed indoor lighting, heavy
-backlight, night, high-ISO, snow and beach (exposure-meter traps), and skin tones across
-a range of complexions. Twenty to fifty images, hand-curated, checked into the repo as a
-regression suite.
+The engine perceives a degraded source and must recover it toward the original; the
+harness scores ΔE against a known-good answer. This measures exactly what the
+perception→engine path is for — diagnosing and fixing capture problems — and it is
+licence-clean on any photos you own.
+
+The manifest format is corpus-agnostic (`corpus-init` maps any parallel-folder dataset —
+sources plus one folder per reference edit — into a `manifest.json`, and scoring takes
+the minimum ΔE across however many references an entry has). So a photographer with
+their own before/after pairs can eval against their real edits, which is the strongest
+reference there is.
+
+Curate for hard cases: mixed indoor lighting, heavy backlight, night, high-ISO, snow and
+beach (exposure-meter traps), and skin tones across a range of complexions. Twenty to
+fifty images, hand-picked. Corpora stay out of git — they are photographs, and
+`.gitignore` already refuses them.
 
 ## Metrics
 
@@ -42,17 +58,17 @@ No single number is sufficient. Report all of these; do not collapse them.
 
 | Metric | What it catches | Notes |
 |---|---|---|
-| ΔE2000 vs each expert edit | Overall color and tone distance | Report min across the five experts, not mean — matching *any* expert is success |
+| ΔE2000 vs each reference edit | Overall color and tone distance | Report min across the references, not mean — matching *any* reference is success |
 | Histogram clipping delta | Blown highlights, crushed blacks | Regressions here are always bugs |
 | Skin-tone ΔE, masked | The failure users notice fastest | Weight this heavily |
-| White-balance error vs expert median | Systematic color cast | |
+| White-balance error vs reference median | Systematic color cast | |
 | No-op fidelity | Neutral recipe renders identical output | Binary. Must always pass |
 | Wall-clock per image | Performance regression | Fail the build on regression |
 
-**Report min-across-experts, not mean.** Averaging five expert edits produces a muddy
-target that no human would choose and that punishes any confident stylistic choice. The
-question is "did we land near *a* defensible interpretation," not "did we hit the
-centroid."
+**Report min-across-references, not mean.** When an entry has several reference edits,
+averaging them produces a muddy target that no human would choose and that punishes any
+confident stylistic choice. The question is "did we land near *a* defensible
+interpretation," not "did we hit the centroid."
 
 ## Baselines
 

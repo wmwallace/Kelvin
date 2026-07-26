@@ -77,7 +77,7 @@ fit, and would force a split-asset design.
 
 ## Before the FIRST published release
 
-Two things freeze the moment a binary leaves this machine, and neither can be added later:
+Three things need doing before a binary leaves this machine, and none can be done later:
 
 - **Generate the Sparkle EdDSA key pair**, and keep the private half out of the repository. The
   appcast URL is compiled into every build; ship one without it and that build can never update

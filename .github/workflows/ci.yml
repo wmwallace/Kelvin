@@ -52,7 +52,7 @@ jobs:
         run: make build
 
       - name: Test
-        # 369 tests, ~18s locally. No fixtures, no network, no GPU requirement.
+        # ~390 tests, ~18s locally. No fixtures, no network, no GPU requirement.
         run: make test
 
   app:
@@ -94,7 +94,7 @@ jobs:
 
       - name: Test
         working-directory: Integrations/KelvinPerceptionMLX
-        # The 85 app tests are headless: AppState's rules (strip filtering, grouping, mask
+        # The app tests are headless: AppState's rules (strip filtering, grouping, mask
         # defaults, zoom) need no window. They do NOT load the perception model — nothing in CI
         # should download 1.6 GB of weights, and nothing here does.
         run: swift test

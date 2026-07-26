@@ -14,8 +14,9 @@ beyond that, and there is no bounty.
 This application runs entirely on your machine and has no server, no account and no telemetry, which
 removes most of the usual categories. What remains is worth reporting:
 
-- **Anything that writes to a user's original photographs.** Every edit is parametric and stored in a
-  sidecar; the originals are read-only by design. A path where that is not true is the most serious
+- **Anything that writes to a user's original photographs.** Every edit is parametric and stored in
+  Kelvin's own folder in Application Support, keyed to the photograph — nothing is ever written next
+  to an original, and the originals are read-only by design. A path where that is not true is the most serious
   bug this project can have — it destroys data that cannot be recovered.
 - **Malformed-input crashes or memory-safety problems** reachable by opening a crafted image file.
   RAW decoding goes through Apple's Core Image, so many such issues belong to Apple; report them
@@ -35,8 +36,9 @@ removes most of the usual categories. What remains is worth reporting:
 
 - The one-time model download itself. It is documented, it fetches weights and nothing else, and it
   can be avoided entirely with a local copy (`make stage-model`).
-- Gatekeeper warnings on an unsigned build. Until releases are notarised, these are expected; see the
-  README.
+- Gatekeeper warnings on a build you assembled yourself without a signing identity. Published
+  releases are signed and notarised; an unsigned local build warning is expected behaviour, not a
+  vulnerability.
 - Findings from an automated scanner with no demonstrated impact.
 
 ## Supply chain

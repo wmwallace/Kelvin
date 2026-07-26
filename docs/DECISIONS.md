@@ -77,11 +77,16 @@ than recipe B" without human judgment.
 
 Without it, tuning happens by vibes, indefinitely. See `EVALUATION.md`.
 
-## D7 — Repository private until the recipes are good · Decided
+## D7 — Repository private until the recipes are good · **Superseded**
 
 The differentiator is recipe quality. Until that works, there is no story, and launching
 a half-working editor into a space where RapidRAW has 8.6k stars means launching from
 behind.
+
+> **Superseded 26 July 2026 — the repository is public.** The gate this entry set was a
+> measurable one: an eval harness that can answer "is recipe A better than recipe B"
+> without human judgment. That harness exists, runs in CI, and the corrective path
+> validated against real photographs, so staying private had stopped buying anything.
 
 ## D8 — Licence choice · **Superseded**
 
@@ -127,16 +132,20 @@ constant, one file-extension constant.
 Inpainting and object removal are a later layer on top of a finished recipe.
 
 Open image-editing models that repaint pixels are the wrong tool for base retouching,
-where the entire point is parametric, reversible, sidecar-stored adjustment.
+where the entire point is parametric, reversible, separately-stored adjustment.
 
 ---
 
 ## Open questions for the owner
 
 1. ~~Confirm or reject D3 (Swift vs Rust). Blocks everything.~~ **Resolved 2026-07-23 — Swift.**
-2. Which reference corpus for D6? MIT-Adobe FiveK is the obvious candidate — thousands
+2. ~~Which reference corpus for D6? MIT-Adobe FiveK is the obvious candidate — thousands
    of RAW files each retouched by five different experts, which is structurally
-   identical to the candidate-previews feature. Confirm licensing suits the intended use.
+   identical to the candidate-previews feature. Confirm licensing suits the intended use.~~
+   **Resolved 2026-07 — rejected.** The licensing was confirmed and the answer was no:
+   FiveK and PPR10K are non-commercial-research only, and the restriction extends to
+   derived data. The corpus is built from owned photographs instead — see the
+   degradation corpus in `EVALUATION.md` and the stance recorded in `CONTRIBUTING.md`.
 3. Target user for v1: working photographer with a shoot to process, or casual user with
    one photo? The answer changes the first UI substantially.
 4. ~~Naming (D9) and license (D8), before external release.~~ **Both resolved 25 July 2026** — Kelvin (risk accepted), AGPL-3.0-only + CLA.
@@ -165,7 +174,7 @@ identified as real limits rather than guesses:
 | Face + hair only | **face-parsing.PyTorch** | MIT | ~51 MB, much narrower scope, but licence is unambiguous. |
 | Aesthetic / quality scoring | **Q-Align** (ICML 2024, Q-Future) | **verify** — built on mPLUG-Owl2, whose terms may not be Apache | State of the art on IQA + IAA; a full LMM, so heavy next to a 2.9 GB VLM already resident. |
 | Aesthetic scoring, cheap | **MLP head on CLIP/SigLIP embeddings** (the LAION-Aesthetics approach) | MIT for the common heads | A few MB. Interesting because the head can be trained on *this user's* picks rather than a generic notion of beauty. |
-| Newer perception VLM | **Qwen3.5-4B** (mlx-community, 4-bit) | Apache-2.0 | Drop-in: same family and licence as the current Qwen2.5-VL-3B, newer weights. |
+| Newer perception VLM | **Qwen3.5-4B** (mlx-community, 4-bit) | Apache-2.0 | Drop-in: same family as the then-default Qwen2.5-VL-3B, newer weights. (This row originally claimed "same licence" — WRONG: the then-default was `qwen-research`, non-commercial. D-model-3 caught it.) |
 
 ### Decisions
 
@@ -173,7 +182,8 @@ identified as real limits rather than guesses:
   VLM can be compared against the default on real photos without a rebuild. The seam is the
   prompt and the parser, not the weights.
 - **Nothing else is integrated yet, deliberately.** Two blockers, both real:
-  - *Licence.* This project has a commercial-clean stance (D-corpus). Several of the strongest
+  - *Licence.* This project has a commercial-clean stance (open question 2 above, and the
+    corpus paragraph in `CONTRIBUTING.md`). Several of the strongest
     options have terms that are unclear or inherited from a base model with restrictions. A
     weights licence must be read before integration, not after.
   - *Toolchain.* These ship as PyTorch. Getting them on-device means CoreML conversion or an MLX
@@ -274,7 +284,7 @@ against real photographs, with weights cached, via `KELVIN_MODEL=<repo-id>`.
 
 | model | licence | inference | result |
 |---|---|---|---|
-| **Qwen2.5-VL-3B-4bit** (current) | **`qwen-research` — NON-COMMERCIAL** | **5.9–6.3 s** | the most accurate of everything tried |
+| **Qwen2.5-VL-3B-4bit** (then-default, since replaced) | **`qwen-research` — NON-COMMERCIAL** | **5.9–6.3 s** | the most accurate of everything tried |
 | Qwen2.5-VL-7B-4bit | **Apache 2.0** | 10.4–11.2 s | works; better scene read, weaker lighting read |
 | Qwen3.5-2B-4bit | **Apache 2.0** | **4.5 s** | "golden-hour" on an overcast frame; "blue-hour / landscape" elsewhere, with an invented note about fisheye distortion |
 | Qwen3.5-4B-4bit | **Apache 2.0** | — | prose, no JSON at all — though its *reasoning* was right ("fits best under 'other'", matching the incumbent) |
