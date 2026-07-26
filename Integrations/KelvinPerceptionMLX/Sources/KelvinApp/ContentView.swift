@@ -302,6 +302,11 @@ final class AppState: ObservableObject {
     /// Deliberately NOT a before/after: the app already has one. Hold to compare shows the frame
     /// with the spots back, which answers "what did it change". This answers "what did it find".
     @Published var showingRepairSpots = false
+    /// The transient cousin: rings shown because the pointer is over the Repair controls. Kept
+    /// separate from the latched toggle above so a hover-out cannot switch off something the
+    /// user deliberately switched on — which is exactly what happened when one flag served both:
+    /// the rings vanished the moment the pointer moved toward the photograph to look at them.
+    @Published var hoveringRepairControls = false
 
     /// Instances that already have a mask, so the list can show which are in play and clicking one
     /// again selects it rather than adding a duplicate.
@@ -1376,7 +1381,7 @@ final class AppState: ObservableObject {
         baseMasks = []; maskEnabled = [:]; maskStrength = [:]
         maskAdjustments = [:]; maskFeather = [:]; maskTightness = [:]; maskInvert = [:]
         hsl = [:]; straighten = 0; activeLookId = nil
-        showingOriginal = false; showingRepairSpots = false
+        showingOriginal = false; showingRepairSpots = false; hoveringRepairControls = false
     }
 
     /// Put a previously-edited photo back exactly as it was.
@@ -3667,7 +3672,8 @@ struct ContentView: View {
     /// Every detected dust spot, ringed, while the pointer is over the Repair controls.
     @ViewBuilder
     private func repairSpotOverlay(in container: CGSize) -> some View {
-        if appState.showingRepairSpots, !appState.showingOriginal, !appState.healSpots.isEmpty {
+        if appState.showingRepairSpots || appState.hoveringRepairControls,
+           !appState.showingOriginal, !appState.healSpots.isEmpty {
             let rect = appState.imageRect(in: container)
             ZStack(alignment: .topLeading) {
                 ForEach(Array(appState.healSpots.enumerated()), id: \.offset) { _, spot in
@@ -4353,11 +4359,27 @@ struct ContentView: View {
                 }
                 .toggleStyle(.switch).tint(Theme.glow)
                 .disabled(appState.detectedSpotCount == 0)
-                // Hovering the control rings every spot it would patch. Nothing to switch on, and
-                // nothing left on the photograph once the pointer moves away.
-                .onHover { appState.showingRepairSpots = $0 && appState.detectedSpotCount > 0 }
+                // Hovering rings every spot it would patch — a quick peek, gone when the pointer
+                // moves on. It used to be the ONLY way to see them, which failed its one job:
+                // the rings vanished the instant the pointer left for the photograph, so you
+                // could never actually inspect a spot. The latch below is the fix.
+                .onHover { appState.hoveringRepairControls = $0 && appState.detectedSpotCount > 0 }
+                // Feedback the moment it flips, because at fit zoom a patched dust spot is a
+                // handful of pixels — "did that do anything?" deserves an answer in words.
+                .onChange(of: appState.removeDust) { _, on in
+                    if on, appState.detectedSpotCount > 0 {
+                        appState.statusMessage = "Patched \(appState.detectedSpotCount) spot"
+                            + "\(appState.detectedSpotCount == 1 ? "" : "s") — hold Compare to "
+                            + "see them back, or circle them below"
+                    }
+                }
                 if appState.detectedSpotCount > 0 {
-                    Text("Hover to see where they are · hold Compare to see them back")
+                    Toggle(isOn: $appState.showingRepairSpots) {
+                        Text("Circle the spots on the photo")
+                            .font(Theme.ui(11)).foregroundColor(Theme.inkDim)
+                    }
+                    .toggleStyle(.switch).controlSize(.small).tint(Theme.glow)
+                    Text("Rings stay while this is on · hold Compare to see the spots back")
                         .font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
                 }
                 }
