@@ -10,16 +10,29 @@
 # real path-traversal shape and produced eleven high-severity alerts against code this project does
 # not ship a call site for. That noise is the entire reason this file exists.
 #
-# CAVEAT, and it is a real one: GitHub documents `paths-ignore` as applying to interpreted
-# languages and to compiled languages analysed *without* building. Swift is compiled and has no
-# `build-mode: none`, so for the swift job below the documented rule is "CodeQL analyses whatever
-# your build steps build". This filter may therefore be ignored there. It is kept because it costs
-# nothing, it is unambiguously correct for the `actions` job, and if it does not take, the fallback
-# is dismissing those alerts once — CodeQL remembers dismissals by fingerprint across scans.
+# MEASURED, NOT SUSPECTED: `paths-ignore` does nothing for the swift job. GitHub documents it as
+# applying to interpreted languages and to compiled languages analysed *without* building; Swift is
+# compiled and has no `build-mode: none`, so the rule that governs is "CodeQL analyses whatever your
+# build steps build". The first run under this config (0863f77) returned results=12 for
+# /language:swift — byte-identical to the default-setup run it replaced, dependency findings and
+# all. Do not read the filter below as load-bearing for Swift, and do not spend an afternoon
+# wondering why it is not working. It works for the `actions` job and nowhere else.
 #
-# The reliable lever, if this stops being good enough, is the build step rather than this file:
-# compile the dependency graph *before* `codeql init` starts tracing, so only first-party modules
-# are recompiled under tracing and only they get extracted.
+# It is kept anyway because it costs nothing, it is correct for `actions`, and the fallback is
+# cheap: dismiss the alerts once and CodeQL remembers by fingerprint across scans. The residual
+# annoyance is that a dependency bump gives the findings new fingerprints and they return.
+#
+# The lever that WOULD work is the build step rather than this file: compile the dependency graph
+# before `codeql init` starts tracing, so only first-party modules recompile under tracing and only
+# they get extracted. Considered and rejected on 27 July 2026. It leans on SwiftPM's incremental
+# build behaviour, and when that drifts the traced build compiles nothing, the extractor sees
+# nothing, and the job goes green having analysed zero lines — the same silent-success failure the
+# cache step in codeql.yml is written to avoid. A noisy scanner is visibly noisy; a scanner that is
+# quietly off is not. Dismissing a few alerts a year is the cheaper of the two.
+#
+# Worth remembering before deciding this scanning is pure waste: the Hub client is unreachable
+# because the model is bundled. If Kelvin ever stops bundling weights and calls a download API, that
+# path-traversal shape becomes live first-party-adjacent code, already under watch.
 
 name: "Kelvin CodeQL"
 
