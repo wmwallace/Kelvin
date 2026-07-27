@@ -1,0 +1,28 @@
+# CodeQL configuration, shared by both jobs in .github/workflows/codeql.yml.
+#
+# The only job this file has is keeping SwiftPM's dependency checkout out of the results.
+#
+# `Integrations/KelvinPerceptionMLX/.build/` is gitignored and untracked, but it is on disk by the
+# time CodeQL runs, because resolving the package graph is what puts it there. Everything under
+# `checkouts/` is someone else's source. swift-huggingface in particular arrives transitively via
+# MLX and Kelvin never calls it — the perception model is bundled and a release downloads nothing —
+# yet its Hub cache builds local paths out of server-supplied repo IDs and filenames, which is a
+# real path-traversal shape and produced eleven high-severity alerts against code this project does
+# not ship a call site for. That noise is the entire reason this file exists.
+#
+# CAVEAT, and it is a real one: GitHub documents `paths-ignore` as applying to interpreted
+# languages and to compiled languages analysed *without* building. Swift is compiled and has no
+# `build-mode: none`, so for the swift job below the documented rule is "CodeQL analyses whatever
+# your build steps build". This filter may therefore be ignored there. It is kept because it costs
+# nothing, it is unambiguously correct for the `actions` job, and if it does not take, the fallback
+# is dismissing those alerts once — CodeQL remembers dismissals by fingerprint across scans.
+#
+# The reliable lever, if this stops being good enough, is the build step rather than this file:
+# compile the dependency graph *before* `codeql init` starts tracing, so only first-party modules
+# are recompiled under tracing and only they get extracted.
+
+name: "Kelvin CodeQL"
+
+paths-ignore:
+  - "**/.build/**"
+  - "Integrations/KelvinPerceptionMLX/.build/**"

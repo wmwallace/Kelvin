@@ -1,0 +1,122 @@
+# CodeQL code scanning.
+#
+# This replaces GitHub's default setup, which was configured for `actions` and `swift` on a weekly
+# schedule. Both languages are kept here — dropping `actions` while adding a workflow file would be
+# a quiet loss of coverage, and workflow files are the one thing in this repo that run with a token.
+#
+# The reason for moving off default setup at all: default setup builds whatever it finds, and what
+# it found included `Integrations/KelvinPerceptionMLX/.build/checkouts/`, SwiftPM's untracked copy
+# of every dependency's source. Eleven of twelve alerts on the first scan were against vendored
+# third-party code with no first-party call site. See .github/codeql/codeql-config.yml.
+#
+# BEFORE MERGING THIS: turn default setup off in Settings → Code security → Code scanning. Advanced
+# setup does not disable it automatically, and leaving both on scans everything twice.
+#
+# Action pinning follows the rule ci.yml states: only actions/* are trusted at a major-version tag,
+# anything else gets a full commit SHA. github/codeql-action is GitHub-owned but is not actions/*,
+# so it is pinned to a SHA with the tag alongside it for the next person doing the bump.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, matching what default setup was doing. Deliberately off the hour: scheduled runs pile
+    # up on :00 across all of GitHub and get queued behind the crowd.
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actions:
+    name: Analyse — GitHub Actions
+    # Workflow analysis needs no build and no Swift toolchain, so it has no business burning macOS
+    # runner minutes. Ubuntu finishes this in about a minute.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialise CodeQL
+        uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          languages: actions
+          build-mode: none
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Analyse
+        uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          category: "/language:actions"
+
+  swift:
+    name: Analyse — Swift
+    # Same pin as ci.yml, for the same reason: "latest" moves without warning and takes the Swift
+    # toolchain with it.
+    runs-on: macos-15
+    # Longer than ci.yml's app job, because this build is deliberately cold (see the cache step)
+    # and CodeQL adds extraction and query time on top of it.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache SwiftPM clones — but NOT build products
+        uses: actions/cache@v4
+        with:
+          # This is the one place this workflow deliberately diverges from ci.yml, and it is
+          # load-bearing. ci.yml also caches `Integrations/KelvinPerceptionMLX/.build`, which is
+          # correct there and would be actively wrong here: CodeQL only sees source that the traced
+          # build actually compiles. Restore the build products and `swift build` is a no-op, the
+          # extractor sees nothing, and the job passes green having analysed zero lines of Swift.
+          #
+          # Caching only the clone cache keeps the network cost down without skipping compilation.
+          path: ~/Library/Caches/org.swift.swiftpm
+          key: codeql-spm-${{ runner.os }}-${{ hashFiles('Integrations/KelvinPerceptionMLX/Package.resolved') }}
+          restore-keys: codeql-spm-${{ runner.os }}-
+
+      - name: Metal toolchain
+        # Best-effort, same as ci.yml: a no-op when the runner image already has it, and never the
+        # thing that fails the job. If it is genuinely missing, the build step says so more clearly.
+        run: xcodebuild -downloadComponent MetalToolchain || true
+
+      - name: Initialise CodeQL
+        uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          languages: swift
+          build-mode: manual
+          config-file: ./.github/codeql/codeql-config.yml
+
+      # Both packages are built, because both are first-party and roughly two thirds / one third of
+      # the Swift in this repo. Analysing only the hermetic root package would be simpler and would
+      # make the dependency noise impossible by construction, but it would also stop scanning the
+      # app and perception layer, which is where the file handling and export paths live.
+      - name: Build — core
+        # `make build` scratch-paths into $TMPDIR (see the Makefile's note about file-provider
+        # volumes and codesign). Convenient side effect: the root package has no external
+        # dependencies and nothing of its own under the repo's .build, so it contributes no
+        # third-party source to the database at all.
+        run: make build
+
+      - name: Build — app and perception
+        working-directory: Integrations/KelvinPerceptionMLX
+        run: swift build
+
+      - name: Analyse
+        uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          category: "/language:swift"
