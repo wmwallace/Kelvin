@@ -123,7 +123,26 @@ public enum RecipeEngine {
 
         return Mask(
             id: "subject", type: "subject", source: "segmentation", invert: false,
-            feather: 35, opacity: 1.0,
+            // FEATHER 6, NOT 35, AND THIS IS WHAT THE REPORTED HALO WAS.
+            //
+            // `Renderer.prepareMask` blurs by `feather/100 * minEdge * 0.06`, so the radius is a
+            // fraction of the FRAME, not of the subject. At 35 that is 2.1% of the shorter edge:
+            // 17 px on the edit proxy and 133 px on a 60 MP export. Measured on a dark head against
+            // bright sky, it spilled the subject lift +5% into the background over a band 4–6% of
+            // frame height OUTSIDE the silhouette — roughly 380 px on export. A soft ramp that size
+            // and that bright around a head is exactly what the eye reads as a halo; a tight edge
+            // would not.
+            //
+            // 6 is not a taste call, it is the size of one source mask pixel. Vision hands back a
+            // fixed 512x384 buffer whatever resolution it is given, so on a 6336 px-tall frame one
+            // mask pixel covers ~16 image pixels; feather 6 gives a 23 px radius, and on the 1200 px
+            // proxy it gives 2.9 px against a 2.1 px mask pixel. So the feather smooths the
+            // upscale's stair-stepping and stops — which is the whole job, at every resolution,
+            // because both quantities scale with the frame.
+            //
+            // The sky mask deliberately keeps its generous 45: a horizon IS a gradual transition,
+            // which is why the shared `0.06` constant in the renderer is left alone.
+            feather: 6, opacity: 1.0,
             // Shadows (detail recovery) weighted over raw exposure — kinder to skin at any tone.
             adjustments: ["exposure_ev": roundedClamp(ev * 0.7, to: 0...0.6, step: 0.01),
                           "shadows": roundedClamp(ev * 45, to: 0...35, step: 1)]
@@ -132,11 +151,16 @@ public enum RecipeEngine {
 
     /// The local masks the engine attaches to a recipe, in render order (subject, then sky). Only
     /// masks with a real correction are emitted; a recipe with none serialises `masks: nil`.
+    /// `style` shapes the SKY only. The subject lift is corrective — a backlit face is underexposed
+    /// in every style, and nobody has an opinion about that — while a sky is where a look either
+    /// says something or does not. Defaults to `.natural`, which has no sky opinion, so the
+    /// single-recipe path is unchanged.
     static func localMasks(
-        _ p: Perception, _ s: ImageStatistics, subjectLuma: Double?, skyLuma: Double?
+        _ p: Perception, _ s: ImageStatistics, subjectLuma: Double?, skyLuma: Double?,
+        style: CandidateStyle = .natural
     ) -> [Mask]? {
         let ms = [subjectMask(p, s, subjectLuma: subjectLuma),
-                  skyMask(p, s, skyLuma: skyLuma)].compactMap { $0 }
+                  skyMask(p, s, skyLuma: skyLuma, style: style)].compactMap { $0 }
         return ms.isEmpty ? nil : ms
     }
 
@@ -146,7 +170,12 @@ public enum RecipeEngine {
     /// can't see "the sky is veiled" when the same frame holds genuine darks (trees, rock), which
     /// is exactly why global dehaze missed the foggy-coast frame. `skyLuma` is the mean luminance
     /// under the sky mask; nil (no sky found) means nothing to do.
-    static func skyMask(_ p: Perception, _ s: ImageStatistics, skyLuma: Double?) -> Mask? {
+    ///
+    /// Everything above is CORRECTIVE and identical across styles. `style` then adds the opinion —
+    /// see `CandidateStyle.skyDepth`, which exists because without it all eight candidates emitted
+    /// a byte-identical sky mask and Dramatic could not make a sky dramatic.
+    static func skyMask(_ p: Perception, _ s: ImageStatistics, skyLuma: Double?,
+                        style: CandidateStyle = .natural) -> Mask? {
         let outdoor = p.scene == .landscape || p.scene == .street || p.scene == .other
         guard outdoor, let luma = skyLuma else { return nil }
 
@@ -172,6 +201,33 @@ public enum RecipeEngine {
         // as flat. Applied through the sky MASK, not a global blue push, so a blue shirt or a lake
         // is untouched. Kept small; the research says preferred, not lurid.
         adj["saturation"] = (adj["saturation"] ?? 0) + (veiled ? 4 : 12)
+
+        // --- THE STYLE'S OPINION, on top of the corrective work above ---
+        //
+        // The graduated neutral density a landscape photographer reaches for by reflex: pull the
+        // sky down, put some contrast into it, leave the ground alone. Done here through the sky
+        // mask because the global contrast control cannot do it — `CIColorControls` pivots at 0.5
+        // and a sky sits near 0.71, so global contrast makes a sky brighter.
+        //
+        // Held deliberately short of what the eye will take. A grad-ND is a half to a full stop in
+        // the hand; `skyDepth: 1.0` here is 0.45 EV, and every style but Dramatic is well under
+        // that. The number to argue about is this multiplier, and arguing about it wants the eval
+        // harness and a sky-region metric, neither of which can currently see a sky at all.
+        if style.skyDepth != 0 {
+            adj["exposure_ev"] = roundedClamp((adj["exposure_ev"] ?? 0) - style.skyDepth * 0.45,
+                                              to: -0.6...0.4, step: 0.01)
+            // Contrast in a sky is cloud structure. A style that OPENS a sky (negative depth)
+            // softens that structure rather than inverting it, so the negative side is gentler.
+            let bite = style.skyDepth > 0 ? style.skyDepth * 16 : style.skyDepth * 8
+            adj["contrast"] = roundedClamp((adj["contrast"] ?? 0) + bite, to: -12...28, step: 1)
+        }
+        if style.skySaturationBias != 0 {
+            adj["saturation"] = roundedClamp((adj["saturation"] ?? 0) + style.skySaturationBias,
+                                             to: -20...36, step: 1)
+        }
+        // Zero-valued entries would serialise as adjustments that render as no-ops, so drop them —
+        // a mask carrying `{"contrast": 0}` reads as an edit that was made and isn't one.
+        adj = adj.filter { $0.value != 0 }
         guard !adj.isEmpty else { return nil }
 
         // A generous feather keeps the horizon soft; slightly hold back when only defogging.

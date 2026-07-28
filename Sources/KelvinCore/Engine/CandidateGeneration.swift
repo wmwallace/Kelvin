@@ -117,8 +117,9 @@ public extension RecipeEngine {
             global: g,
             curve: curve,
             hsl: memoryColorHSL(p),
-            // Subject lift + sky treatment are corrective — shared across every style.
-            masks: localMasks(p, s, subjectLuma: subjectLuma, skyLuma: skyLuma),
+            // The subject lift is corrective and shared; the SKY carries the style's opinion. It
+            // used to be shared too, which meant Dramatic and Soft emitted the same sky mask.
+            masks: localMasks(p, s, subjectLuma: subjectLuma, skyLuma: skyLuma, style: style),
             detail: detail(p, iso: iso),
             geometry: nil
         )
@@ -186,6 +187,29 @@ public struct CandidateStyle: Sendable, Equatable {
     /// Lifts the black end of the curve (0…255) for a matte / film toe.
     let matteToe: Double
 
+    // MARK: The sky
+    //
+    // **A style has to be able to treat a sky differently, or several of these styles do not mean
+    // anything outdoors.** The corrective sky work — recovering a blown sky, defogging a veiled one
+    // — is shared by every style, because those are fixes and nobody disagrees about them. What
+    // follows is the opinion, and it was missing entirely: `localMasks` took no style, so all eight
+    // candidates serialised a byte-identical sky mask carrying `saturation: +12` and nothing else.
+    // Measured on a cumulus landscape, removing that mask from a finished Dramatic render moved the
+    // pixels by a mean of 0.00063 and a maximum of 4 levels out of 255 — the sky was, in effect,
+    // untreated, and "Dramatic gives no drama" was a precise description of it.
+    //
+    // The global layer cannot stand in for this. `CIColorControls` pivots contrast at 0.5 and a sky
+    // sits around 0.71, so turning Dramatic's contrast up makes a sky BRIGHTER: measured, sky mean
+    // luma 0.7105 in the original became 0.7660 under Dramatic while the ground went 0.2470 →
+    // 0.1887. Every point of Dramatic's contrast lands below the horizon.
+
+    /// Deepens (positive) or opens (negative) a sky — the graduated-neutral-density move a
+    /// landscape photographer makes by reflex. Roughly "stops at full strength": 1.0 is a firm
+    /// half-stop pull with real contrast behind it, and negative lifts a sky open instead.
+    var skyDepth: Double = 0
+    /// Extra colour in a sky, on top of the memory-colour lift every style already shares.
+    var skySaturationBias: Double = 0
+
     /// Faithful baseline — the corrective look with gentle, scene-appropriate styling.
     public static let natural = CandidateStyle(
         id: "natural", label: "Natural",
@@ -193,6 +217,7 @@ public struct CandidateStyle: Sendable, Equatable {
         vibranceScale: 1.0, vibranceBias: 0, saturationBias: 0,
         whitesBias: 0, blacksBias: 0, wbStrengthScale: 1.0,
         curveScale: 1.0, matteToe: 0
+        // The faithful rendering has no opinion about a sky, by definition.
     )
 
     /// Colourful and clean — a touch more contrast and vibrance, slightly brighter whites and
@@ -202,7 +227,9 @@ public struct CandidateStyle: Sendable, Equatable {
         contrastScale: 1.15, contrastBias: 12,
         vibranceScale: 1.3, vibranceBias: 10, saturationBias: 3,
         whitesBias: 6, blacksBias: -8, wbStrengthScale: 1.0,
-        curveScale: 1.3, matteToe: 0
+        curveScale: 1.3, matteToe: 0,
+        // Colour-led rather than moody: real blue, only a token pull.
+        skyDepth: 0.2, skySaturationBias: 10
     )
 
     /// Muted and airy — softer contrast, restrained colour, gently lifted (matte) blacks. A
@@ -212,7 +239,9 @@ public struct CandidateStyle: Sendable, Equatable {
         contrastScale: 0.55, contrastBias: -16,
         vibranceScale: 0.65, vibranceBias: -8, saturationBias: -9,
         whitesBias: -6, blacksBias: 16, wbStrengthScale: 0.85,
-        curveScale: 0.5, matteToe: 20
+        curveScale: 0.5, matteToe: 20,
+        // Airy and restrained — a sky it opens slightly and holds the colour back in.
+        skyDepth: -0.15, skySaturationBias: -4
     )
 
     /// Moody and filmic — deeper contrast and shadows, restrained colour, and a hint of the
@@ -222,7 +251,9 @@ public struct CandidateStyle: Sendable, Equatable {
         contrastScale: 1.2, contrastBias: 20,
         vibranceScale: 0.9, vibranceBias: -3, saturationBias: -5,
         whitesBias: 7, blacksBias: -20, wbStrengthScale: 0.7,
-        curveScale: 1.5, matteToe: 0
+        curveScale: 1.5, matteToe: 0,
+        // The grad-ND, and the reason this field exists.
+        skyDepth: 1.0, skySaturationBias: 2
     )
 
     /// Bright and open — lifted shadows, gentle contrast, air in the frame. The high-key answer,
@@ -232,7 +263,9 @@ public struct CandidateStyle: Sendable, Equatable {
         contrastScale: 0.75, contrastBias: -6,
         vibranceScale: 0.9, vibranceBias: -2, saturationBias: -3,
         whitesBias: 10, blacksBias: 8, wbStrengthScale: 1.0,
-        curveScale: 0.7, matteToe: 8
+        curveScale: 0.7, matteToe: 8,
+        // The high-key answer: a sky is opened UP, never pulled down.
+        skyDepth: -0.5, skySaturationBias: -2
     )
 
     /// Deep and saturated without crushing — where Dramatic goes moody by taking light away, this
@@ -242,7 +275,9 @@ public struct CandidateStyle: Sendable, Equatable {
         contrastScale: 1.1, contrastBias: 8,
         vibranceScale: 1.15, vibranceBias: 6, saturationBias: 2,
         whitesBias: 2, blacksBias: -6, wbStrengthScale: 0.9,
-        curveScale: 1.1, matteToe: 0
+        curveScale: 1.1, matteToe: 0,
+        // Deep AND saturated — where Dramatic takes light away, this deepens colour.
+        skyDepth: 0.6, skySaturationBias: 8
     )
 
     /// Warm and flattering — golden hour, tungsten interiors, skin. Under-corrects a cast slightly
@@ -254,7 +289,8 @@ public struct CandidateStyle: Sendable, Equatable {
         vibranceScale: 1.0, vibranceBias: 2, saturationBias: 0,
         whitesBias: 3, blacksBias: -3, wbStrengthScale: 0.8,
         temperatureShiftK: -420,
-        curveScale: 0.95, matteToe: 4
+        curveScale: 0.95, matteToe: 4,
+        skyDepth: 0.1, skySaturationBias: 3
     )
 
     /// Cool and clean — blue hour, snow, architecture. Corrects a cast fully, holds colour back,
@@ -265,7 +301,9 @@ public struct CandidateStyle: Sendable, Equatable {
         vibranceScale: 0.85, vibranceBias: -4, saturationBias: -4,
         whitesBias: 5, blacksBias: -5, wbStrengthScale: 1.1,
         temperatureShiftK: 360,
-        curveScale: 1.0, matteToe: 0
+        curveScale: 1.0, matteToe: 0,
+        // Blue hour, snow, architecture — a deeper sky is the whole point of the look.
+        skyDepth: 0.35, skySaturationBias: 2
     )
 
     /// Everything the engine can offer. The app generates all of these and then *curates* — showing
