@@ -1573,6 +1573,26 @@ final class AppState: ObservableObject {
     private var sessionOrder: [URL] = []
     private static let maxSessions = 8
 
+    /// Put a mask measured on one image onto another's extent.
+    ///
+    /// Masks are decided at 768 px and drawn at 1200 px, and `CIBlendWithMask` needs the two to
+    /// line up — a mask covering part of the image extent does not blend, it clips. Nothing real is
+    /// lost in the scale: Vision hands back a fixed-size buffer whatever resolution it is given,
+    /// and `SkyMask` classifies on a 160-px grid, so a mask has always been an upscale of something
+    /// small. Returns the mask untouched when it is already the right size.
+    static func scaleMask(_ mask: CIImage, to extent: CGRect) -> CIImage {
+        let from = mask.extent
+        guard !from.isInfinite, from.width > 0, from.height > 0,
+              !extent.isInfinite, extent.width > 0, extent.height > 0,
+              from.size != extent.size else { return mask }
+        return mask
+            .transformed(by: CGAffineTransform(scaleX: extent.width / from.width,
+                                               y: extent.height / from.height))
+            .transformed(by: CGAffineTransform(translationX: extent.origin.x - from.origin.x,
+                                               y: extent.origin.y - from.origin.y))
+            .cropped(to: extent)
+    }
+
     /// Which photographs are currently held in the cache. Read-only on purpose — `openPhoto` and
     /// `stashCurrentSession` are the only things that may write it.
     var cachedSessionURLs: Set<URL> { Set(sessions.keys) }
@@ -2327,14 +2347,36 @@ final class AppState: ObservableObject {
             // Dust and focus touch no Vision at all (integral images and a Laplacian), so they
             // still overlap the Vision block for free. The win drops from ~28% to ~15%. A quarter
             // of a second is not worth a segfault.
+            // The image every recipe decision is measured on. Named, because the difference between
+            // this and `proxy` is load-bearing — see the block below.
+            let measureOn = perceptionProxy
             let measurement = try await Task.detached(priority: .userInitiated) { () throws -> MeasuredPhoto in
                 async let dust = DustDetector.detect(in: proxy)
                 async let focus = FocusMeasure.read(proxy)
 
-                let sampleBytes = try ImageMetrics.sample(proxy)
+                // MEASURED ON THE PERCEPTION PROXY, NOT THE EDIT PROXY — and this is the whole
+                // point of the change, not an optimisation.
+                //
+                // `adaptedRecipe` measures here, at 768 px. This measured at 1200 px. Both then
+                // applied the same curation rule to different numbers, so the canvas and the
+                // export could resolve a shoot's style to DIFFERENT CANDIDATES for the same
+                // photograph — measured on 15 real 60 MP frames, 1 in 15 at ΔE 4.54, plainly
+                // visible. The mechanism is a hard-threshold straddle rather than anything subtle:
+                // on `_DSC3937.ARW`, `subjectLuma` differed by 0.007 between the two sizes, which
+                // moved Dramatic's aesthetic score from 0.572 to 0.523 across a `qualityFloor` of
+                // 0.55, and the curator dropped a style on one side and kept it on the other.
+                //
+                // Neither size was "right" — 0.572 and 0.523 straddle the line by coin-flip — so
+                // the fix is one measurement, not a better one. 768 wins because it is what export
+                // must use anyway (it has no edit proxy) and it is 41% of the pixel work.
+                //
+                // `dust`, `focus` and `instances` deliberately stay on the 1200 px edit proxy:
+                // none of them feeds a recipe or a curation decision. They are the strip's triage
+                // and the click-to-mask targets, and they want the finer image.
+                let sampleBytes = try ImageMetrics.sample(measureOn)
                 let stats = ImageStatistics.compute(from: sampleBytes)
                 // Serial, deliberately. Do not turn these into `async let`.
-                let masks = LocalMasks.measure(in: proxy)
+                let masks = LocalMasks.measure(in: measureOn)
                 let instances = SubjectInstances.detect(in: proxy)
 
                 return await MeasuredPhoto(stats: stats, masks: masks, dust: dust,
@@ -2348,10 +2390,19 @@ final class AppState: ObservableObject {
             // Each instance's bitmap goes in under its own id, so a mask naming that instance
             // renders it. `LocalMasks`' merged "subject"/"sky" stay alongside — the engine's
             // automatic local edits still use those.
+            //
+            // The subject/sky masks are measured at 768 and RENDERED at 1200, so they are scaled
+            // onto the edit proxy here. That loses nothing real: `SubjectMask` gets a fixed-size
+            // buffer back from Vision whatever it is handed, and `SkyMask` classifies on a 160-px
+            // grid, so both were already being scaled up to whatever extent was asked for. The
+            // instance masks come from the edit proxy and are already at its extent.
             self.proxyMaskBitmaps = measurement.masks.bitmaps
+                .mapValues { Self.scaleMask($0, to: proxy.extent) }
                 .merging(measurement.instances.reduce(into: [:]) { $0[$1.id] = $1.mask }) { a, _ in a }
             self.subjectLuma = measurement.masks.subjectLuma
             self.skyLuma = measurement.masks.skyLuma
+            // NOT scaled: the candidates are scored on the 768 px image these were measured on, so
+            // that the score the curator sees is the score the export's curator sees.
             let proxyMasks = measurement.masks.bitmaps
 
             self.focus[url] = measurement.focus
@@ -2379,7 +2430,9 @@ final class AppState: ObservableObject {
                 var scored: [CandidateCurator.Scored] = []
                 var previews: [String: NSImage] = [:]
                 for recipe in recipes {
-                    let renderedCI = Renderer.render(proxy, with: recipe, maskBitmaps: proxyMasks)
+                    // Rendered and scored on the 768 px measurement image, matching `adaptedRecipe`
+                    // exactly. The previews are picker thumbnails, so 768 is more than they need.
+                    let renderedCI = Renderer.render(measureOn, with: recipe, maskBitmaps: proxyMasks)
                     guard let cg = Self.sharedContext.createCGImage(renderedCI, from: renderedCI.extent),
                           let score = AestheticEvaluator.score(rendered: renderedCI) else { continue }
                     let key = recipe.id ?? UUID().uuidString
@@ -3850,13 +3903,18 @@ final class AppState: ObservableObject {
     /// through `CandidateCurator.resolve`, and the returned recipe carries its own label so the
     /// filename names the look that was actually written.
     ///
-    /// **KNOWN, UNFIXED: it measures at a different resolution from the canvas.** `loadPhoto`
-    /// computes statistics, masks and candidate scores on the 1200 px EDIT proxy; this measures on
-    /// the 768 px perception proxy. So the two agree on the *rule* and can still land differently
-    /// on a frame sitting near the quality floor or the divergence threshold — and the recipe's own
-    /// numbers can differ slightly for the same reason, which predates the curation split above.
-    /// Closing it means changing what export measures, which changes the pixels of every existing
-    /// shoot look, so it needs eval-harness evidence rather than a judgement call (CLAUDE.md).
+    /// **AND IT MEASURES THE SAME IMAGE THE CANVAS DOES — the same size, built the same way.**
+    /// `loadPhoto` used to measure on the 1200 px edit proxy while this measured on the 768 px
+    /// perception proxy, so the two applied one curation rule to two sets of numbers. Measured over
+    /// 15 real 60 MP frames with `kelvin-perceive compare-measure-edge`: 1 frame in 15 resolved to
+    /// a different candidate, at ΔE 4.54 — `subjectLuma` differing by 0.007 moved that frame's
+    /// Dramatic score from 0.572 to 0.523 across a `qualityFloor` of 0.55. Neither number was more
+    /// correct than the other; there simply must be one of them.
+    ///
+    /// So the proxy is built by the same expression `loadPhoto` uses, not merely to the same size:
+    /// `fromFile` decodes straight from the file and `downsample` scales the decoded frame, and for
+    /// anything that is not RAW those are different pixels at identical dimensions — which would
+    /// have left the same bug with a smaller blast radius, and been much harder to find twice.
     ///
     /// Expensive on purpose — a decode, a perception pass and two Vision passes per photograph — so
     /// it runs at export, once, and never while someone is browsing.
@@ -3868,8 +3926,13 @@ final class AppState: ObservableObject {
             // Materialised, not lazy. A lazy proxy is a filter graph over the FULL frame, so every
             // measurement below would silently re-render all 60 megapixels again — the trap
             // `loadPhoto` documents and avoids.
-            return DecodedForExport(image: image,
-                                    proxy: Self.materialiseShared(PerceptionProxy.downsample(image)))
+            //
+            // `fromFile` first, exactly as `loadPhoto` does it. For RAW it returns nil and both
+            // paths fall through to the same downsample; for everything else it is the difference
+            // between the pixels the canvas measured and a second, subtly different set.
+            let proxy = PerceptionProxy.fromFile(url, matching: image.extent)
+                ?? Self.materialiseShared(PerceptionProxy.downsample(image))
+            return DecodedForExport(image: image, proxy: proxy)
         }.value
         // THE CACHE IS THE WHOLE PERFORMANCE STORY OF THIS FUNCTION. Measured over 25 frames at
         // 24 MP, perception was 6.43s of a 6.72s frame — 96% — and every other stage together was

@@ -246,6 +246,168 @@ if first == "bench-export" {
     } catch {
         die("\(error)")
     }
+} else if first == "compare-measure-edge" {
+    // ---- Does measurement resolution change the edit? ----
+    //
+    // THE CANVAS AND THE EXPORT MEASURE AT DIFFERENT SIZES. `AppState.loadPhoto` computes
+    // statistics, local masks and candidate scores on the 1200 px EDIT proxy;
+    // `AppState.adaptedRecipe` computes all three on the 768 px PERCEPTION proxy. They apply the
+    // same curation rule to different measurements, so they can still disagree — and the recipe's
+    // own numbers can differ — for the same photograph.
+    //
+    // Fixing that means changing what one of them measures, which changes the pixels of every
+    // existing shoot look. CLAUDE.md says that wants eval-harness evidence rather than a
+    // judgement call, and this is the evidence: run both arms over real frames and report what
+    // actually differs. Perception is held FIXED (it is read at 768 in both paths already, and
+    // served from cache here), so measurement resolution is the only variable.
+    //
+    //   kelvin-perceive compare-measure-edge --in-dir <shoot> [--limit N] [--style natural]
+    //                                        [--a 768] [--b 1200]
+    guard let inDir = flag("--in-dir", in: args) else {
+        die("compare-measure-edge requires --in-dir")
+    }
+    let limit = flag("--limit", in: args).flatMap(Int.init)
+    let styleId = flag("--style", in: args) ?? "natural"
+    let edgeA = flag("--a", in: args).flatMap(Int.init) ?? PerceptionProxy.defaultMaxEdge
+    let edgeB = flag("--b", in: args).flatMap(Int.init) ?? 1200
+    guard let style = CandidateStyle.all.first(where: { $0.id == styleId }) else {
+        die("unknown style '\(styleId)'")
+    }
+
+    /// One arm: measure at `edge`, generate, score, curate, and resolve the requested style —
+    /// the same sequence both shipped paths run, differing only in the size they measure at.
+    func resolve(_ full: CIImage, at edge: Int, perception: Perception,
+                 iso: Double?) throws -> (recipe: Recipe, honoured: Bool, curated: [String],
+                                          faces: Int, requestedScore: Double?, subjectLuma: Double?) {
+        let proxy = Bench.materialise(PerceptionProxy.downsample(full, maxEdge: edge))
+        let stats = try ImageStatistics.compute(proxy)
+        let masks = LocalMasks.measure(in: proxy)
+        let generated = RecipeEngine.candidates(perception: perception, statistics: stats,
+                                                subjectLuma: masks.subjectLuma,
+                                                skyLuma: masks.skyLuma, iso: iso)
+        var scored: [CandidateCurator.Scored] = []
+        for candidate in generated {
+            let preview = Renderer.render(proxy, with: candidate, maskBitmaps: masks.bitmaps)
+            guard let score = AestheticEvaluator.score(rendered: preview) else { continue }
+            scored.append(.init(recipe: candidate, score: score))
+        }
+        let r = CandidateCurator.resolve(from: scored, requested: style.id)
+        let fallback = RecipeEngine.candidate(perception: perception, statistics: stats,
+                                              style: style, subjectLuma: masks.subjectLuma,
+                                              skyLuma: masks.skyLuma, iso: iso)
+        // WHY a frame flips, not just that it did. `AestheticEvaluator.score(rendered:)` is
+        // statistics — which are sampled to 96x96 and so barely care about resolution — PLUS
+        // `FaceSkin.read`, which is Vision. If the two arms disagree it is almost certainly Vision
+        // seeing a different number of faces at a different input size, and that swings the skin
+        // term, which swings the quality floor, which decides curation. Reporting the face count
+        // and the requested style's score says whether that is what happened.
+        let faces = FaceSkin.read(in: proxy).faceCount
+        let requestedScore = scored.first { $0.recipe.id == style.id }?.score.overall
+        return (r.chosen?.recipe ?? fallback, r.honouredRequest,
+                r.curated.map { $0.recipe.id ?? "?" }, faces, requestedScore, masks.subjectLuma)
+    }
+
+    do {
+        var images = try BatchApply.imageFiles(in: URL(fileURLWithPath: inDir, isDirectory: true))
+        images = PhotoOrder.sorted(images, by: .filename)
+        guard !images.isEmpty else { die("no images in \(inDir)") }
+        if let limit { images = Array(images.prefix(limit)) }
+
+        note("Measurement-resolution A/B — \(images.count) frame(s), style \(style.label)")
+        note("  A = \(edgeA) px (what export measures at) · B = \(edgeB) px (what the canvas does)")
+        note("  perception held fixed, from cache\n")
+
+        var deltaEs: [Double] = []
+        var curationFlips = 0, chosenFlips = 0, recipeDiffs = 0
+        var fresh = 0
+        var worst: (name: String, de: Double) = ("", 0)
+
+        for (i, url) in images.enumerated() {
+            let full = try ImageDecoder.decode(url: url)
+            // Perception is the CONTROL, not a variable: both shipped paths read it at 768 px, so
+            // both arms share one read. Cached where possible, read and kept where not — a shoot
+            // nobody has opened would otherwise be un-measurable.
+            let perception: Perception
+            if let cached = PerceptionStore.load(for: url, modelId: provider.activeModelID) {
+                perception = cached
+            } else {
+                let readProxy = Bench.materialise(PerceptionProxy.downsample(full))
+                perception = try await provider.perceive(readProxy)
+                PerceptionStore.save(perception, for: url, modelId: provider.activeModelID)
+                fresh += 1
+            }
+            let iso = ExifReader.iso(url: url)
+            let a = try resolve(full, at: edgeA, perception: perception, iso: iso)
+            let b = try resolve(full, at: edgeB, perception: perception, iso: iso)
+
+            // The measurement that decides it: render the FULL frame under each arm's recipe and
+            // compare the pixels. Recipe-field deltas say something changed; ΔE says whether a
+            // photographer could tell.
+            //
+            // WITH the full-resolution mask bitmaps, and that is not a detail. `Renderer` skips any
+            // recipe mask it is handed no bitmap for, so rendering without them compares the global
+            // half of two recipes and silently discards the local half — which is precisely where
+            // this experiment's variable lands, since `subjectLuma` and `skyLuma` are two of the
+            // measurements that differ between the arms. The bitmaps themselves come off the full
+            // frame and are shared, exactly as export builds them; what differs is the strength
+            // each arm's recipe asks for.
+            let fullMasks = LocalMasks.measure(in: full).bitmaps
+            let sampleA = try ImageMetrics.sample(
+                Renderer.render(full, with: a.recipe, maskBitmaps: fullMasks))
+            let sampleB = try ImageMetrics.sample(
+                Renderer.render(full, with: b.recipe, maskBitmaps: fullMasks))
+            let de = ImageMetrics.meanDeltaE2000(sampleA, sampleB)
+            deltaEs.append(de)
+            if de > worst.de { worst = (url.lastPathComponent, de) }
+
+            if a.curated != b.curated { curationFlips += 1 }
+            if a.recipe.id != b.recipe.id { chosenFlips += 1 }
+            let sameNumbers = a.recipe.global == b.recipe.global
+            if !sameNumbers { recipeDiffs += 1 }
+
+            let mark = a.recipe.id != b.recipe.id ? "  ← CHOSE A DIFFERENT LOOK"
+                : (a.curated != b.curated ? "  ← curated set differs" : "")
+            note(String(format: "  %2d/%d  %-22@ ΔE %5.2f  %@ vs %@%@",
+                        i + 1, images.count, url.lastPathComponent as NSString, de,
+                        (a.recipe.id ?? "?") as NSString, (b.recipe.id ?? "?") as NSString,
+                        mark as NSString))
+            // Explain any frame the two arms did not agree on, because WHICH ARM IS RIGHT decides
+            // which way to unify them, and "they differ" does not answer that.
+            if a.recipe.id != b.recipe.id || a.curated != b.curated {
+                func fmt(_ d: Double?) -> String { d.map { String(format: "%.3f", $0) } ?? "—" }
+                note("          faces \(a.faces) vs \(b.faces) · "
+                     + "\(style.id) score \(fmt(a.requestedScore)) vs \(fmt(b.requestedScore)) · "
+                     + "subjectLuma \(fmt(a.subjectLuma)) vs \(fmt(b.subjectLuma))")
+                note("          offered A: \(a.curated.joined(separator: ","))")
+                note("          offered B: \(b.curated.joined(separator: ","))")
+            }
+        }
+
+        guard !deltaEs.isEmpty else {
+            die("no frames could be measured")
+        }
+        let sorted = deltaEs.sorted()
+        let mean = deltaEs.reduce(0, +) / Double(deltaEs.count)
+        let n = deltaEs.count
+
+        print("\n── measuring at \(edgeA) px vs \(edgeB) px, \(n) frame(s) ──")
+        print(String(format: "  ΔE2000 between the two renders   mean %.2f · median %.2f · max %.2f",
+                     mean, sorted[n / 2], sorted.last ?? 0))
+        print("  worst frame                      \(worst.name) at ΔE \(String(format: "%.2f", worst.de))")
+        print("  recipes with different numbers   \(recipeDiffs) of \(n)")
+        print("  frames offering a different set  \(curationFlips) of \(n)")
+        print("  frames OPENING IN A DIFFERENT LOOK  \(chosenFlips) of \(n)")
+        if fresh > 0 { print("  perception read fresh            \(fresh) of \(n)") }
+        print("""
+
+          ΔE2000 below 1.0 is generally taken as imperceptible to the average eye; below 2.0,
+          perceptible only on close inspection. A different CHOSEN LOOK is not a small
+          difference at any ΔE — it is the canvas and the export disagreeing about which
+          candidate the photograph is.
+        """)
+    } catch {
+        die("\(error)")
+    }
 } else if first == "label" {
     // ---- Batch corpus labelling ----
     guard let inDir = flag("--in-dir", in: args) else { die("label requires --in-dir") }
