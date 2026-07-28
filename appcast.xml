@@ -15,6 +15,29 @@
     <link>https://usekelvin.app</link>
     <description>Updates for Kelvin, the local-AI photo editor for macOS.</description>
     <item>
+      <title>Kelvin 0.2.0 — updates are 1.4 MB, and the panel keeps up</title>
+      <pubDate>Mon, 27 Jul 2026 21:51:45 -0700</pubDate>
+      <sparkle:version>202</sparkle:version>
+      <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <link>https://github.com/wmwallace/Kelvin/releases/tag/v0.2.0</link>
+      <enclosure
+        url="https://github.com/wmwallace/Kelvin/releases/download/v0.2.0/Kelvin-0.2.0.dmg"
+        sparkle:edSignature="d3P0iau+fFERd5Jm8gB8FURYDo7OdOE058Es3DNz0l1fdjUXr0iU+l6ihzm8o3jC/C7jrfQkr/+vOy0d0+OzBA=="
+        length="1515522386"
+        type="application/octet-stream"/>
+      <!-- Built from the 0.1.0 disk image that actually shipped. Anyone on build 191 downloads
+           1.4 MB instead of 1.4 GB; anyone else falls back to the enclosure above. -->
+      <sparkle:deltas>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.2.0/Kelvin-0.2.0-from-191.delta"
+          sparkle:deltaFrom="191"
+          sparkle:edSignature="ycDyqGE0Rf8SgdyzX4LfhmNMwt+t6JhLFflnSkPmYT4ZobnDGHbv+TM7I3zOzFmBiqSfzoKwjGGe4AV4RJO3Cw=="
+          length="1466838"
+          type="application/octet-stream"/>
+      </sparkle:deltas>
+    </item>
+    <item>
       <title>Kelvin 0.1.0 — first public build</title>
       <pubDate>Sun, 26 Jul 2026 11:03:27 -0700</pubDate>
       <sparkle:version>191</sparkle:version>
