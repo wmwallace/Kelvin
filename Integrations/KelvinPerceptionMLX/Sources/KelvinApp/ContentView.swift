@@ -4973,15 +4973,26 @@ struct ContentView: View {
                     // asks once for one fixed frame and is cached. Same shape of request as the name
                     // beside it, governed by the same switch.
                     if let point = c.location, let map = PlaceMaps.shared.image(for: point) {
-                        Image(nsImage: map)
+                        // The still map answers "where", and clicking it hands off to Maps for the
+                        // things a still cannot do — panning out, switching to satellite, getting
+                        // directions. Inline for the glance, Maps for the exploration.
+                        let picture = Image(nsImage: map)
                             .resizable()
                             .aspectRatio(contentMode: .fill)
                             .frame(height: 96)
                             .clipShape(RoundedRectangle(cornerRadius: 6))
                             .overlay(RoundedRectangle(cornerRadius: 6)
                                 .stroke(Theme.hairline.opacity(0.8), lineWidth: 1))
-                            .accessibilityLabel(PlaceNames.shared.cachedName(for: point)
-                                                .map { "Map of \($0)" } ?? "Map of where this was taken")
+                        if let url = c.mapURL {
+                            Link(destination: url) { picture }
+                                .buttonStyle(.plain)
+                                .help("Open this location in Maps")
+                                .accessibilityLabel(PlaceNames.shared.cachedName(for: point)
+                                                    .map { "Map of \($0). Opens in Maps." }
+                                                    ?? "Map of where this was taken. Opens in Maps.")
+                        } else {
+                            picture
+                        }
                     }
                 }
             }

@@ -106,9 +106,17 @@ final class PlaceNames: ObservableObject {
     /// address is neither.
     static func describe(_ placemark: CLPlacemark?) -> String? {
         guard let placemark else { return nil }
-        let primary = placemark.areasOfInterest?.first
-            ?? placemark.locality
+        // THE TOWN FIRST, and `areasOfInterest` almost last.
+        //
+        // That order was the other way round and produced "Deschutes National Forest, OR" for a
+        // shoot in Sunriver — technically true, useless as a name. `areasOfInterest` returns
+        // whatever large named feature contains the point, which for anywhere rural is a forest, a
+        // park or a range: the least specific thing available dressed up as the most specific.
+        // `locality` is the town, which is what a photographer calls a shoot.
+        let primary = placemark.locality
+            ?? placemark.subLocality
             ?? placemark.subAdministrativeArea
+            ?? placemark.areasOfInterest?.first
             ?? placemark.name
         guard let primary, !primary.isEmpty else { return nil }
         // The qualifier is the state or region, and it is dropped when it would only repeat the
@@ -198,7 +206,12 @@ final class PlaceMaps: ObservableObject {
             center: CLLocationCoordinate2D(latitude: (point.latitude * 1000).rounded() / 1000,
                                            longitude: (point.longitude * 1000).rounded() / 1000),
             latitudinalMeters: 1200, longitudinalMeters: 1200)
-        options.size = size
+        // ASK FOR PIXELS, DISPLAY AT POINTS. `Options.scale` is iOS-only, so the macOS way to get a
+        // Retina snapshot is to request one physically larger over the same region and hand it back
+        // as an `NSImage` sized in points. Without this the map came back at 1x and was visibly
+        // soft — which is exactly how it was reported.
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        options.size = CGSize(width: size.width * scale, height: size.height * scale)
         options.showsBuildings = true
         // The panel is dark; a bright map in it would be the loudest thing on screen.
         options.appearance = NSAppearance(named: .darkAqua)
@@ -208,11 +221,13 @@ final class PlaceMaps: ObservableObject {
         // both this SDK and the one CI builds against. Same reason `PhotoBrowser.thumbnailCG`
         // returns a `CGImage` — see that comment, and `kelvin-ci-swift-divergence`.
         MKMapSnapshotter(options: options).start(with: .main) { [weak self] snapshot, _ in
-            let pinned = snapshot.flatMap { Self.pinned($0, size: size) }
+            let pinned = snapshot.flatMap { Self.pinned($0, size: size, scale: scale) }
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.inFlight.remove(key)
                 guard let pinned else { return }
+                // POINT size, not pixel size: the raster is 2x and this is what makes it crisp
+                // rather than merely twice as big.
                 self.images[key] = NSImage(cgImage: pinned, size: size)
             }
         }
@@ -223,22 +238,25 @@ final class PlaceMaps: ObservableObject {
     /// Drawn with Core Graphics rather than AppKit so it stays `nonisolated` and hands back a
     /// `CGImage`, which is the only part of this that is allowed to cross into the actor.
     nonisolated private static func pinned(_ snapshot: MKMapSnapshotter.Snapshot,
-                                           size: CGSize) -> CGImage? {
+                                           size: CGSize, scale: CGFloat) -> CGImage? {
         guard let base = snapshot.image.cgImage(forProposedRect: nil, context: nil, hints: nil)
         else { return nil }
-        let w = Int(size.width), h = Int(size.height)
+        let w = Int(size.width * scale), h = Int(size.height * scale)
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
                                   bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         else { return nil }
         ctx.draw(base, in: CGRect(x: 0, y: 0, width: w, height: h))
         let cx = Double(w) / 2, cy = Double(h) / 2
+        // Pin dimensions scale with the raster, or it would be a dot on a Retina map.
+        let r = 5.0 * scale
         // The app's own warm accent, ringed in white so it reads on any terrain underneath.
         ctx.setFillColor(CGColor(red: 1.0, green: 0.60, blue: 0.33, alpha: 1))
-        ctx.fillEllipse(in: CGRect(x: cx - 5, y: cy - 5, width: 10, height: 10))
+        ctx.fillEllipse(in: CGRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2))
         ctx.setStrokeColor(CGColor(gray: 1, alpha: 0.9))
-        ctx.setLineWidth(1.5)
-        ctx.strokeEllipse(in: CGRect(x: cx - 6.5, y: cy - 6.5, width: 13, height: 13))
+        ctx.setLineWidth(1.5 * scale)
+        ctx.strokeEllipse(in: CGRect(x: cx - r * 1.3, y: cy - r * 1.3,
+                                     width: r * 2.6, height: r * 2.6))
         return ctx.makeImage()
     }
 

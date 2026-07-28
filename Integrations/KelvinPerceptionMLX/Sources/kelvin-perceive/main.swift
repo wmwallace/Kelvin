@@ -15,7 +15,7 @@ import KelvinPerceptionMLX
 //       and the model loads once (the provider is an actor that caches it).
 //
 //   kelvin-perceive bench-export --in-dir <shoot> [--out-dir <dir>] [--limit N]
-//                                 [--style natural] [--no-cache]
+//                                 [--style natural] [--no-cache] [--lanes N]
 //       Time the ADAPTED EXPORT path — the one a shoot carrying an applied look takes —
 //       stage by stage, and say what it costs at shoot scale.
 //
@@ -49,6 +49,13 @@ guard let first = args.first else {
 }
 
 let provider = MLXPerceptionProvider()
+
+/// A render waiting to be written. `CIImage` crosses to the task group here deliberately: it is a
+/// filter graph, and forcing it is exactly the work being parallelised.
+struct WriteJob: @unchecked Sendable {
+    let image: CIImage
+    let out: URL
+}
 
 /// One frame's stage timings, in seconds.
 struct FrameTiming {
@@ -96,6 +103,9 @@ if first == "bench-export" {
     let limit = flag("--limit", in: args).flatMap(Int.init)
     let styleId = flag("--style", in: args) ?? "natural"
     let noCache = args.contains("--no-cache")
+    // Mirrors the app's export: plan sequentially, then render N frames at once. 1 is the old
+    // strictly-sequential behaviour, for measuring against.
+    let lanes = max(1, flag("--lanes", in: args).flatMap(Int.init) ?? 3)
     guard let style = CandidateStyle.all.first(where: { $0.id == styleId }) else {
         die("unknown style '\(styleId)'")
     }
@@ -111,6 +121,7 @@ if first == "bench-export" {
         note("Model \(provider.activeModelID); writing to \(outURL.path)\n")
 
         var timings: [FrameTiming] = []
+        var pending: [WriteJob] = []
         var cacheHits = 0
         let wallStart = Date()
         for (i, url) in images.enumerated() {
@@ -147,12 +158,32 @@ if first == "bench-export" {
             }
             let rendered = clock(&t.render) { Renderer.render(full, with: recipe, maskBitmaps: bitmaps) }
             let out = outURL.appendingPathComponent(url.deletingPathExtension().lastPathComponent + ".jpg")
-            try clock(&t.write) {
-                try ImageWriter.write(rendered, to: out, format: .jpeg(quality: 0.97))
+            if lanes <= 1 {
+                try clock(&t.write) {
+                    try ImageWriter.write(rendered, to: out, format: .jpeg(quality: 0.97))
+                }
+                note(String(format: "  %2d/%d  %-24@ %5.2fs", i + 1, images.count,
+                            url.lastPathComponent as NSString, t.total))
+            } else {
+                pending.append(WriteJob(image: rendered, out: out))
             }
             timings.append(t)
-            note(String(format: "  %2d/%d  %-24@ %5.2fs", i + 1, images.count,
-                        url.lastPathComponent as NSString, t.total))
+        }
+        // The concurrent half: the writes (which force the render) run N at a time. Per-stage
+        // timings above stay sequential and honest; WALL time is what this flag measures.
+        if lanes > 1 {
+            await withTaskGroup(of: Void.self) { group in
+                var next = 0
+                func add() {
+                    guard next < pending.count else { return }
+                    let job = pending[next]; next += 1
+                    group.addTask {
+                        try? ImageWriter.write(job.image, to: job.out, format: .jpeg(quality: 0.97))
+                    }
+                }
+                for _ in 0..<min(lanes, pending.count) { add() }
+                while await group.next() != nil { add() }
+            }
         }
         let wall = Date().timeIntervalSince(wallStart)
 
