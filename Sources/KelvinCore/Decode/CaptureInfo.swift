@@ -23,6 +23,25 @@ public struct CaptureInfo: Sendable, Equatable {
     public var captured: Date?
     public var coordinate: CLLocationCoordinate2D?
     public var altitude: Double?        // metres relative to sea level, negative below
+
+    /// Why there is no position, when there isn't one.
+    ///
+    /// "No location shown" and "no location recorded" look identical from outside, and the first
+    /// reads as the app having failed to look. Measured on a real 110-frame shoot: every single
+    /// frame carried a GPS block and not one carried a fix — the camera wrote `Status = V` (void,
+    /// EXIF 2.3 tag 0x0009) with no latitude or longitude at all, which is what a body does when its
+    /// receiver is enabled and never locks. The reader was right to show nothing and wrong to say
+    /// nothing.
+    public enum PositionStatus: String, Sendable, Equatable {
+        /// No GPS block in the file. The ordinary case for a camera without a receiver.
+        case absent
+        /// A GPS block that carries no usable fix — void status, missing coordinates, or the
+        /// null island. The camera tried; it did not know where it was.
+        case void
+        /// A real position.
+        case fixed
+    }
+    public var positionStatus: PositionStatus = .absent
     public var pixelWidth: Int?
     public var pixelHeight: Int?
 
@@ -153,6 +172,10 @@ public enum CaptureInfoReader {
 
         // GPSStatus 'V' means "measurement void" — the receiver was on but had no fix, and the
         // numbers next to it are stale or zero. 'A' means active. EXIF 2.3, tag 0x0009.
+        // A GPS block exists, so from here on every failure is "the camera tried and did not know",
+        // which is a different fact from "this camera has no receiver" and is now recorded as one.
+        info.positionStatus = .void
+
         if let status = (gps[kCGImagePropertyGPSStatus] as? String)?.uppercased(), status == "V" {
             return
         }
@@ -179,6 +202,7 @@ public enum CaptureInfoReader {
         // in the sea.
         guard point.isValid, !(point.latitude == 0 && point.longitude == 0) else { return }
         info.coordinate = CLLocationCoordinate2D(latitude: point.latitude, longitude: point.longitude)
+        info.positionStatus = .fixed
 
         // Altitude is a magnitude plus a ref, same pattern as the coordinate: 0 = above sea level,
         // 1 = below. Below-sea-level frames are rare but real (the Dead Sea, Death Valley), and a

@@ -173,4 +173,31 @@ final class CaptureInfoTests: XCTestCase {
         XCTAssertEqual(location.latitude, 0, accuracy: 1e-6)
         XCTAssertEqual(location.longitude, 36.8219, accuracy: 1e-4)
     }
+
+    // MARK: Why there is no position
+
+    /// A camera with no receiver at all. The ordinary case, and it must not read as a failure.
+    func testNoGPSBlockIsAbsentNotVoid() {
+        XCTAssertEqual(CaptureInfo().positionStatus, .absent)
+    }
+
+    /// **The case a real 110-frame shoot turned out to be, every single frame.** The body wrote a
+    /// GPS block with `Status = V` — void — and no coordinates at all, which is what a camera does
+    /// when its receiver is on and never locks. Showing nothing is right; saying nothing is not,
+    /// because "no location shown" and "no location recorded" look identical from outside.
+    func testAVoidFixIsDistinguishedFromHavingNoGPSAtAll() {
+        var info = CaptureInfo()
+        info.positionStatus = .void
+        XCTAssertNil(info.locationText, "a void fix must not produce a location")
+        XCTAssertNotEqual(info.positionStatus, .absent,
+                          "a camera that tried and failed is not a camera without a receiver")
+    }
+
+    func testARealFixReadsAsFixed() {
+        var info = CaptureInfo()
+        info.coordinate = CLLocationCoordinate2D(latitude: 43.87, longitude: -121.44)
+        info.positionStatus = .fixed
+        XCTAssertNotNil(info.locationText)
+        XCTAssertEqual(info.positionStatus, .fixed)
+    }
 }

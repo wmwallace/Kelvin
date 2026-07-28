@@ -1164,6 +1164,46 @@ final class AppState: ObservableObject {
 
     var softCount: Int { folderPhotos.filter { focus[$0]?.isSoft == true }.count }
 
+    // MARK: What a photograph is, in words, for VoiceOver
+    //
+    // The app had no accessibility labels at all — every thumbnail and the canvas itself announced
+    // as an unlabelled image — while generating an accurate one-sentence description of every
+    // photograph and showing it only to people who can see it. A photo editor will never be fully
+    // usable without sight, but "Backlit portrait against a bright window, subject in shadow" is a
+    // great deal better than "image", and the text already exists and is now cached per photo.
+
+    /// One frame, spoken. Filename first because that is its identity, then the reading, then the
+    /// decisions someone has already made about it.
+    ///
+    /// Order matters: VoiceOver users hear this while arrowing through a shoot, so the thing that
+    /// distinguishes one frame from the next has to come before the things most frames share.
+    func spokenDescription(for url: URL) -> String {
+        var parts = [url.lastPathComponent]
+        if let note = cachedReading(for: url), !note.isEmpty {
+            parts.append(note)
+        }
+        switch flags[url] {
+        case .keep:   parts.append("flagged Keep")
+        case .reject: parts.append("flagged Reject")
+        case nil:     break
+        }
+        if editedURLs.contains(url) { parts.append("edited") }
+        // The scan's findings, in the words it already uses for the tooltip — an automatic judgement
+        // that is visible to sighted users and silent to everyone else is half a feature.
+        if let verdict = triage[url], !verdict.concerns.isEmpty {
+            parts.append(verdict.concerns.map(\.message).joined(separator: ", "))
+        }
+        return parts.joined(separator: ". ")
+    }
+
+    /// The model's sentence for a frame, from memory or from the cache on disk — without decoding
+    /// anything. Nil for a frame nobody has read yet, which is the honest answer rather than a
+    /// guess.
+    func cachedReading(for url: URL) -> String? {
+        if url == imageURL, let note = perception?.notes { return note }
+        return PerceptionStore.load(for: url, modelId: perceptionProvider.activeModelID)?.notes
+    }
+
     /// Did the scan notice anything at all about this frame — sharpness or exposure.
     ///
     /// Deliberately a union rather than "has an exposure concern": someone reviewing what the scan
@@ -3919,6 +3959,9 @@ struct PreviewImage: View {
     let originalImage: NSImage?
     let zoom: Double
     let pan: CGSize
+    /// The photograph in words, for VoiceOver. Passed in rather than reached for: this view has no
+    /// `AppState`, and it should not grow one to say a sentence.
+    var spoken: String = "The photograph being edited"
 
     var body: some View {
         let live = preview.active.flatMap { $0.url == url ? $0.image : nil }
@@ -3927,6 +3970,11 @@ struct PreviewImage: View {
                 .resizable().scaledToFit()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(24)
+                // The photograph itself. Announced as what the model read rather than as "image",
+                // and marked `.updatesFrequently` so VoiceOver does not re-read the whole label on
+                // every tick of a slider drag.
+                .accessibilityLabel(spoken)
+                .accessibilityAddTraits(.updatesFrequently)
                 .scaleEffect(zoom, anchor: .center)
                 .offset(pan)
                 // Identity is the PHOTOGRAPH, not the rendered image. The image is replaced on
@@ -4302,7 +4350,10 @@ struct ContentView: View {
                                      showingOriginal: appState.showingOriginal,
                                      originalImage: appState.originalPreviewImage,
                                      zoom: appState.zoom,
-                                     pan: appState.pan)
+                                     pan: appState.pan,
+                                     spoken: appState.imageURL.map {
+                                         appState.spokenDescription(for: $0)
+                                     } ?? "The photograph being edited")
                         if appState.activePreviewImage == nil,
                            appState.originalPreviewImage == nil,
                            appState.isProcessing {
@@ -4390,6 +4441,7 @@ struct ContentView: View {
                                   sharpest: appState.sharpestInRun,
                                   exposureConcerns: appState.exposureConcerns(for:),
                                   scanNote: appState.scanNote(for:),
+                                  spokenDescription: appState.spokenDescription(for:),
                                   sortKey: $appState.photoSort,
                                   sortReversed: $appState.photoSortReversed,
                                   grouping: $appState.stripGrouping,
@@ -4819,6 +4871,14 @@ struct ContentView: View {
             if let date = c.captured {
                 Text(DateFormatter.localizedString(from: date, dateStyle: .medium, timeStyle: .short))
                     .font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
+            }
+            // SAY WHY THERE IS NO LOCATION, when the camera tried and failed. Silence here is
+            // indistinguishable from the app not having looked — and on the shoot this was tested
+            // against, all 110 frames were exactly this case.
+            if c.locationText == nil, c.positionStatus == .void {
+                Text("No position recorded — the camera wrote an empty GPS tag")
+                    .font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if let location = c.locationText {
                 // WHERE, AND A WAY OUT TO A MAP — deliberately as a hand-off rather than a map
@@ -5491,6 +5551,13 @@ struct CandidateRow: View {
             )
         }
         .buttonStyle(.plain)
+        // The row is a thumbnail plus two lines of numbers, so unlabelled it announces as an image
+        // and a shrug. Spoken, it is the style, then what actually separates it from the others.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(signature.isEmpty
+                            ? "\(candidate.label), no adjustments"
+                            : "\(candidate.label), \(signature)")
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
         // Picking a candidate is the one act this whole app is built around, and the selection
         // moves between rows — so the border and fill hand over rather than cutting. Colour and
         // stroke width only: no scale, no shadow, nothing that would make a row jump at the eye
@@ -5618,6 +5685,54 @@ struct HistogramView: View {
                                  startPoint: .top, endPoint: .bottom))
             .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.hairline, lineWidth: 1)))
         .help(reading?.tooltip ?? "The tonal distribution of the rendered photo, by colour channel")
+        // A HISTOGRAM IS PURE GEOMETRY, so a label naming it says nothing — "histogram" tells a
+        // VoiceOver user exactly as much as an unlabelled image does. What it has to speak is the
+        // reading itself: where the tones sit, whether there is a cast, and what is clipping.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Self.spoken(reading))
+    }
+
+    /// The histogram in words.
+    ///
+    /// Describes the same three things the drawing does, in the same order: where the mass of the
+    /// tones is, whether the channels disagree (which is what colour in the curves means), and what
+    /// is clipped. Derived from the bins rather than restating the picture, so it cannot drift away
+    /// from what is on screen.
+    static func spoken(_ reading: Reading?) -> String {
+        guard let reading, reading.peak > 0 else { return "Tonal readout, no photograph loaded" }
+        let luma = (0..<64).map { i in reading.channels.reduce(0) { $0 + $1[i] } }
+        let total = luma.reduce(0, +)
+        guard total > 0 else { return "Tonal readout, nothing measurable" }
+        // Thirds. Finer than that is precision nobody can act on by ear.
+        let shadows = luma[0..<21].reduce(0, +) / total
+        let mids = luma[21..<43].reduce(0, +) / total
+        let highs = luma[43..<64].reduce(0, +) / total
+        let heaviest = max(shadows, max(mids, highs))
+        let placement = heaviest == shadows ? "mostly in the shadows"
+            : heaviest == highs ? "mostly in the highlights" : "mostly in the midtones"
+
+        var parts = ["Tonal readout, " + placement]
+        // A cast, said as the channels-disagree fact the drawing shows as colour.
+        let means = reading.channels.map { bins in
+            bins.enumerated().reduce(0.0) { $0 + Double($1.offset) * $1.element } / total * 3
+        }
+        if let hi = means.indices.max(by: { means[$0] < means[$1] }),
+           let lo = means.indices.min(by: { means[$0] < means[$1] }),
+           means[hi] - means[lo] > 2.5 {
+            parts.append("\(channelNames[hi]) running brighter than \(channelNames[lo])")
+        } else {
+            parts.append("channels balanced")
+        }
+        if !reading.shadowClipped.isEmpty {
+            parts.append(reading.shadowClipped.joined(separator: ", ") + " crushed to black")
+        }
+        if !reading.highlightClipped.isEmpty {
+            parts.append(reading.highlightClipped.joined(separator: ", ") + " blown to white")
+        }
+        if reading.shadowClipped.isEmpty && reading.highlightClipped.isEmpty {
+            parts.append("nothing clipped")
+        }
+        return parts.joined(separator: ", ")
     }
 
     /// A small right-angled wedge in the top corner of the end that is clipping.

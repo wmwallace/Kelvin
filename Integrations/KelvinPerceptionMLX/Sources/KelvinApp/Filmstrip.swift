@@ -186,6 +186,9 @@ struct FilmstripView: View {
     var exposureConcerns: (URL) -> [PhotoTriage.Concern] = { _ in [] }
     /// The scan's readings for one frame, in words, for the tooltip.
     var scanNote: (URL) -> String? = { _ in nil }
+    /// The whole frame in a sentence, for VoiceOver — filename, what the model read, the flags.
+    /// See `AppState.spokenDescription`.
+    var spokenDescription: (URL) -> String = { $0.lastPathComponent }
     @Binding var sortKey: PhotoSortKey
     @Binding var sortReversed: Bool
     /// How the strip is partitioned, and the runs to draw. `nil` groups is a flat strip — not one
@@ -810,6 +813,11 @@ struct FilmstripView: View {
         // flag deliberately: an automatic judgement with no visible measurement behind it is one you
         // can neither check nor disagree with.
         .help(scanNote(url).map { "\(url.lastPathComponent) — \($0)" } ?? url.lastPathComponent)
+        // The thumbnail is a Button wrapping an Image, so without this it announces as an
+        // unlabelled image and a shoot is 400 identical ones.
+        .accessibilityLabel(spokenDescription(url))
+        .accessibilityAddTraits(isCurrent ? [.isSelected] : [])
+        .accessibilityHint("Opens this photograph")
     }
 }
 
