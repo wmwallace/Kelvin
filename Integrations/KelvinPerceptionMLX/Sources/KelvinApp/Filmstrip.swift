@@ -158,7 +158,12 @@ struct FilmstripView: View {
     var maxHeight: Double = 6 * 64
     let editedURLs: Set<URL>
     let thumbnail: (URL) -> NSImage?
-    let onSelect: (URL) -> Void
+    /// A click on a thumbnail, with the modifiers held at the time: `extend` is shift, `toggle` is
+    /// command. A plain click still opens the frame — that is what clicking a thumbnail has always
+    /// meant, and a modifier is what says "I am choosing, not looking".
+    let onSelect: (URL, _ extend: Bool, _ toggle: Bool) -> Void
+    /// The frames picked out for an action. Empty means the action covers the whole shoot.
+    var selected: Set<URL> = []
     var onDismiss: (URL) -> Void = { _ in }
     var flags: [URL: PhotoFlag] = [:]
     var totalCount: Int = 0
@@ -629,7 +634,16 @@ struct FilmstripView: View {
 
     private func cell(_ url: URL) -> some View {
         let isCurrent = url == current
-        return Button(action: { onSelect(url) }) {
+        let isSelected = selected.contains(url)
+        // The modifiers are read at the moment of the click. A SwiftUI `Button` action carries no
+        // event, and the alternatives — a tap gesture, or a custom `NSView` — either lose the
+        // button's keyboard and accessibility behaviour or replace this cell with hand-rolled hit
+        // testing. Reading the current flags is what AppKit itself does here, and this is the
+        // "boring infrastructure" side of the ledger.
+        return Button(action: {
+            let mods = NSEvent.modifierFlags
+            onSelect(url, mods.contains(.shift), mods.contains(.command))
+        }) {
             ZStack(alignment: .topTrailing) {
                 Group {
                     if let img = thumbnail(url) {
@@ -643,10 +657,15 @@ struct FilmstripView: View {
                 // A rejected frame stays visible but recedes — you can see the decision without
                 // it competing with the frames still in play.
                 .opacity(flags[url] == .reject ? 0.32 : 1)
+                // SELECTION AND CURRENT ARE DIFFERENT QUESTIONS, so they are different marks. The
+                // frame you are looking at keeps the warm glow it has always had; the frames an
+                // action will land on get a cool ring. Conflating them would make "apply to these
+                // four" indistinguishable from "I am looking at this one", and the two colours are
+                // already the app's opposed pair, so a selected current frame reads as both.
                 .overlay(
                     RoundedRectangle(cornerRadius: 5)
-                        .stroke(isCurrent ? Theme.glow : Theme.hairline,
-                                lineWidth: isCurrent ? 2 : 1)
+                        .stroke(isSelected ? Theme.cool : (isCurrent ? Theme.glow : Theme.hairline),
+                                lineWidth: isSelected ? 3 : (isCurrent ? 2 : 1))
                 )
                 .overlay(alignment: .bottomTrailing) {
                     // Soft is a QUESTION, not a decision — a marker you look at, in a different
@@ -751,7 +770,9 @@ struct FilmstripView: View {
                     .help("Remove from this session")
                 }
             }
-            .opacity(isCurrent ? 1 : 0.72)
+            // Selected frames come up to full strength too — the dimming says "not in play", and a
+            // frame you have deliberately picked is very much in play even while you look elsewhere.
+            .opacity(isCurrent || isSelected ? 1 : 0.72)
         }
         .buttonStyle(.plain)
         // Two separate keys on purpose. The selection border hands over between frames as you
@@ -787,7 +808,7 @@ struct OpenOptions: View {
             }
             Text(appState.includeFolderOnOpen
                  ? "The other photos are listed in the strip below. Nothing is read from them until the strip is open."
-                 : "Only the photo you pick — no filmstrip, no arrow keys. Batch apply is unaffected; it asks for its own folder.")
+                 : "Only the photo you pick — no filmstrip, no arrow keys, and no way to apply a look to the shoot.")
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

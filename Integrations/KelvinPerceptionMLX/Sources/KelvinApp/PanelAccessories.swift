@@ -68,39 +68,16 @@ enum PanelAccessories {
             guard let state else { return }
             explanation?.stringValue = state.includeFolderOnOpen
                 ? "The other photos are listed in the strip below. Nothing is read from them until the strip is open."
-                : "Only the photo you pick — no filmstrip, no arrow keys. Batch apply is unaffected; it asks for its own folder."
+                : "Only the photo you pick — no filmstrip, no arrow keys, and no way to apply a look to the shoot."
         }
     }
 
     // MARK: Export
 
-    /// The one control Batch apply needs: which frames of the open shoot. Same Keep flag the
-    /// filmstrip and export scope already use — K is the selection mechanism everywhere.
-    static func batchOptions(_ state: AppState) -> NSView {
-        let container = FlippedView()
-        let target = ExportTarget.shared
-        target.state = state
-        let keepers = NSButton(
-            checkboxWithTitle: "Only photos flagged Keep (\(state.keeperCount) of \(state.folderPhotos.count))",
-            target: target, action: #selector(ExportTarget.batchKeepersChanged(_:)))
-        keepers.state = state.batchKeepersOnly ? .on : .off
-        if state.keeperCount == 0 {
-            keepers.isEnabled = false
-            keepers.state = .off
-            state.batchKeepersOnly = false
-            keepers.toolTip = "Flag photos first — press P on each, or click the flag on its "
-                + "filmstrip tile — and this becomes a choice"
-        }
-        container.addSubview(keepers)
-        keepers.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: 520),
-            keepers.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
-            keepers.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
-            keepers.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12)
-        ])
-        return container
-    }
+    // NOTE: `batchOptions` lived here, the accessory for a panel that no longer exists — applying a
+    // look to the shoot writes a record and asks for no folder, so there is nothing to hang an
+    // accessory off. Its one control, the Keep-flag scope, moved into the toolbar beside the Apply
+    // button, where it can say what it will do before you press anything.
 
     /// `showScope` adds the "kept only" row and belongs only on the export-EDITED panel — a scope
     /// choice over many photos is meaningless when the panel is exporting exactly one.
@@ -151,15 +128,21 @@ enum PanelAccessories {
             // said K, promising a key nobody bound, which is a mistake this codebase has already
             // paid for once). The count is in the title because a scope control that doesn't say
             // how many it selects is a guessing game.
+            //
+            // Counted off the EXPORT TARGETS, not off the hand-edited frames: a shoot carried by an
+            // applied look has plenty to export and nothing "edited", and this read "0 of 0" over a
+            // panel that was about to write four hundred files.
+            let keeperTargets = state.exportTargets(keepersOnly: true).count
+            let allTargets = state.exportableCount
             let keepers = NSButton(
-                checkboxWithTitle: "Only photos flagged Keep (\(state.editedKeeperCount) of \(state.editedCount) edited)",
+                checkboxWithTitle: "Only photos flagged Keep (\(keeperTargets) of \(allTargets))",
                 target: target, action: #selector(ExportTarget.keepersChanged(_:)))
             keepers.state = state.exportKeepersOnly ? .on : .off
-            if state.editedKeeperCount == 0 {
+            if keeperTargets == 0 {
                 keepers.isEnabled = false
                 keepers.state = .off
                 state.exportKeepersOnly = false
-                keepers.toolTip = "Flag edited photos first — press P on each, or click the flag on "
+                keepers.toolTip = "Flag photos first — press P on each, or click the flag on "
                 + "its filmstrip tile — and this becomes a choice"
             }
             rows.append([NSGridCell.emptyContentView, keepers,
@@ -224,9 +207,6 @@ enum PanelAccessories {
         }
         @objc func keepersChanged(_ sender: NSButton) {
             state?.exportKeepersOnly = (sender.state == .on)
-        }
-        @objc func batchKeepersChanged(_ sender: NSButton) {
-            state?.batchKeepersOnly = (sender.state == .on)
         }
 
         /// A quality control beside PNG or TIFF is a control that does nothing, which is the exact

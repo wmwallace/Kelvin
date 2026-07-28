@@ -404,8 +404,6 @@ final class AppState: ObservableObject {
 
     @Published var isProcessing = false
     @Published var statusMessage = "Drop a photo or a folder to read the light."
-    @Published var batchOutcome: BatchApply.Outcome?
-    @Published var showBatchSheet = false
 
     private let store: PreferenceStore
     /// GPU-backed Core Image context — the "accelerator". A Metal device + cached intermediates and
@@ -497,6 +495,262 @@ final class AppState: ObservableObject {
     @Published var folderPhotos: [URL] = []
     /// Photos whose edit differs from the candidate Kelvin generated (drives the strip's dot).
     @Published var editedURLs: Set<URL> = []
+
+    // MARK: The shoot's look
+
+    /// The look the open shoot is in, or nil if it has never been given one. See `ShootLook` for
+    /// why this is one record rather than an edit per photograph.
+    ///
+    /// Written by `loadShootLook`, `applyLookToShoot` and `clearShootLook`, and by tests that need a
+    /// shoot already in a look; nothing else should assign it. Assigning here does NOT persist —
+    /// `applyLookToShoot` is the path that writes.
+    @Published var shootLook: ShootLook?
+    /// Which folder `shootLook` describes, so opening a different shoot doesn't inherit the last
+    /// one's look. One folder at a time, for the same reason `captureIndex` is.
+    private var shootLookFolder: URL?
+
+    /// Point the shoot look at a folder, reading whatever was applied to it before. Cheap — one
+    /// small JSON read, and only when the folder actually changes.
+    func loadShootLook(for folder: URL) {
+        guard shootLookFolder != folder else { return }
+        shootLookFolder = folder
+        shootLook = ShootLookStore.load(for: folder)
+    }
+
+    /// The style a photograph should open in, before any hand-made edit is restored on top.
+    ///
+    /// Nil means nothing has claimed this frame and the engine's own ranking wins — which is what
+    /// every photo did before shoot looks existed, and still does in a shoot nobody has applied one
+    /// to. A frame with its own override beats the shoot's style; see `ShootLook.style(for:)`.
+    func effectiveStyle(for photo: URL) -> String? {
+        shootLook?.style(for: photo)
+    }
+
+    /// Put the chosen look on the shoot — or on just the selected frames.
+    ///
+    /// **This writes one small record, not an edit per photograph.** Nothing is rendered and no file
+    /// is written next to anyone's originals; the strip and the open photo simply resolve the style
+    /// against each frame's own histogram from here on. Export is what makes files.
+    ///
+    /// With frames selected in the strip, the look lands on those frames as overrides and the rest
+    /// of the shoot keeps whatever it had. With nothing selected, it becomes the shoot's style and
+    /// clears any override it contradicts — "apply this to everything" has to mean everything, or
+    /// the frames you singled out last week silently outrank the decision you just made.
+    func applyLookToShoot() {
+        guard let folder = currentShootFolder else {
+            statusMessage = "Open a shoot first — a look is applied to the folder you are looking at"
+            return
+        }
+        guard let styleId = selectedCandidateId,
+              let style = CandidateStyle.all.first(where: { $0.id == styleId }) else {
+            statusMessage = "Pick a look first — applying it to the shoot adapts the one you have chosen"
+            return
+        }
+
+        var look = shootLook ?? ShootLook()
+        let scope = applyScope()
+        if selectedPhotos.isEmpty {
+            look.style = styleId
+            look.overrides = [:]
+        } else {
+            for url in scope { look.overrides[url.standardizedFileURL.path] = styleId }
+        }
+        look.appliedAt = ISO8601DateFormatter().string(from: Date())
+        ShootLookStore.save(look, for: folder)
+        shootLook = look
+        shootLookFolder = folder
+
+        // The photo on screen was composed against the OLD look and would otherwise sit there
+        // contradicting the strip until you navigated away and back. Only when it is in scope, and
+        // never over an edit somebody made by hand — that is the one thing a shoot look never wins
+        // against, and silently discarding it here would be the worst version of this feature.
+        if let open = imageURL, scope.contains(open), !isTouched,
+           candidates.contains(where: { $0.id == styleId }) {
+            selectCandidate(id: styleId)
+        }
+
+        // Start reading the frames nobody has opened yet. Applying a look is the moment someone
+        // commits to the shoot, and it is the last moment before export at which six seconds a
+        // frame can be spent without anybody waiting on it.
+        readShootAhead()
+
+        let base = selectedPhotos.isEmpty
+            ? "This shoot is in \(style.label) — \(scope.count) photo\(scope.count == 1 ? "" : "s"), "
+                + "each adapted to its own frame"
+            : "\(scope.count) selected frame\(scope.count == 1 ? "" : "s") set to \(style.label) — "
+                + "the rest of the shoot is unchanged"
+        statusMessage = shootReadTotal > 0
+            ? base + " · reading \(shootReadTotal) of them now, so export doesn't have to"
+            : base + ". Export edited writes the files"
+    }
+
+    /// The frames `applyLookToShoot` will claim: the selection if there is one, otherwise the whole
+    /// shoot narrowed by the Keep flag when asked. Pure, so the rule is testable without a window.
+    func applyScope() -> [URL] {
+        guard selectedPhotos.isEmpty else {
+            return folderPhotos.filter { selectedPhotos.contains($0) }
+        }
+        return batchTargets(keepersOnly: batchKeepersOnly)
+    }
+
+    // MARK: Reading the shoot ahead of time
+
+    /// How far the background read has got. Zero total means nothing is running.
+    @Published private(set) var shootReadDone = 0
+    @Published private(set) var shootReadTotal = 0
+    private var shootReadTask: Task<Void, Never>?
+
+    var isReadingShoot: Bool { shootReadTotal > 0 && shootReadDone < shootReadTotal }
+
+    /// Read every frame the look covers that has not been read yet, in the background.
+    ///
+    /// **This is the difference between a two-minute export and a forty-five-minute one.** Measured
+    /// over 25 frames at 24 MP, perception is 96% of what exporting a look-carried frame costs, and
+    /// export used to pay it per frame, at the moment someone was waiting for files. Doing it here
+    /// moves the same seconds to the moment they have just told the app what they want and are about
+    /// to go on culling — and `PerceptionStore` means it is paid once, ever, per photograph.
+    ///
+    /// It yields to the photograph on screen. The provider is an actor with one read in flight, so a
+    /// background read that queued ahead of the frame someone just clicked would make browsing feel
+    /// broken — which is a worse bug than the slow export this fixes.
+    func readShootAhead() {
+        shootReadTask?.cancel()
+        let modelId = perceptionProvider.activeModelID
+        let targets = applyScope().filter { PerceptionStore.load(for: $0, modelId: modelId) == nil }
+        guard !targets.isEmpty else { shootReadTotal = 0; shootReadDone = 0; return }
+        shootReadTotal = targets.count
+        shootReadDone = 0
+        shootReadTask = Task { [weak self] in
+            for url in targets {
+                if Task.isCancelled { return }
+                // Wait out any foreground load before taking the model.
+                while let self, self.isProcessing, !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                }
+                if Task.isCancelled { return }
+                guard let self else { return }
+                do {
+                    let decoded = try await Task.detached(priority: .background) { () -> DecodedForExport in
+                        let image = try ImageDecoder.decode(url: url)
+                        return DecodedForExport(
+                            image: image,
+                            proxy: Self.materialiseShared(PerceptionProxy.downsample(image)))
+                    }.value
+                    let read = try await self.perceptionProvider.perceive(decoded.proxy)
+                    PerceptionStore.save(read, for: url, modelId: modelId)
+                } catch {
+                    // A frame that will not decode is not a failure of the sweep — export reports
+                    // it by name when it gets there. Skipping keeps the rest of the shoot moving.
+                }
+                self.shootReadDone += 1
+            }
+            self?.shootReadTotal = 0
+        }
+    }
+
+    func stopReadingShoot() {
+        shootReadTask?.cancel()
+        shootReadTask = nil
+        shootReadTotal = 0
+        shootReadDone = 0
+    }
+
+    /// Take the look back off the shoot. One record removed, rather than a sweep through a folder
+    /// deleting four hundred edits — which is the whole reason the record exists.
+    ///
+    /// Hand-made edits are deliberately left alone: they were never part of the look, and this is a
+    /// button someone presses to undo an experiment, not to lose an afternoon's work.
+    func clearShootLook() {
+        guard let folder = currentShootFolder, shootLook != nil else { return }
+        ShootLookStore.remove(for: folder)
+        shootLook = nil
+        statusMessage = "Look removed from this shoot — hand-made edits are untouched"
+    }
+
+    /// The folder the open shoot lives in. Nil when nothing is open.
+    var currentShootFolder: URL? {
+        imageURL?.deletingLastPathComponent() ?? folderPhotos.first?.deletingLastPathComponent()
+    }
+
+    /// How many frames the shoot's look currently claims, for the label on the control.
+    var shootLookCount: Int {
+        guard shootLook != nil else { return 0 }
+        return folderPhotos.filter { effectiveStyle(for: $0) != nil }.count
+    }
+
+    /// What the apply control says it will do. It names the scope because the same button means two
+    /// different things depending on whether anything is selected, and a control that does not say
+    /// which is how someone restyles four hundred frames meaning to restyle four.
+    var applyButtonLabel: String {
+        selectedPhotos.isEmpty
+            ? "Apply to shoot"
+            : "Apply to \(selectedPhotos.count) selected"
+    }
+
+    var applyButtonHelp: String {
+        let style = selectedCandidateId.flatMap { id in
+            CandidateStyle.all.first { $0.id == id }
+        }?.label ?? "the chosen look"
+        let n = applyScope().count
+        return selectedPhotos.isEmpty
+            ? "Put \(style) on all \(n) photo\(n == 1 ? "" : "s") in this shoot. Each frame is read "
+                + "and corrected on its own — the style is adapted, never copied. Nothing is written "
+                + "until you export."
+            : "Put \(style) on just the \(n) selected frame\(n == 1 ? "" : "s"). The rest of the "
+                + "shoot keeps the look it has."
+    }
+
+    // MARK: Strip selection
+    //
+    // Selection exists so a look can land on SOME of the shoot. It is deliberately separate from
+    // `imageURL` — the frame you are looking at and the frames you are acting on are different
+    // questions, and conflating them means you cannot see one photograph while changing another.
+
+    /// The frames picked out in the strip. Empty means "the whole shoot", which is what every
+    /// action here defaults to.
+    @Published var selectedPhotos: Set<URL> = []
+    /// The anchor a shift-click extends from — the last frame clicked without shift.
+    private var selectionAnchor: URL?
+
+    /// A click in the strip, with whatever modifiers were held.
+    ///
+    /// Plain click opens the photograph and drops the selection, because that is what clicking a
+    /// thumbnail has always done and a selection nobody can see themselves leaving is a trap.
+    /// Command adds or removes one frame; shift extends from the anchor.
+    ///
+    /// **Extending walks `visiblePhotos`, not `folderPhotos`** — what is on screen, in the order it
+    /// is on screen. Walking the full folder instead would sweep up frames the filter is hiding:
+    /// shift-click across a strip filtered to keepers and you would silently select the rejects
+    /// sitting between them, then apply a look to photographs you had already thrown out.
+    func stripClick(_ url: URL, extend: Bool, toggle: Bool) {
+        if toggle {
+            if selectedPhotos.contains(url) { selectedPhotos.remove(url) }
+            else { selectedPhotos.insert(url); selectionAnchor = url }
+            return
+        }
+        let strip = visiblePhotos
+        if extend, let anchor = selectionAnchor,
+           let a = strip.firstIndex(of: anchor), let b = strip.firstIndex(of: url) {
+            selectedPhotos = Set(strip[min(a, b)...max(a, b)])
+            return
+        }
+        selectedPhotos = []
+        selectionAnchor = url
+        Task { await openPhoto(url) }
+    }
+
+    /// Everything the strip is showing — again not the whole folder, for the same reason. "Select
+    /// all" over frames you cannot see is how a filter becomes a trap.
+    func selectAllPhotos() {
+        let strip = visiblePhotos
+        selectedPhotos = Set(strip)
+        selectionAnchor = strip.first
+    }
+
+    func clearSelection() {
+        selectedPhotos = []
+        selectionAnchor = nil
+    }
 
     // MARK: Strip order
     //
@@ -1110,27 +1364,46 @@ final class AppState: ObservableObject {
     }
     static let includeFolderKey = "open.includeFolder"
 
-    /// How many frames in this shoot carry an edit — drives the export button's label, so it says
-    /// what it will actually do rather than making someone guess.
-    var editedCount: Int { folderPhotos.filter { editedURLs.contains($0) }.count }
-
     /// Not persisted, on purpose: which photos to export is a per-shoot decision, and a remembered
     /// "kept only" from last week is how someone exports three photos and believes they exported
     /// thirty.
     @Published var exportKeepersOnly = false
 
-    /// Edited AND flagged Keep — what "kept only" export would write. Named so the checkbox can
-    /// show its count, because a scope control that doesn't say how many is a guessing game.
-    var editedKeeperCount: Int {
-        folderPhotos.filter { editedURLs.contains($0) && flags[$0] == .keep }.count
-    }
-
     /// The photos an "Export edited" run will write, in filmstrip order. Pure and separated from
     /// the export loop so the rule is testable without rendering anything.
+    ///
+    /// A frame qualifies two ways, and the second is what makes shoot looks mean anything: it
+    /// carries a hand-made edit, OR the shoot's look claims it. Before, applying a look to four
+    /// hundred frames and pressing Export wrote only the handful you had also touched by hand —
+    /// which is the feature appearing to do nothing.
     func exportTargets(keepersOnly: Bool) -> [URL] {
         folderPhotos.filter { url in
-            editedURLs.contains(url) && (!keepersOnly || flags[url] == .keep)
+            (editedURLs.contains(url) || effectiveStyle(for: url) != nil)
+                && (!keepersOnly || flags[url] == .keep)
         }
+    }
+
+    /// How many frames an export would write — hand-edited or claimed by the shoot's look. Drives
+    /// the button's label so it says what it will do.
+    var exportableCount: Int { exportTargets(keepersOnly: false).count }
+
+    /// What the export button promises. It splits the count because the two halves cost wildly
+    /// different amounts of time: a hand-made edit renders from a stored recipe in a moment, while a
+    /// frame carried by the shoot's look has to be read and measured first. Someone about to export
+    /// four hundred adapted frames should know that before they press it, not while they wait.
+    var exportEditedHelp: String {
+        let targets = exportTargets(keepersOnly: exportKeepersOnly)
+        let byHand = targets.filter { editedURLs.contains($0) }.count
+        let byLook = targets.count - byHand
+        if byLook == 0 {
+            return "Render every photo you have edited in this shoot, each with its own edit"
+        }
+        if byHand == 0 {
+            return "Render \(byLook) photo\(byLook == 1 ? "" : "s") in the shoot's look — each one is "
+                + "read and adapted to its own frame, so this takes a few seconds per photo"
+        }
+        return "Render \(byHand) hand-edited photo\(byHand == 1 ? "" : "s") plus \(byLook) in the "
+            + "shoot's look. The adapted ones are read individually and take a few seconds each."
     }
 
     /// Same idea for Batch apply. Not persisted, same reason as `exportKeepersOnly`.
@@ -1690,6 +1963,16 @@ final class AppState: ObservableObject {
         // Unfolded — which is what opening a FOLDER means — it runs immediately, because then
         // the shoot is the thing you asked for.
         loadFolderDetailIfVisible(for: url.deletingLastPathComponent(), photos: siblings)
+        // The shoot's look, before the candidates are built — `buildCandidates` needs it to know
+        // which style to open this frame in. One small JSON read, and only when the folder changes.
+        let folder = url.deletingLastPathComponent()
+        // Leaving the shoot ends the read-ahead with it: those seconds belong to the folder someone
+        // is working on, not to one they have walked away from.
+        if shootLookFolder != folder {
+            selectedPhotos = []; selectionAnchor = nil
+            stopReadingShoot()
+        }
+        loadShootLook(for: folder)
         capture = CaptureInfoReader.read(url: url)
         userMasks = []; paintingMaskId = nil; selectedMask = nil   // hand-drawn masks are per-photo
         // The subjects belong to the photograph, so they go out with it. Left standing,
@@ -1756,7 +2039,13 @@ final class AppState: ObservableObject {
             // seconds once cached); if it can't run, fall back to a conservative read so the
             // app still produces candidates from the measured statistics.
             let perceptionRead: Perception
-            if let shared = reusablePerception(for: url) {
+            if let cached = PerceptionStore.load(for: url, modelId: perceptionProvider.activeModelID) {
+                // ALREADY READ, IN AN EARLIER SESSION. A read is a pure function of the pixels, so
+                // this is the same answer the model would spend six seconds producing again.
+                perceptionRead = cached
+                rememberPerception(cached, for: url)
+                statusMessage = "Already read — reusing it"
+            } else if let shared = reusablePerception(for: url) {
                 // Same picture, same answer. See `reusablePerception`.
                 perceptionRead = shared
                 statusMessage = "Same scene as a frame already read — reusing it"
@@ -1773,6 +2062,9 @@ final class AppState: ObservableObject {
                 do {
                     perceptionRead = try await job.value
                     rememberPerception(perceptionRead, for: url)
+                    // Kept, so no later session and no export pays for this read again.
+                    PerceptionStore.save(perceptionRead, for: url,
+                                         modelId: perceptionProvider.activeModelID)
                 } catch is CancellationError {
                     // A newer photo superseded this one mid-read. Its own load owns the window
                     // now — same contract as every `imageURL == url` guard in this function.
@@ -1885,16 +2177,41 @@ final class AppState: ObservableObject {
                     previewImage: image)
             }
             let models = self.candidates
-            if let first = models.first { selectCandidate(id: first.id) }
+            // THE SHOOT'S LOOK DECIDES WHICH CANDIDATE OPENS, when the shoot is in one.
+            //
+            // This is what makes applying a look to a folder mean anything: the style was chosen
+            // once, and every frame resolves it against its own histogram, its own scene reading and
+            // its own masks — which is exactly what `candidates` already are, one per style, built
+            // from THIS photograph. So honouring the shoot look is choosing among them, not
+            // replaying somebody else's numbers.
+            //
+            // Falls back to the engine's own ranking when the shoot has no look, and also when it
+            // asks for a style the curator did not offer for this frame: the curator drops styles
+            // that are wrong for a photo (Dramatic on a backlit sunset), and forcing one back in
+            // because a folder-wide record named it would hand back the one candidate the evaluator
+            // already judged unusable.
+            let wanted = effectiveStyle(for: url)
+            let shootStyle = wanted.flatMap { id in models.first { $0.id == id } }
+            if let shootStyle { selectCandidate(id: shootStyle.id) }
+            else if let first = models.first { selectCandidate(id: first.id) }
 
             // If this photo was edited in an earlier session, put that work back rather than
             // handing back a fresh candidate and quietly losing it.
+            //
+            // A HAND-MADE EDIT OUTRANKS THE SHOOT'S LOOK, always — it is applied last and it is the
+            // one thing in this app that is not a guess. See `ShootLook`.
             if let saved = EditStore.load(for: url) {
                 apply(saved)
                 editedURLs.insert(url)
                 statusMessage = "Ready · restored your edit from \(Self.friendlyDate(saved.savedAt))\(statusNote)"
+            } else if let shootStyle {
+                statusMessage = "Ready · \(shootStyle.label), adapted to this frame from the shoot's look\(statusNote)"
+            } else if let wanted, let style = CandidateStyle.all.first(where: { $0.id == wanted }) {
+                // Say so rather than quietly showing a different look than the strip implies.
+                statusMessage = "Ready · the shoot is in \(style.label), but that look is wrong for "
+                    + "this frame — showing \(models.first?.label ?? "the best fit") instead\(statusNote)"
             } else {
-                statusMessage = "Ready · pick a look, or Batch apply it to a folder\(statusNote)"
+                statusMessage = "Ready · pick a look, then apply it to the shoot\(statusNote)"
             }
             // The automated slider drag, when asked for. Here because it needs what a real drag
             // needs: a photo open and a candidate loaded. See Diagnostics.swift.
@@ -3116,8 +3433,8 @@ final class AppState: ObservableObject {
         let targets = exportTargets(keepersOnly: exportKeepersOnly)
         guard !targets.isEmpty else {
             statusMessage = exportKeepersOnly
-                ? "No edited photos are flagged Keep — press P on the ones you want, or untick Kept only"
-                : "Nothing edited in this shoot yet"
+                ? "Nothing to export is flagged Keep — press P on the ones you want, or untick Kept only"
+                : "Nothing to export yet — edit a photo, or apply a look to the shoot"
             return
         }
 
@@ -3134,42 +3451,83 @@ final class AppState: ObservableObject {
 
         isProcessing = true
         var written = 0, failed = 0, unreadable = 0
+        // Counted on the way OUT, not when the recipe is built: a frame that adapted fine and then
+        // failed to write is a failure, and counting it here would make the two halves of the
+        // summary add up to more than the number of files on disk.
+        var adaptedWritten = 0
         var needsReopening: [String] = []
         let size = exportSize, space = exportColorSpace, scheme = exportNaming
 
         for (index, url) in targets.enumerated() {
-            statusMessage = "Exporting \(index + 1) of \(targets.count)…"
-            // Counted, not `continue`d silently: a sidecar that exists but won't decode used to
-            // vanish from the arithmetic entirely, and "Exported 0" with no reason attached reads
-            // as a broken button — which is exactly how its own developer read it.
-            guard let saved = EditStore.load(for: url) else { unreadable += 1; continue }
-            // A sidecar written before recipes were stored cannot be reproduced without re-running
-            // perception. Say which ones, rather than exporting something that is not what they saw.
-            guard let recipe = saved.recipe else {
-                needsReopening.append(url.lastPathComponent); continue
+            let saved = EditStore.load(for: url)
+            // WHICH RECIPE THIS FRAME GETS, and the order is the whole contract:
+            //
+            // 1. The hand-made edit, rendered from the recipe stored with it. Exact, instant, and
+            //    it outranks the shoot's look — see `ShootLook`.
+            // 2. Otherwise the shoot's look, ADAPTED to this frame: decoded, perceived, measured
+            //    and run through the engine so the style resolves against its own histogram. This
+            //    is the expensive path and the one that makes "apply to the shoot" produce files.
+            let recipe: Recipe?
+            let lookName: String?
+            var wasAdapted = false
+            if let saved {
+                // A sidecar written before recipes were stored cannot be reproduced without
+                // re-running perception. Say which ones, rather than exporting something that is
+                // not what they saw. NOT quietly downgraded to the shoot look: they edited this
+                // frame by hand, and handing back a generated version of it is the wrong answer.
+                guard let stored = saved.recipe else {
+                    needsReopening.append(url.lastPathComponent); continue
+                }
+                statusMessage = "Exporting \(index + 1) of \(targets.count)…"
+                recipe = stored
+                lookName = saved.styleId
+            } else if editedURLs.contains(url) {
+                // Counted, not `continue`d silently: a sidecar that exists but won't decode used to
+                // vanish from the arithmetic entirely, and "Exported 0" with no reason attached
+                // reads as a broken button — which is exactly how its own developer read it.
+                unreadable += 1; continue
+            } else if let styleId = effectiveStyle(for: url),
+                      let style = CandidateStyle.all.first(where: { $0.id == styleId }) {
+                // Named in the progress, because this is seconds per frame rather than a render —
+                // a shoot of four hundred is a long wait and it has to look like work, not a hang.
+                statusMessage = "Adapting \(style.label) to photo \(index + 1) of \(targets.count)…"
+                do {
+                    recipe = try await adaptedRecipe(for: url, style: style)
+                } catch {
+                    failed += 1; continue
+                }
+                wasAdapted = true
+                lookName = style.label
+            } else {
+                continue
             }
-            let look = saved.styleId
+            guard let recipe else { failed += 1; continue }
+
             let out = ExportNaming.uniqueURL(
                 in: directory,
-                stem: ExportNaming.stem(for: url, perception: nil, look: look, scheme: scheme),
+                stem: ExportNaming.stem(for: url, perception: nil, look: lookName, scheme: scheme),
                 ext: exportFormat.fileExtension)
 
             // Read off the actor once, before the work crosses to a detached task. Reaching back
             // into `self` from inside it is an await per property and, worse, a value that could
             // change between photographs mid-export.
             let format = exportFormat, metadata = exportMetadata
+            let work = RenderJob(recipe: recipe, source: url, out: out)
             let result: Bool = await Task.detached(priority: .userInitiated) {
-                guard let image = try? ImageDecoder.decode(url: url) else { return false }
-                let bitmaps = recipe.masks?.isEmpty == false
+                guard let image = try? ImageDecoder.decode(url: work.source) else { return false }
+                let bitmaps = work.recipe.masks?.isEmpty == false
                     ? LocalMasks.measure(in: image).bitmaps : [:]
-                let rendered = Renderer.render(image, with: recipe, maskBitmaps: bitmaps)
+                let rendered = Renderer.render(image, with: work.recipe, maskBitmaps: bitmaps)
                 do {
-                    try ImageWriter.write(rendered, to: out, format: format, metadata: metadata,
+                    try ImageWriter.write(rendered, to: work.out, format: format, metadata: metadata,
                                           size: size, colorSpace: space)
                     return true
                 } catch { return false }
             }.value
-            if result { written += 1 } else { failed += 1 }
+            if result {
+                written += 1
+                if wasAdapted { adaptedWritten += 1 }
+            } else { failed += 1 }
         }
 
         isProcessing = false
@@ -3188,13 +3546,80 @@ final class AppState: ObservableObject {
             }
             return
         }
-        var message = "Exported \(written) edited photo\(written == 1 ? "" : "s") to \(directory.lastPathComponent)"
+        var message = "Exported \(written) photo\(written == 1 ? "" : "s") to \(directory.lastPathComponent)"
+        // The adapted count is stated separately because the two halves were made differently and
+        // someone checking the folder should know which is which: one set is what they edited by
+        // hand, the other is the shoot's look resolved per frame.
+        if adaptedWritten > 0 {
+            message += " · \(adaptedWritten) adapted from the shoot's look, "
+                + "\(written - adaptedWritten) from your edits"
+        }
         if failed > 0 { message += " · \(failed) failed" }
         if unreadable > 0 { message += " · \(unreadable) unreadable — open those photos once to re-save" }
         if !needsReopening.isEmpty {
             message += " · \(needsReopening.count) saved before this version — open each once to include it"
         }
         statusMessage = message
+    }
+
+    /// Resolve the shoot's style against ONE photograph: decode it, read it, measure it, and let the
+    /// engine derive this frame's own corrective baseline underneath the style.
+    ///
+    /// This is the per-frame adaptation that the whole feature rests on, and it is why applying a
+    /// look does not copy sliders. Frame 12 was shot into the sun and frame 13 was not; both are
+    /// "Natural", and this is where Natural comes out different for each of them.
+    ///
+    /// Expensive on purpose — a decode, a perception pass and two Vision passes per photograph — so
+    /// it runs at export, once, and never while someone is browsing.
+    private func adaptedRecipe(for url: URL, style: CandidateStyle) async throws -> Recipe {
+        // Decode and proxy off the main actor. `AppState` is `@MainActor`, and doing this here
+        // would block the thread drawing the window for every frame in the shoot.
+        let decoded = try await Task.detached(priority: .userInitiated) { () -> DecodedForExport in
+            let image = try ImageDecoder.decode(url: url)
+            // Materialised, not lazy. A lazy proxy is a filter graph over the FULL frame, so every
+            // measurement below would silently re-render all 60 megapixels again — the trap
+            // `loadPhoto` documents and avoids.
+            return DecodedForExport(image: image,
+                                    proxy: Self.materialiseShared(PerceptionProxy.downsample(image)))
+        }.value
+        // THE CACHE IS THE WHOLE PERFORMANCE STORY OF THIS FUNCTION. Measured over 25 frames at
+        // 24 MP, perception was 6.43s of a 6.72s frame — 96% — and every other stage together was
+        // under 0.3s. Served from cache, a frame costs roughly what the pixels cost, and a
+        // 400-frame export goes from about 45 minutes to a couple.
+        let modelId = perceptionProvider.activeModelID
+        let perception: Perception
+        if let cached = PerceptionStore.load(for: url, modelId: modelId) {
+            perception = cached
+        } else {
+            // Perception is its own actor hop and stays here.
+            perception = try await perceptionProvider.perceive(decoded.proxy)
+            PerceptionStore.save(perception, for: url, modelId: modelId)
+        }
+        let work = DecodedForExport(image: decoded.image, proxy: decoded.proxy)
+        return try await Task.detached(priority: .userInitiated) { () throws -> Recipe in
+            let stats = try ImageStatistics.compute(work.proxy)
+            // Per-photo subject + sky masks — each frame gets its own local decisions, measured on
+            // its own proxy rather than inherited from whatever was open when the look was chosen.
+            let m = LocalMasks.measure(in: work.proxy)
+            return RecipeEngine.candidate(perception: perception, statistics: stats, style: style,
+                                          subjectLuma: m.subjectLuma, skyLuma: m.skyLuma,
+                                          iso: ExifReader.iso(url: url))
+        }.value
+    }
+
+    /// A decoded photograph and its proxy, boxed to cross the actor boundary. `CIImage` is safe to
+    /// read from another thread here — the box exists to say so explicitly rather than to launder
+    /// a race.
+    private struct DecodedForExport: @unchecked Sendable {
+        let image: CIImage
+        let proxy: CIImage
+    }
+
+    /// One photograph's render-and-write, boxed for the same reason.
+    private struct RenderJob: @unchecked Sendable {
+        let recipe: Recipe
+        let source: URL
+        let out: URL
     }
 
     /// Everything a detached export needs, boxed so it can cross the actor boundary. `CIImage` and
@@ -3210,193 +3635,6 @@ final class AppState: ObservableObject {
         let colorSpace: ImageWriter.ColorSpace
     }
 
-    /// Apply the chosen *look* across a folder with per-photo intelligence: the style is held
-    /// constant, but every photo is re-perceived and re-measured so its own corrective baseline
-    /// (exposure / white balance / tone) is derived fresh. A shoot's frames differ in exposure
-    /// and scene — copying identical slider values would wreck half of them. The manual tweaks
-    /// you made on the reference photo ride along on top of each adapted recipe.
-    func runBatchApply(inputDir: URL, outputDir: URL) async {
-        do {
-            let files = try BatchApply.imageFiles(in: inputDir)
-            await runBatchApply(files: files, outputDir: outputDir)
-        } catch {
-            statusMessage = "Batch failed — \(error)"
-        }
-    }
-
-    func runBatchApply(files: [URL], outputDir: URL) async {
-        // Backstop only — the panel checks this before it opens, so nobody chooses folders for a
-        // batch that was never going to run.
-        guard let styleId = selectedCandidateId,
-              let style = CandidateStyle.all.first(where: { $0.id == styleId }) else {
-            statusMessage = "Pick a look first — Batch apply adapts the one you have chosen"
-            return
-        }
-        guard !files.isEmpty else {
-            statusMessage = batchKeepersOnly
-                ? "No photos are flagged Keep — press P on the ones you want, or untick Kept only"
-                : "Nothing to batch — the folder has no photos Kelvin can read"
-            return
-        }
-        let tweaks = manualTweaks()
-        // Snapshotted as VALUES before the loop. `applyLookBeyondGlobals` reads five pieces of
-        // actor state, and reaching back for them from a detached task is how a data race gets
-        // written by accident. The look does not change during a batch, so capture it once.
-        let look = BatchLook(hsl: hsl, straighten: straighten, maskEnabled: maskEnabled,
-                             maskStrength: maskStrength, userMasks: userMasks)
-        isProcessing = true
-        do {
-            // THE DESTINATION IS CHECKED BEFORE A SINGLE BYTE IS WRITTEN. Measured in Core: the
-            // CLI's batch, pointed at its own source folder, silently rewrote every original in
-            // place — shasums before and after. Non-negotiable #3 says the original is never
-            // written to. `prepare` refuses that, refuses a non-folder, creates the destination,
-            // and compares filesystem identity rather than path strings, so a symlink or a
-            // /tmp-vs-/private/tmp spelling cannot sneak past it.
-            let destination = BatchApply.Destination(directory: outputDir,
-                                                     onCollision: .uniqueSuffix,
-                                                     format: .jpeg(quality: 0.97),
-                                                     metadata: exportMetadata)
-            try destination.prepare(sources: files)
-
-            var items: [BatchApply.Outcome.Item] = []
-            for (i, file) in files.enumerated() {
-                statusMessage = "Adapting \(style.label) to photo \(i + 1) of \(files.count)…"
-                do {
-                    // PERCEPTION STAYS HERE — it is an actor hop of its own and the only part that
-                    // was ever off this thread.
-                    let image = try ImageDecoder.decode(url: file)
-                    // Materialised, not lazy. A lazy proxy is a filter graph over the FULL frame,
-                    // so every measurement below would silently re-render all 60 megapixels again —
-                    // the exact trap `loadPhoto` documents and avoids.
-                    let proxy = Self.materialiseShared(PerceptionProxy.downsample(image))
-                    let perception = try await perceptionProvider.perceive(proxy)
-
-                    // ...AND EVERYTHING ELSE GOES OFF THE MAIN ACTOR. `AppState` is `@MainActor`,
-                    // so decode, statistics, two Vision passes, a full-resolution render and a file
-                    // write were all running on the thread drawing the window — for every frame in
-                    // the shoot. The app was locked for the whole batch, which on a real shoot is
-                    // minutes, and the per-file progress it sets each iteration could not repaint,
-                    // so the one thing telling you it was alive was invisible.
-                    let work = BatchInput(image: image, proxy: proxy, source: file,
-                                          perception: perception, style: style, tweaks: tweaks,
-                                          heal: (removeDust && !healSpots.isEmpty) ? healSpots : nil,
-                                          look: look, destination: destination)
-                    let item = await Task.detached(priority: .userInitiated) { () -> BatchApply.Outcome.Item in
-                        do {
-                            let stats = try ImageStatistics.compute(work.proxy)
-                            // Per-photo subject + sky masks — each frame gets its own local decisions.
-                            let m = LocalMasks.measure(in: work.proxy)
-                            var recipe = RecipeEngine.candidate(
-                                perception: work.perception, statistics: stats, style: work.style,
-                                subjectLuma: m.subjectLuma, skyLuma: m.skyLuma,
-                                iso: ExifReader.iso(url: work.source))
-                            Self.applyTweaks(work.tweaks, to: &recipe.global)
-                            work.look.apply(to: &recipe)
-                            // Sensor dust sits at the same normalised position on every frame of a
-                            // shoot, so the spots found on the reference photo heal the whole batch.
-                            recipe.heal = work.heal
-                            let masks = (recipe.masks?.isEmpty == false)
-                                ? LocalMasks.measure(in: work.image).bitmaps : [:]
-                            // Named from what the model read about THAT frame, so a batch comes out
-                            // searchable rather than as a wall of camera serial numbers.
-                            switch work.destination.plan(for: work.source,
-                                                         perception: work.perception,
-                                                         look: work.style.label) {
-                            case .skip(let existing):
-                                return .skipped(source: work.source, existing: existing)
-                            case .write(let out):
-                                try ImageWriter.write(
-                                    Renderer.render(work.image, with: recipe, maskBitmaps: masks),
-                                    to: out, format: work.destination.format)
-                                return .written(source: work.source, to: out)
-                            }
-                        } catch {
-                            return .failed(source: work.source, message: "\(error)")
-                        }
-                    }.value
-                    items.append(item)
-                } catch {
-                    items.append(.failed(source: file, message: "\(error)"))
-                }
-            }
-            let outcome = BatchApply.Outcome(items: items)
-            self.batchOutcome = outcome
-            self.showBatchSheet = true
-            statusMessage = "Batch done · \(outcome.succeeded) edited as \(style.label), "
-                + "\(outcome.skippedCount) skipped, \(outcome.failed) failed"
-        } catch {
-            // `"\(error)"` rather than `localizedDescription`: `Destination.Problem` writes a
-            // sentence a photographer can act on, and `localizedDescription` would replace it with
-            // a generic Cocoa string.
-            statusMessage = "Batch failed — \(error)"
-        }
-        isProcessing = false
-    }
-
-    /// One photo's worth of batch work, boxed to cross the actor boundary.
-    private struct BatchInput: @unchecked Sendable {
-        let image: CIImage
-        let proxy: CIImage
-        let source: URL
-        let perception: Perception
-        let style: CandidateStyle
-        let tweaks: [String: Double]
-        let heal: [HealSpot]?
-        let look: BatchLook
-        let destination: BatchApply.Destination
-    }
-
-    /// The parts of the reference photo's look that are not global slider values, captured as
-    /// values so a batch worker never reads back into the main actor.
-    private struct BatchLook: @unchecked Sendable {
-        let hsl: [String: HSLAdjustment]
-        let straighten: Double
-        let maskEnabled: [String: Bool]
-        let maskStrength: [String: Double]
-        let userMasks: [UserMaskVM]
-
-        func apply(to recipe: inout Recipe) {
-            if !hsl.isEmpty { recipe.hsl = hsl }
-            if straighten != 0 {
-                recipe.geometry = Geometry(rotateDeg: straighten, crop: nil, lensCorrection: false)
-            }
-            // Honour the reference photo's auto-mask toggles/strengths, then append the user's.
-            var ms = (recipe.masks ?? []).compactMap { m -> Mask? in
-                guard maskEnabled[m.id] ?? true else { return nil }
-                var m = m
-                if let pct = maskStrength[m.id] { m.opacity = min(1, max(0, pct / 100)) }
-                return m
-            }
-            ms += userMasks.map { $0.toMask() }
-            recipe.masks = ms.isEmpty ? nil : ms
-        }
-    }
-
-    /// Carry the parts of the look that AREN'T global slider values onto a batch photo: the colour
-    /// mixer, straighten, the user's hand-made masks, and their on/off + strength decisions for the
-    /// auto masks. Without this, "apply this look to the shoot" silently dropped everything except
-    /// the basic sliders.
-    ///
-    /// Note the split that makes batch intelligent: the auto subject/sky masks are REGENERATED per
-    /// photo by the engine (so they land on this frame's subject and sky), while the user's masks
-    /// carry over as authored — semantic ones (colour/luma/skin/background) re-select against each
-    /// new photo automatically, and positional ones (radial/graduated/brush) hold their placement,
-    /// which is what syncing a local adjustment across a shoot means.
-    private func applyLookBeyondGlobals(to recipe: inout Recipe) {
-        if !hsl.isEmpty { recipe.hsl = hsl }
-        if straighten != 0 {
-            recipe.geometry = Geometry(rotateDeg: straighten, crop: nil, lensCorrection: false)
-        }
-        // Honour the reference photo's auto-mask toggles/strengths, then append the user's masks.
-        var ms = (recipe.masks ?? []).compactMap { m -> Mask? in
-            guard maskEnabled[m.id] ?? true else { return nil }
-            var m = m
-            if let pct = maskStrength[m.id] { m.opacity = min(1, max(0, pct / 100)) }
-            return m
-        }
-        ms += userMasks.map { $0.toMask() }
-        recipe.masks = ms.isEmpty ? nil : ms
-    }
 
     /// The manual edits as a DIFF from the candidate Kelvin generated — carried onto every batch
     /// photo (as offsets, so each frame keeps its own adapted baseline) and logged as the pick's
@@ -3726,6 +3964,12 @@ struct ContentView: View {
                         .keyboardShortcut(.space, modifiers: [])
                     Button("") { openExportPanel() }
                         .keyboardShortcut("e", modifiers: .shift)
+                    // Selecting frames in the strip. ⌘A / ⇧⌘A are the system's own pair for this
+                    // and mean nothing else here, so borrowing them costs no other shortcut.
+                    Button("") { appState.selectAllPhotos() }
+                        .keyboardShortcut("a", modifiers: .command)
+                    Button("") { appState.clearSelection() }
+                        .keyboardShortcut("a", modifiers: [.command, .shift])
                 }
                 Group {
                     // The mask kit. `M` opens the section rather than drawing anything, because
@@ -3751,7 +3995,6 @@ struct ContentView: View {
             }
         }
         .task { await appState.loadDemoIfRequested() }
-        .sheet(isPresented: $appState.showBatchSheet) { batchSheet }
         .sheet(isPresented: $showShortcutsSheet) { ShortcutsSheet() }
     }
 
@@ -3980,7 +4223,10 @@ struct ContentView: View {
                                   maxHeight: paneHeight * 0.66,
                                   editedURLs: appState.editedURLs,
                                   thumbnail: appState.thumbnail(for:),
-                                  onSelect: { url in Task { await appState.openPhoto(url) } },
+                                  onSelect: { url, extend, toggle in
+                                      appState.stripClick(url, extend: extend, toggle: toggle)
+                                  },
+                                  selected: appState.selectedPhotos,
                                   onDismiss: { appState.dismiss($0) },
                                   flags: appState.flags,
                                   totalCount: appState.folderPhotos.count,
@@ -4296,15 +4542,60 @@ struct ContentView: View {
                     .help("Close this photo — your edit is saved")
                 // Only when there is something to export. A button that reports "nothing edited yet"
                 // is a button that exists to disappoint.
-                if appState.editedCount > 0 {
+                if appState.exportableCount > 0 {
                     Button(action: openExportEditedPanel) {
-                        toolbarLabel("Export \(appState.editedCount) edited", filled: false)
+                        toolbarLabel("Export \(appState.exportableCount)", filled: false)
                     }
                     .buttonStyle(.plain)
-                    .help("Render every photo you have edited in this shoot, each with its own edit")
+                    .help(appState.exportEditedHelp)
                 }
-                Button(action: openBatchPanel) { toolbarLabel("Batch apply", filled: false) }
+                // APPLYING A LOOK TO THE SHOOT NO LONGER ASKS FOR A FOLDER, because it no longer
+                // writes anything into one. It sets the shoot's look — one record — and the strip
+                // and canvas resolve it per frame from there. Export is what makes files, and it is
+                // one button along.
+                if appState.folderPhotos.count > 1 {
+                    Button(action: { appState.applyLookToShoot() }) {
+                        toolbarLabel(appState.applyButtonLabel, filled: false)
+                    }
                     .buttonStyle(.plain)
+                    .help(appState.applyButtonHelp)
+                    // The Keep scope used to live in the batch panel's accessory. With no panel it
+                    // has to be visible before the button is pressed, not after — and it is
+                    // meaningless while frames are selected, because a selection IS the scope.
+                    if appState.selectedPhotos.isEmpty && appState.keeperCount > 0 {
+                        Toggle(isOn: $appState.batchKeepersOnly) {
+                            Text("Kept only (\(appState.keeperCount))").font(Theme.ui(11))
+                        }
+                        .toggleStyle(.checkbox)
+                        .foregroundColor(Theme.inkDim)
+                        .help("Apply the look to just the \(appState.keeperCount) frame"
+                              + "\(appState.keeperCount == 1 ? "" : "s") flagged Keep")
+                    }
+                    if appState.shootLook != nil {
+                        Button(action: { appState.clearShootLook() }) {
+                            toolbarLabel("Clear look", filled: false)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Take the look back off this shoot. Hand-made edits are left alone.")
+                    }
+                    if !appState.selectedPhotos.isEmpty {
+                        Button(action: { appState.clearSelection() }) {
+                            toolbarLabel("Deselect", filled: false)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Clear the strip selection — actions go back to covering the whole shoot")
+                    }
+                    // A background read is someone's fans spinning up. It says so, and it stops.
+                    if appState.isReadingShoot {
+                        Button(action: { appState.stopReadingShoot() }) {
+                            toolbarLabel("Reading \(appState.shootReadDone)/\(appState.shootReadTotal) — stop",
+                                         filled: false)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Reading each frame now so export doesn't have to. Safe to stop — "
+                              + "anything unread is simply read at export instead.")
+                    }
+                }
                 // Press and hold to see the untouched original. DragGesture(minimumDistance:0) is
                 // a reliable press-and-hold (onLongPressGesture's `pressing` state is flaky).
                 toolbarLabel(appState.showingOriginal ? "Original" : "Hold to compare",
@@ -4904,29 +5195,6 @@ struct ContentView: View {
         }
     }
 
-    private var batchSheet: some View {
-        VStack(spacing: 18) {
-            Text("Batch complete").font(Theme.ui(18, .semibold)).foregroundColor(Theme.ink)
-            if let outcome = appState.batchOutcome {
-                // THREE numbers, because Outcome has three and this showed two — with the wrong
-                // word on one of them. `failed` (a decode, render or write that threw) was printed
-                // under the label "skipped" in a calm blue, and `skippedCount` (a collision, where
-                // the existing file was deliberately left alone) was never shown at all. A batch
-                // that threw on forty frames told the photographer forty were skipped.
-                HStack(spacing: 28) {
-                    stat("\(outcome.succeeded)", "applied", Theme.glow)
-                    if outcome.skippedCount > 0 {
-                        stat("\(outcome.skippedCount)", "skipped", Theme.inkDim)
-                    }
-                    stat("\(outcome.failed)", "failed", outcome.failed > 0 ? Theme.warn : Theme.inkFaint)
-                }
-            }
-            Button(action: { appState.showBatchSheet = false }) { toolbarLabel("Done", filled: true) }
-                .buttonStyle(.plain)
-        }
-        .padding(32).frame(width: 320).background(Theme.surface)
-    }
-
     private func stat(_ value: String, _ label: String, _ color: Color) -> some View {
         VStack(spacing: 4) {
             Text(value).font(Theme.mono(30, .medium)).foregroundColor(color)
@@ -4975,52 +5243,6 @@ struct ContentView: View {
         panel.accessoryView = PanelAccessories.exportOptions(appState, showScope: true)
         guard panel.runModal() == .OK, let target = panel.url else { return }
         Task { await appState.exportEdited(to: target) }
-    }
-
-    private func openBatchPanel() {
-        // The look is checked BEFORE any panel opens. The old order let someone choose two
-        // folders and only then learn nothing would happen — the guard inside runBatchApply
-        // even complained about it in a comment, while still being the only guard.
-        guard let styleId = appState.selectedCandidateId,
-              let style = CandidateStyle.all.first(where: { $0.id == styleId }) else {
-            appState.statusMessage = "Pick a look first — Batch apply adapts the one you have chosen"
-            return
-        }
-
-        // A shoot is already open, so it IS the input — asking someone to re-choose the folder
-        // they are looking at reads as a different feature. One panel: where the copies go.
-        if appState.folderPhotos.count > 1 {
-            let output = NSOpenPanel()
-            output.title = "Batch apply \(style.label)"
-            output.message = "Each of the \(appState.folderPhotos.count) photos in this shoot is read "
-                + "and corrected on its own — \(style.label) and your tweaks are adapted per frame, "
-                + "not copied. Choose where the edited copies go; your originals are never touched."
-            output.prompt = "Apply \(style.label)"
-            output.canChooseDirectories = true; output.canChooseFiles = false
-            output.canCreateDirectories = true
-            output.accessoryView = PanelAccessories.batchOptions(appState)
-            output.isAccessoryViewDisclosed = true
-            guard output.runModal() == .OK, let outputDir = output.url else { return }
-            let files = appState.batchTargets(keepersOnly: appState.batchKeepersOnly)
-            Task { await appState.runBatchApply(files: files, outputDir: outputDir) }
-            return
-        }
-
-        // No shoot open: the original two-panel flow, which now says what each panel is for.
-        let input = NSOpenPanel()
-        input.title = "Batch apply \(style.label) — choose the shoot folder"
-        input.message = "Every photo in the folder you choose is read and corrected on its own, "
-            + "with \(style.label) and your tweaks adapted to each frame."
-        input.prompt = "Choose shoot"
-        input.canChooseDirectories = true; input.canChooseFiles = false
-        guard input.runModal() == .OK, let inputDir = input.url else { return }
-        let output = NSOpenPanel()
-        output.title = "Choose where to write the edited copies"
-        output.message = "Copies land here; the originals in the shoot folder are never touched."
-        output.prompt = "Apply \(style.label)"
-        output.canChooseDirectories = true; output.canChooseFiles = false; output.canCreateDirectories = true
-        guard output.runModal() == .OK, let outputDir = output.url else { return }
-        Task { await appState.runBatchApply(inputDir: inputDir, outputDir: outputDir) }
     }
 }
 
@@ -5105,40 +5327,227 @@ struct CandidateRow: View {
 
 // MARK: - Histogram (live tonal distribution + clipping)
 
+/// The tonal readout: three channel curves, additively blended, over a quarter-stop grid.
+///
+/// **It used to be one grey silhouette of luma, and luma is the one thing a photographer can already
+/// see by looking at the picture.** What it could not tell you is the part the eye is worst at —
+/// which *channel* is doing it. A warm cast, a blue shadow, a red channel clipping on a face while
+/// the frame's overall brightness looks perfectly healthy: all of that is invisible in a luma
+/// silhouette and obvious the moment the channels are drawn apart.
+///
+/// **The blend is the whole trick.** The three curves composite additively, so where the channels
+/// agree they sum back to neutral grey — which *is* the luma reading, for free, with no fourth
+/// series drawn — and where they disagree the difference shows as colour. Neutral photograph, grey
+/// histogram. Cast, and it fringes. Nothing here is decoration: every colour on screen is the data.
+///
+/// Drawn thin and lit rather than as three saturated blocks, because saturated fills at this size
+/// read as a toy. Fills sit low and the strokes carry the shape.
 struct HistogramView: View {
     let image: CIImage?
 
+    /// Channel colours, lifted off the primaries so they stay legible on a near-black surface while
+    /// still summing to something that reads as neutral where all three overlap.
+    private static let channelColors: [Color] = [
+        Color(hex: 0xFF4D4D), Color(hex: 0x4DE07A), Color(hex: 0x4D95FF)
+    ]
+    private static let channelNames = ["R", "G", "B"]
+
     var body: some View {
-        Canvas { ctx, size in
-            guard let bins = Self.luma(image), let peak = bins.max(), peak > 0 else { return }
-            let n = bins.count
-            var path = Path()
-            path.move(to: CGPoint(x: 0, y: size.height))
-            for (i, v) in bins.enumerated() {
-                let x = size.width * CGFloat(i) / CGFloat(n - 1)
-                let y = size.height * (1 - CGFloat(min(1, v / peak * 1.05)))
-                path.addLine(to: CGPoint(x: x, y: y))
+        let reading = Self.read(image)
+        VStack(alignment: .leading, spacing: 5) {
+            Canvas { ctx, size in
+                // The grid first and underneath everything: solid hairlines one shade off the
+                // surface, at the quarter stops. Not dashed — a dashed rule reads as a threshold
+                // someone chose, and these are just somewhere to measure against.
+                for q in 1..<4 {
+                    let x = size.width * CGFloat(q) / 4
+                    ctx.stroke(Path { $0.move(to: CGPoint(x: x, y: 0))
+                                      $0.addLine(to: CGPoint(x: x, y: size.height)) },
+                               with: .color(Theme.hairline.opacity(0.55)), lineWidth: 1)
+                }
+                guard let reading, reading.peak > 0 else { return }
+
+                // ONE shared peak across all three channels, never a peak per channel. Normalising
+                // each to its own maximum would flatten every cast in the shoot to the same shape —
+                // the exact thing this view now exists to show.
+                ctx.blendMode = .plusLighter
+                for (i, bins) in reading.channels.enumerated() {
+                    let color = Self.channelColors[i]
+                    let curve = Self.curve(bins, peak: reading.peak, in: size)
+                    var filled = curve
+                    filled.addLine(to: CGPoint(x: size.width, y: size.height))
+                    filled.addLine(to: CGPoint(x: 0, y: size.height))
+                    filled.closeSubpath()
+                    ctx.fill(filled, with: .linearGradient(
+                        Gradient(colors: [color.opacity(0.42), color.opacity(0.06)]),
+                        startPoint: .zero, endPoint: CGPoint(x: 0, y: size.height)))
+                    // Two passes for the stroke: a wide soft one under a fine bright one. Under
+                    // plusLighter that is a bloom, which is what a lit trace looks like — and it
+                    // costs one extra stroke rather than a blur filter on every slider tick.
+                    ctx.stroke(curve, with: .color(color.opacity(0.22)), lineWidth: 3.5)
+                    ctx.stroke(curve, with: .color(color.opacity(0.95)), lineWidth: 1.2)
+                }
+                ctx.blendMode = .normal
+
+                // Clipping is a STATUS, so it gets the status colour and never a channel's — with
+                // three channels drawn, a blue "shadows clipped" bar would read as the blue channel.
+                // A wedge in the corner the clipping happened in, and the caption says which
+                // channels in words, so the mark is never the only thing carrying the message.
+                if !reading.shadowClipped.isEmpty { Self.wedge(ctx, size: size, leading: true) }
+                if !reading.highlightClipped.isEmpty { Self.wedge(ctx, size: size, leading: false) }
             }
-            path.addLine(to: CGPoint(x: size.width, y: size.height))
-            path.closeSubpath()
-            ctx.fill(path, with: .linearGradient(
-                Gradient(colors: [.white.opacity(0.55), .white.opacity(0.12)]),
-                startPoint: .zero, endPoint: CGPoint(x: 0, y: size.height)))
-            // Clipping flags: a dab at each end when pixels pile at pure black / white.
-            if (bins.first ?? 0) / peak > 0.5 {
-                ctx.fill(Path(CGRect(x: 0, y: 0, width: 4, height: size.height)), with: .color(.blue.opacity(0.6)))
+            .frame(height: 58)
+
+            // THE TONE-COLOUR SIGNATURE: the frame's average colour at each point of its tonal
+            // range, from its blacks on the left to its whites on the right.
+            //
+            // This is the reading a colourist actually works in and no histogram shape can give
+            // you: not "how much dark" but "what colour the dark IS". Cool shadows warming into
+            // amber highlights is a split tone, and it shows up here as a gradient you can name in
+            // one look — where in the curves above it is three lines being slightly apart.
+            //
+            // Bins with no pixels in them stay transparent, so the strip lights up across exactly
+            // the range the photograph occupies and goes dark where it has nothing. An empty gap is
+            // a fact about the frame, not a hole in the drawing.
+            if let reading, reading.peak > 0 {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(LinearGradient(stops: reading.signatureStops,
+                                         startPoint: .leading, endPoint: .trailing))
+                    .frame(height: 7)
+                    .overlay(RoundedRectangle(cornerRadius: 3).stroke(Theme.hairline.opacity(0.6),
+                                                                     lineWidth: 0.5))
             }
-            if (bins.last ?? 0) / peak > 0.5 {
-                ctx.fill(Path(CGRect(x: size.width - 4, y: 0, width: 4, height: size.height)), with: .color(.red.opacity(0.6)))
+
+            // The legend, always present because there are three series — and lettered, so identity
+            // never rests on colour alone.
+            HStack(spacing: 7) {
+                ForEach(Array(Self.channelNames.enumerated()), id: \.offset) { i, name in
+                    Text(name)
+                        .font(Theme.mono(9, .semibold))
+                        .foregroundColor(Self.channelColors[i].opacity(0.9))
+                }
+                Spacer(minLength: 4)
+                if let reading, !reading.clippingSummary.isEmpty {
+                    Text(reading.clippingSummary)
+                        .font(Theme.mono(9))
+                        .foregroundColor(Theme.warn)
+                        .lineLimit(1)
+                }
             }
         }
-        .frame(height: 54)
         .padding(8)
-        .background(RoundedRectangle(cornerRadius: 7).fill(Color.black.opacity(0.35))
+        // A shallow top-down gradient rather than flat black: the curves are lit marks, and a
+        // surface with a little depth under them reads as an instrument rather than a swatch.
+        // Kept very close to the panel's own colour — this is depth, not a second accent.
+        .background(RoundedRectangle(cornerRadius: 7)
+            .fill(LinearGradient(colors: [Color.black.opacity(0.46), Color.black.opacity(0.26)],
+                                 startPoint: .top, endPoint: .bottom))
             .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.hairline, lineWidth: 1)))
+        .help(reading?.tooltip ?? "The tonal distribution of the rendered photo, by colour channel")
     }
 
-    /// 64-bin luma histogram sampled from the rendered proxy.
+    /// A small right-angled wedge in the top corner of the end that is clipping.
+    private static func wedge(_ ctx: GraphicsContext, size: CGSize, leading: Bool) {
+        let s: CGFloat = 8
+        let x0 = leading ? 0 : size.width
+        let dir: CGFloat = leading ? 1 : -1
+        var p = Path()
+        p.move(to: CGPoint(x: x0, y: 0))
+        p.addLine(to: CGPoint(x: x0 + s * dir, y: 0))
+        p.addLine(to: CGPoint(x: x0, y: s))
+        p.closeSubpath()
+        ctx.fill(p, with: .color(Theme.warn))
+    }
+
+    /// The drawn shape for one channel: a smoothed open curve across the top of the bins.
+    ///
+    /// Smoothed for DRAWING ONLY. A 64-bin estimate off a 100×100 sample is visibly jagged, and the
+    /// jaggedness is sampling noise rather than anything about the photograph. Clipping is detected
+    /// from the raw 8-bit values instead (see `read`), so nothing that matters is smoothed away —
+    /// which would be the one unforgivable version of this, a spike at pure white rounded off into
+    /// a comfortable slope.
+    private static func curve(_ bins: [Double], peak: Double, in size: CGSize) -> Path {
+        let n = bins.count
+        var path = Path()
+        for i in 0..<n {
+            let a = bins[max(0, i - 1)], b = bins[i], c = bins[min(n - 1, i + 1)]
+            let v = (a + 2 * b + c) / 4
+            let x = size.width * CGFloat(i) / CGFloat(n - 1)
+            let y = size.height * (1 - CGFloat(min(1, v / peak * 1.05)))
+            if i == 0 { path.move(to: CGPoint(x: x, y: y)) } else { path.addLine(to: CGPoint(x: x, y: y)) }
+        }
+        return path
+    }
+
+    /// What one pass over the sampled pixels yields.
+    struct Reading {
+        var channels: [[Double]]          // R, G, B — 64 bins each
+        var peak: Double                  // shared across channels, so casts stay visible
+        var shadowClipped: [String]
+        var highlightClipped: [String]
+        /// The mean colour of the pixels in each luma bin, and how many there were. Zero weight
+        /// means the photograph has nothing at that brightness.
+        var signature: [(r: Double, g: Double, b: Double, weight: Double)]
+
+        /// The signature as gradient stops.
+        ///
+        /// The colour is lifted toward full brightness before it is drawn. A mean shadow colour is
+        /// by definition dark, and dark-on-near-black is invisible — so the strip shows each tone's
+        /// *hue and saturation* at a legible lightness rather than its literal value, which the
+        /// curves above already carry. Without this the left half of the strip is a black smear.
+        var signatureStops: [Gradient.Stop] {
+            signature.enumerated().map { i, t in
+                let location = Double(i) / Double(max(1, signature.count - 1))
+                guard t.weight > 0 else { return .init(color: .clear, location: location) }
+                let peak = max(t.r, max(t.g, t.b))
+                // Scale so the strongest channel lands at 0.92. NOT clamped to 1 — clamping is what
+                // a first draft did, and since every shadow tone has a peak below 1 the "lift" could
+                // then only ever darken, leaving the left half of the strip the black smear it was
+                // written to prevent.
+                //
+                // But the gain is FLOORED AND CAPPED, because unbounded normalisation is its own
+                // bug and it was visible on screen: a bin averaging almost-black has a peak around
+                // 0.008, which asked for a seventy-eight-fold lift and turned 8-bit rounding noise
+                // into a confident white band at the shadow end. Below the floor there is no hue
+                // left in the data to show; above it the cap means very dark tones stay legibly
+                // darker than midtones instead of every tone being normalised to one brightness.
+                guard peak > 0.04 else {
+                    return .init(color: Color(white: 0.12), location: location)
+                }
+                let lift = min(0.92 / peak, 6)
+                return .init(color: Color(red: min(1, t.r * lift),
+                                          green: min(1, t.g * lift),
+                                          blue: min(1, t.b * lift)),
+                             location: location)
+            }
+        }
+
+        /// Clipping in words. Colour and position say it first; this says it in a form that survives
+        /// being colourblind, printed, or simply not looked at closely.
+        var clippingSummary: String {
+            var parts: [String] = []
+            if !shadowClipped.isEmpty { parts.append("▼ \(shadowClipped.joined())") }
+            if !highlightClipped.isEmpty { parts.append("▲ \(highlightClipped.joined())") }
+            return parts.joined(separator: "  ")
+        }
+
+        var tooltip: String {
+            guard !clippingSummary.isEmpty else {
+                return "Tonal distribution by channel — where the three agree they read grey, "
+                    + "so colour here means a cast"
+            }
+            var out: [String] = []
+            if !shadowClipped.isEmpty {
+                out.append("\(shadowClipped.joined(separator: ", ")) crushed to pure black")
+            }
+            if !highlightClipped.isEmpty {
+                out.append("\(highlightClipped.joined(separator: ", ")) blown to pure white")
+            }
+            return out.joined(separator: " · ") + " — detail is gone, not just dark or bright"
+        }
+    }
+
+    /// Three 64-bin channel histograms plus exact clipping counts, from one pass over the sample.
     ///
     /// The comment here used to say "Cheap (100×100 sample)" and it was not: `rgba8Sampled`
     /// rasterises the image at its FULL extent and only then downsamples, so asking for 100×100
@@ -5149,19 +5558,63 @@ struct HistogramView: View {
     /// `rgba8Sampled` because a dozen measurement paths depend on that function's exact resampling,
     /// and this is a histogram: a few bins of difference are invisible, whereas silently moving
     /// `FaceSkin` or `SubjectMask` numbers is how a calibrated threshold stops meaning what it did.
-    static func luma(_ image: CIImage?) -> [Double]? {
+    ///
+    /// Three channels cost no more than the one this replaced: it is the same raster and the same
+    /// single walk of the buffer, binning three values per pixel instead of computing one.
+    static func read(_ image: CIImage?) -> Reading? {
         guard let image else { return nil }
         let small = PerceptionProxy.downsample(image, maxEdge: 100)
         guard let data = try? ImageWriter.rgba8Sampled(small, width: 100, height: 100) else { return nil }
-        var bins = [Double](repeating: 0, count: 64)
+
+        var channels = [[Double]](repeating: [Double](repeating: 0, count: 64), count: 3)
+        var atFloor = [0, 0, 0], atCeiling = [0, 0, 0]
+        // Colour summed per LUMA bin — the tone-colour signature. Same walk, three more adds.
+        var toneSum = [[Double]](repeating: [Double](repeating: 0, count: 3), count: 64)
+        var toneCount = [Double](repeating: 0, count: 64)
+        var samples = 0
         data.withUnsafeBytes { rp in
             let px = rp.bindMemory(to: UInt8.self)
             for i in stride(from: 0, to: data.count, by: 4) {
-                let l = 0.299 * Double(px[i]) + 0.587 * Double(px[i + 1]) + 0.114 * Double(px[i + 2])
-                bins[min(63, Int(l / 256 * 64))] += 1
+                samples += 1
+                let r = Double(px[i]), g = Double(px[i + 1]), b = Double(px[i + 2])
+                let luma = 0.299 * r + 0.587 * g + 0.114 * b
+                let bin = min(63, Int(luma) >> 2)
+                toneSum[bin][0] += r; toneSum[bin][1] += g; toneSum[bin][2] += b
+                toneCount[bin] += 1
+                for c in 0..<3 {
+                    let v = px[i + c]
+                    channels[c][Int(v) >> 2] += 1
+                    // CLIPPING IS MEASURED ON THE RAW VALUE, not on the end bin. A 64-bin bin covers
+                    // four levels, so "bin 63 is tall" also fires on a frame that merely has bright
+                    // highlights with all their detail intact — which is how a clipping warning
+                    // becomes something people learn to ignore.
+                    if v == 0 { atFloor[c] += 1 }
+                    if v == 255 { atCeiling[c] += 1 }
+                }
             }
         }
-        return bins
+        guard samples > 0 else { return nil }
+        // A tenth of a percent of the frame. Below that it is a stray pixel or two — a specular
+        // highlight on a chrome edge is not a blown photograph, and warning about it trains people
+        // to stop reading the warning.
+        let threshold = max(1, samples / 1000)
+        let names = channelNames
+        let peak = channels.flatMap { $0 }.max() ?? 0
+        // A bin holding a handful of stray pixels is noise, not a tone the photograph has. Below
+        // that floor it stays transparent rather than contributing a wild mean colour drawn from
+        // three pixels.
+        let toneFloor = max(1.0, Double(samples) / 2000)
+        let signature = (0..<64).map { i -> (r: Double, g: Double, b: Double, weight: Double) in
+            let n = toneCount[i]
+            guard n >= toneFloor else { return (0, 0, 0, 0) }
+            return (toneSum[i][0] / n / 255, toneSum[i][1] / n / 255, toneSum[i][2] / n / 255, n)
+        }
+        return Reading(
+            channels: channels,
+            peak: peak,
+            shadowClipped: (0..<3).filter { atFloor[$0] > threshold }.map { names[$0] },
+            highlightClipped: (0..<3).filter { atCeiling[$0] > threshold }.map { names[$0] },
+            signature: signature)
     }
 }
 
@@ -6145,6 +6598,10 @@ struct ShortcutsSheet: View {
         ("X", "Flag as Reject & advance"),
         ("U", "Clear this photo's flag"),
         ("← / →", "Previous / next photo"),
+        ("— CHOOSING FRAMES —", ""),
+        ("⌘-click", "Add or remove one frame from the selection"),
+        ("⇧-click", "Extend the selection to this frame"),
+        ("⌘A / ⇧⌘A", "Select every frame / clear the selection"),
         ("— LOOKING —", ""),
         ("1 – 4", "Select candidate 1, 2, 3 or 4"),
         ("\\", "Toggle the original (or hold 'Hold to compare')"),

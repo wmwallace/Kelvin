@@ -609,3 +609,50 @@ been bitten once by a model whose licence was written down wrongly.
 **Shape when built:** an export option, off by default, offering 2× and 4×; applied after the render
 and after any long-edge resize; disabled outright when the source is already large, because upscaling
 a 60 MP frame is a slower way to make a worse file.
+
+---
+
+## D13 — Applying a look to a shoot writes one record, not four hundred edits · **Decided 28 July 2026**
+
+**Batch apply used to be an export.** It asked for an output folder, re-perceived every frame, and
+wrote N edited JPEGs. That worked, and it was the wrong shape for three reasons:
+
+- **One click made four hundred files.** Undo became a deletion sweep, and changing your mind about
+  the look became an operation on the whole folder rather than a one-line change.
+- **You could not see it.** The look was applied to files on disk that the app then had no opinion
+  about — the strip and the canvas still showed whatever they had shown before.
+- **It carried the reference photo's sliders.** The old path propagated `manualTweaks()` — the
+  offsets you had dialled on one frame — onto every other frame. That is the copying this project
+  exists not to do, dressed up as adaptation.
+
+**Now: apply sets, export writes.** Applying a look writes a single small JSON record — the style,
+plus a map of the frames given something else — and nothing is rendered. Every photograph resolves
+that style against its own histogram, its own scene reading and its own mask stack when it is opened
+or exported. Export edited is the one thing that makes files, and it now covers frames the shoot's
+look claims as well as frames edited by hand.
+
+**A look here is a style, not a copy of anybody's sliders.** Frame 12 was shot into the sun and frame
+13 was not; both are "Natural", and Natural comes out different for each of them. This is the
+non-negotiable that the old path quietly violated, and it is why the record stores a style id and
+nothing else.
+
+### The precedence rule, which is the part worth remembering
+
+1. A **hand-made edit** wins, always. It is the one thing in the app that is not a guess.
+2. Otherwise the frame's **override**, if it was singled out in the strip.
+3. Otherwise the **shoot's style**.
+4. Otherwise the engine's own ranking, exactly as before shoot looks existed.
+
+A shoot with no look is byte-for-byte the old behaviour, which is what makes this safe to add to
+folders people have already worked in.
+
+### Known costs, accepted
+
+- **The folder→folder batch is gone.** There is no longer a way to process a folder without opening
+  it. Opening the shoot, applying a look and exporting is the same work with a preview in the middle,
+  and it is one less path that can write files into a place nobody looked at.
+- **Export is slower for look-carried frames**, because the adaptation happens there instead: a
+  decode, a perception pass and two Vision passes per photograph. The export button's tooltip and
+  the progress line both say so rather than letting it read as a hang.
+- **The record is keyed by folder path**, so moving a shoot orphans its look — the same known limit
+  `EditStore` has, recorded here for the same reason.

@@ -106,7 +106,7 @@ final class AppStateTests: XCTestCase {
         s.editedURLs = [urls[1], urls[3]]
         s.stripFilter = .edited
         XCTAssertEqual(s.visiblePhotos, [urls[1], urls[3]])
-        XCTAssertEqual(s.editedCount, 2, "the export button says how many it will render")
+        XCTAssertEqual(s.exportableCount, 2, "the export button says how many it will render")
     }
 
     /// A frame edited in a different folder must not be counted here — `editedURLs` accumulates
@@ -115,7 +115,7 @@ final class AppStateTests: XCTestCase {
         let mine = url("_DSC0001.ARW")
         let s = state(with: [mine])
         s.editedURLs = [mine, URL(fileURLWithPath: "/other/shoot/_DSC9999.ARW")]
-        XCTAssertEqual(s.editedCount, 1)
+        XCTAssertEqual(s.exportableCount, 1)
     }
 
     // MARK: Grouping — one control, one axis (D-browse-1)
@@ -435,7 +435,7 @@ final class AppStateTests: XCTestCase {
         s.flags = [b: .keep, d: .keep]     // d is kept but has no edit
         XCTAssertEqual(s.exportTargets(keepersOnly: false), [a, b, c])
         XCTAssertEqual(s.exportTargets(keepersOnly: true), [b])
-        XCTAssertEqual(s.editedKeeperCount, 1)
+        XCTAssertEqual(s.exportTargets(keepersOnly: true).count, 1)
     }
 
     /// A rejected frame that still carries an edit exports in the everything scope — rejection
