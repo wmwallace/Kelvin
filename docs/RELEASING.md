@@ -225,5 +225,20 @@ a temporary keychain and run `security set-key-partition-list -S apple-tool:,app
 **Notarisation rejected.** `xcrun notarytool log <submission-id> --keychain-profile kelvin-notary`
 returns a JSON report naming the file and the reason.
 
+**`There is no Info.plist found at .../Sparkle.xcframework/Info.plist`.** SwiftPM left an empty
+artifact directory in the packaging scratch path — the download of Sparkle's binary artifact is
+unreliable here (it is why the version is pinned exactly; see the Package.swift note). The scratch
+path used for packaging is separate from the one `swift build` uses day to day, so it can be empty
+while everything else works. Fix it by copying the known-good artifact across rather than waiting
+for a re-download that may hang:
+
+```sh
+rm -rf "${TMPDIR}kelvin-package-build/artifacts/sparkle"
+cp -R "${TMPDIR}kelvin-build/artifacts/sparkle" "${TMPDIR}kelvin-package-build/artifacts/sparkle"
+```
+
+Check it landed — `ls .../artifacts/sparkle/Sparkle/Sparkle.xcframework/Info.plist` — and run the
+packaging script again. A healthy copy is about 26 MB; the broken one measures zero.
+
 **The app launches but dies on the first photo.** Almost certainly the resource bundles are in the
 wrong place; see step 2.
