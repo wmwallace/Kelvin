@@ -62,7 +62,6 @@ final class PlaceNames: ObservableObject {
     @Published private(set) var names: [String: PlaceDetail] = [:]
 
     private var inFlight: Set<String> = []
-    private let geocoder = CLGeocoder()
 
     private init() { names = Self.loadCache() }
 
@@ -103,8 +102,18 @@ final class PlaceNames: ObservableObject {
             // Rounded before it leaves. The coordinate that goes to Apple is not the one in the file.
             let rounded = CLLocation(latitude: (point.latitude * 1000).rounded() / 1000,
                                      longitude: (point.longitude * 1000).rounded() / 1000)
+            // THE GEOCODER IS BUILT HERE, not held as a property, and that is a concurrency
+            // requirement rather than a style choice. `reverseGeocodeLocation` is nonisolated, so
+            // calling it hands the geocoder across an isolation boundary; a stored property of a
+            // `@MainActor` type is main-actor state and cannot be sent, which is precisely what
+            // CodeQL's stricter Swift build rejected while the main CI job let it through. One
+            // created inside the task is provably referenced by nothing else, so sending it is
+            // safe and the compiler can see that — the same reason `rounded` above has never been
+            // a problem. `CLGeocoder` is a thin request object and `resolve` already dedupes, so
+            // this is at most one instance per distinct location in a shoot, not per photograph.
+            let geocoder = CLGeocoder()
             do {
-                let placemarks = try await self.geocoder.reverseGeocodeLocation(rounded)
+                let placemarks = try await geocoder.reverseGeocodeLocation(rounded)
                 guard let detail = Self.detail(placemarks.first) else { return }
                 self.names[key] = detail
                 Self.saveCache(self.names)
