@@ -215,6 +215,23 @@ struct FilmstripView: View {
     /// What the strip is sized by right now: the drag if there is one, the remembered value if not.
     private var effectiveHeight: Double { liveHeight ?? stripHeight }
 
+    /// ONE CONTROL, NOT TWO STATES. The strip used to be a chevron that showed everything or
+    /// nothing, with the number of rows hidden behind a separate drag — so "a bit more than a
+    /// filmstrip but less than a wall of thumbnails" was not a thing anyone could ask for.
+    ///
+    /// The top edge now runs the whole range: pull it down past half a row and the strip closes,
+    /// giving the photograph the entire window; pull it up and rows arrive one at a time until the
+    /// strip is as tall as it is allowed to be. The chevron remains as the shortcut between closed
+    /// and whatever height you last chose, which is what a chevron is good at.
+    ///
+    /// Following the live drag rather than the stored value matters: the strip closes under your
+    /// hand at the moment you pass the threshold, instead of staying put and then vanishing when
+    /// you let go.
+    private var isShowing: Bool { liveHeight.map { $0 > 0 } ?? expanded }
+
+    /// Below this, the drag means "close" rather than "one row".
+    private var closeThreshold: Double { Self.rowPitch * 0.5 }
+
     /// A cell is 56 tall; the rest is the gap between rows.
     private static let cellHeight: Double = 56
     private static let rowSpacing: Double = 8
@@ -258,7 +275,7 @@ struct FilmstripView: View {
             Rectangle().fill(Theme.hairline).frame(height: 1)
                 .overlay(resizeHandle)
             header
-            if expanded { strip }
+            if isShowing { strip }
         }
         .background(Theme.surface.opacity(0.6))
     }
@@ -579,17 +596,30 @@ struct FilmstripView: View {
             .gesture(
                 DragGesture(minimumDistance: 1)
                     .onChanged { value in
-                        let start = heightAtDragStart ?? stripHeight
+                        // Dragging up from a closed strip starts at zero, so the same gesture that
+                        // closes it opens it again.
+                        let start = heightAtDragStart ?? (expanded ? stripHeight : 0)
                         if heightAtDragStart == nil { heightAtDragStart = start }
                         // Upward drag is a taller strip, so the translation is inverted.
                         let proposed = start - value.translation.height
-                        liveHeight = min(maxHeight, max(Self.oneRow, proposed))
+                        liveHeight = proposed < closeThreshold
+                            ? 0
+                            : min(maxHeight, max(Self.oneRow, proposed))
                     }
                     .onEnded { _ in
                         // Settle on whole rows, so what is stored is what is drawn and reopening
                         // the app cannot restore a height that leaves a part-row of empty space.
-                        if liveHeight != nil {
-                            stripHeight = min(maxHeight, max(Self.oneRow, rowsHeight))
+                        // A drag is a decision either way, so it is recorded as one — otherwise the
+                        // next photo opened would quietly overrule what was just done by hand.
+                        if let live = liveHeight {
+                            if live <= 0 {
+                                if expanded { FilmstripFold.recordUserChoice(expanded: false) }
+                                expanded = false
+                            } else {
+                                stripHeight = min(maxHeight, max(Self.oneRow, rowsHeight))
+                                if !expanded { FilmstripFold.recordUserChoice(expanded: true) }
+                                expanded = true
+                            }
                         }
                         liveHeight = nil
                         heightAtDragStart = nil
