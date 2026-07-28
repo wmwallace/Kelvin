@@ -61,15 +61,24 @@ struct FrameTiming {
 
 /// Materialise a lazy CIImage so later measurements do not silently re-render the full frame.
 /// The same trick `AppState` uses; duplicated here because that one lives in the app target.
-let benchContext: CIContext = {
-    if let device = MTLCreateSystemDefaultDevice() {
-        return CIContext(mtlDevice: device, options: [.cacheIntermediates: true])
+///
+/// Inside an enum rather than at file scope, and this is not style: **top-level `let`s in a
+/// `main.swift` are implicitly main-actor isolated**, so a nonisolated function reading one does not
+/// compile. It did compile on the author's SDK and failed on CI's — the second time this exact
+/// divergence has bitten in this change alone (see `HistogramTests`). Static members of a type carry
+/// no such isolation, which makes this the boring, portable spelling.
+enum Bench {
+    static let context: CIContext = {
+        if let device = MTLCreateSystemDefaultDevice() {
+            return CIContext(mtlDevice: device, options: [.cacheIntermediates: true])
+        }
+        return CIContext()
+    }()
+
+    static func materialise(_ image: CIImage) -> CIImage {
+        guard let cg = context.createCGImage(image, from: image.extent) else { return image }
+        return CIImage(cgImage: cg)
     }
-    return CIContext()
-}()
-func materialise(_ image: CIImage) -> CIImage {
-    guard let cg = benchContext.createCGImage(image, from: image.extent) else { return image }
-    return CIImage(cgImage: cg)
 }
 func clock<T>(_ into: inout Double, _ body: () throws -> T) rethrows -> T {
     let t = Date(); defer { into = Date().timeIntervalSince(t) }
@@ -103,7 +112,7 @@ if first == "bench-export" {
         for (i, url) in images.enumerated() {
             var t = FrameTiming()
             let full = try clock(&t.decode) { try ImageDecoder.decode(url: url) }
-            let proxy = clock(&t.proxy) { materialise(PerceptionProxy.downsample(full)) }
+            let proxy = clock(&t.proxy) { Bench.materialise(PerceptionProxy.downsample(full)) }
 
             // The same cache the app uses, hit in the same order — so this measures shipped
             // behaviour rather than a benchmark's idea of it. Run twice on one shoot to see the
