@@ -153,6 +153,9 @@ struct PhotoSession {
 struct FilmstripView: View {
     let photos: [URL]
     let current: URL?
+    /// The tallest the strip may be drawn, measured from the workspace rather than assumed. This is
+    /// what replaced a hard six-row ceiling; see `rowCount`.
+    var maxHeight: Double = 6 * 64
     let editedURLs: Set<URL>
     let thumbnail: (URL) -> NSImage?
     let onSelect: (URL) -> Void
@@ -203,16 +206,41 @@ struct FilmstripView: View {
     /// at the photograph can make — some shoots are about one frame, some are about forty.
     @AppStorage("filmstrip.height") private var stripHeight = Self.oneRow
     @State private var heightAtDragStart: Double?
+    /// The height while a drag is in flight, held here rather than written straight to
+    /// `@AppStorage`. Every write to that is a synchronous defaults write AND a change every
+    /// observer of the store reacts to, and doing one per drag frame is most of why resizing felt
+    /// like it was catching. The store is written once, when the drag ends.
+    @State private var liveHeight: Double?
+
+    /// What the strip is sized by right now: the drag if there is one, the remembered value if not.
+    private var effectiveHeight: Double { liveHeight ?? stripHeight }
 
     /// A cell is 56 tall; the rest is the gap between rows.
     private static let cellHeight: Double = 56
     private static let rowSpacing: Double = 8
     static let oneRow: Double = cellHeight
-    private static let maxRows = 6
+    /// One row's worth of vertical space, which is the unit everything here counts in.
+    private static let rowPitch: Double = cellHeight + rowSpacing
 
+    /// How many rows fit, and the reason there is no longer a fixed ceiling.
+    ///
+    /// This used to stop at six rows however far the top edge was dragged, so a shoot pulled open
+    /// to half the window showed six rows of thumbnails and then a band of empty grey — the space
+    /// was taken from the photograph and given to nothing. The limit now comes from the room the
+    /// workspace actually has (`maxHeight`), so dragging up keeps adding rows until the strip is
+    /// as tall as it is allowed to be, and every point of that height has photographs in it.
     private var rowCount: Int {
-        let rows = (stripHeight + Self.rowSpacing) / (Self.cellHeight + Self.rowSpacing)
-        return min(Self.maxRows, max(1, Int(rows.rounded(.down))))
+        let usable = min(effectiveHeight, maxHeight)
+        // Rounded, not floored: a row should appear when the edge is dragged halfway towards it,
+        // rather than the drag feeling stuck for most of a row and then jumping.
+        return max(1, Int((usable / Self.rowPitch).rounded()))
+    }
+
+    /// The height the rows actually occupy. The container is pinned to this rather than to the
+    /// dragged value, which is what removes the dead band: a drag that lands between two row counts
+    /// no longer leaves the difference as empty space under the last row.
+    private var rowsHeight: Double {
+        Double(rowCount) * Self.rowPitch - Self.rowSpacing
     }
 
     /// Fill each column top to bottom, then move right — the reading order of a horizontal scroll.
@@ -432,6 +460,8 @@ struct FilmstripView: View {
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                 }
+                // Pinned to whole rows — see `rowsHeight`.
+                .frame(height: rowsHeight + 20)
                 .onChange(of: current) { _, url in
                     guard let url else { return }
                     // A travelled scroll rather than a jump: arrowing through a shoot, the strip
@@ -553,10 +583,17 @@ struct FilmstripView: View {
                         if heightAtDragStart == nil { heightAtDragStart = start }
                         // Upward drag is a taller strip, so the translation is inverted.
                         let proposed = start - value.translation.height
-                        let maxHeight = Double(Self.maxRows) * (Self.cellHeight + Self.rowSpacing)
-                        stripHeight = min(maxHeight, max(Self.oneRow, proposed))
+                        liveHeight = min(maxHeight, max(Self.oneRow, proposed))
                     }
-                    .onEnded { _ in heightAtDragStart = nil }
+                    .onEnded { _ in
+                        // Settle on whole rows, so what is stored is what is drawn and reopening
+                        // the app cannot restore a height that leaves a part-row of empty space.
+                        if liveHeight != nil {
+                            stripHeight = min(maxHeight, max(Self.oneRow, rowsHeight))
+                        }
+                        liveHeight = nil
+                        heightAtDragStart = nil
+                    }
             )
     }
 

@@ -1149,8 +1149,33 @@ final class AppState: ObservableObject {
     ///
     /// Now: return whatever is cached, start a background fetch for anything missing, and publish
     /// it when it arrives. A cell with no thumbnail yet simply shows its placeholder.
+    /// Decoded thumbnails waiting to be published, and the timer that publishes them together.
+    ///
+    /// `thumbnails` is `@Published`, so every arriving thumbnail used to be its own update of the
+    /// whole view tree. Dragging the strip open by one row reveals a dozen cells at once, which
+    /// meant a dozen full passes in the middle of a gesture — the "jumpy" in a jumpy resize — and
+    /// scanning a shoot did the same thing hundreds of times over. Buffered and flushed together,
+    /// a burst becomes one update.
+    private var thumbnailBuffer: [URL: NSImage] = [:]
+    private var thumbnailFlushScheduled = false
+
+    private func scheduleThumbnailFlush() {
+        guard !thumbnailFlushScheduled else { return }
+        thumbnailFlushScheduled = true
+        // Long enough to gather a burst, short enough that a thumbnail never looks slow to appear.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+            guard let self else { return }
+            self.thumbnailFlushScheduled = false
+            guard !self.thumbnailBuffer.isEmpty else { return }
+            self.thumbnails.merge(self.thumbnailBuffer) { _, new in new }   // one publish, not N
+            self.thumbnailBuffer.removeAll()
+        }
+    }
+
     func thumbnail(for url: URL) -> NSImage? {
-        if let hit = thumbnails[url] { return hit }
+        // The buffer counts as a hit: a decoded thumbnail that has not been flushed yet must not
+        // be decoded a second time, and must not be reported missing to a cell about to draw.
+        if let hit = thumbnails[url] ?? thumbnailBuffer[url] { return hit }
         guard !thumbnailsInFlight.contains(url) else { return nil }
         thumbnailsInFlight.insert(url)
         Task { [weak self] in
@@ -1164,7 +1189,10 @@ final class AppState: ObservableObject {
             let image = cg.map { NSImage(cgImage: $0, size: .zero) }
             guard let self else { return }
             self.thumbnailsInFlight.remove(url)
-            if let image { self.thumbnails[url] = image }
+            if let image {
+                self.thumbnailBuffer[url] = image
+                self.scheduleThumbnailFlush()
+            }
         }
         return nil
     }
@@ -3493,6 +3521,8 @@ struct ContentView: View {
     @ObservedObject var appState: AppState
     @State private var isTargeted = false
     @State private var panStart = CGSize.zero
+    /// How tall the preview column is, so the filmstrip can be told what it may take.
+    @State private var paneHeight: Double = 600
     @State private var zoomStart = 1.0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -3792,6 +3822,10 @@ struct ContentView: View {
                 if appState.folderPhotos.count > 1 {
                     FilmstripView(photos: appState.visiblePhotos,
                                   current: appState.imageURL,
+                                  // Two thirds of the pane. The strip may take most of the window
+                                  // when someone is culling rather than editing, but never so much
+                                  // that the photograph it is a strip OF has nowhere left to go.
+                                  maxHeight: paneHeight * 0.66,
                                   editedURLs: appState.editedURLs,
                                   thumbnail: appState.thumbnail(for:),
                                   onSelect: { url in Task { await appState.openPhoto(url) } },
@@ -3816,10 +3850,29 @@ struct ContentView: View {
                                   canGroupByPlace: appState.canGroupByPlace,
                                   sortPending: appState.sortOrderPending,
                                   onExpand: appState.filmstripDidExpand)
+                    // THE STRIP GETS ITS HEIGHT FIRST, and the photograph takes what is left.
+                    // Without this the preview — which asks for every point it can get — wins the
+                    // negotiation, and a strip dragged open to six rows is simply clipped by the
+                    // bottom of the window: the rows exist, they are drawn, and you cannot see
+                    // them. Layout priority inverts that, so dragging the strip taller shrinks the
+                    // photograph, which is what dragging it is *for*.
+                    .layoutPriority(1)
                 }
             }
             .frame(minWidth: 460)
             .background(Theme.base)
+            // The column's own height, handed to the filmstrip so it knows how far it may grow.
+            // Read from a background rather than by wrapping the column: a `GeometryReader` in the
+            // layout would take the column over, and an earlier attempt to keep it out of the way
+            // by pinning it to zero height duly reported zero — which clamped the strip to a single
+            // row. A background is offered exactly the size of what it sits behind.
+            .background(
+                GeometryReader { geo in
+                    Color.clear
+                        .onAppear { paneHeight = geo.size.height }
+                        .onChange(of: geo.size.height) { _, h in paneHeight = h }
+                }
+            )
 
             sidebar
                 .frame(width: 360)
