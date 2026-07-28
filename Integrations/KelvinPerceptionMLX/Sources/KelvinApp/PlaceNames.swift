@@ -152,3 +152,95 @@ final class PlaceNames: ObservableObject {
         try? FileManager.default.removeItem(at: Self.cacheURL)
     }
 }
+
+// MARK: - A small map, fetched once
+
+import MapKit
+
+/// A still map of where a photograph was taken, drawn in the panel instead of handing off to Maps.
+///
+/// **A snapshot, not a `Map` view, and that is the whole design.** An interactive MapKit view streams
+/// tiles for wherever it is panned and zoomed, which is an open-ended conversation with Apple's
+/// servers for as long as the panel is open. `MKMapSnapshotter` asks once, for one fixed frame, and
+/// returns an image — the same shape of request as the place-name lookup that D14 already weighed,
+/// and cached on the same terms.
+///
+/// It honours the same switch. With place names off, no snapshot is ever requested: one control
+/// governs whether this app talks to Apple about where you were, not two.
+@MainActor
+final class PlaceMaps: ObservableObject {
+
+    static let shared = PlaceMaps()
+
+    /// Keyed by the same rounded coordinate as `PlaceNames`, so one location is one image however
+    /// many frames were shot there.
+    @Published private(set) var images: [String: NSImage] = [:]
+    private var inFlight: Set<String> = []
+
+    private init() {}
+
+    func image(for point: GeoPoint) -> NSImage? { images[PlaceNames.key(for: point)] }
+
+    /// Fetch the snapshot for this point, once.
+    ///
+    /// Kept in memory only. A map image is a few hundred kilobytes and regenerating one costs a
+    /// single request, so writing a second on-disk cache of where somebody has been — on top of the
+    /// place names — is storage this app does not need to be keeping.
+    func fetch(_ point: GeoPoint, size: CGSize = CGSize(width: 240, height: 120)) {
+        guard PlaceNames.shared.isEnabled, point.isValid else { return }
+        let key = PlaceNames.key(for: point)
+        guard images[key] == nil, !inFlight.contains(key) else { return }
+        inFlight.insert(key)
+
+        let options = MKMapSnapshotter.Options()
+        // Rounded before it is sent, exactly as the name lookup is.
+        options.region = MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: (point.latitude * 1000).rounded() / 1000,
+                                           longitude: (point.longitude * 1000).rounded() / 1000),
+            latitudinalMeters: 1200, longitudinalMeters: 1200)
+        options.size = size
+        options.showsBuildings = true
+        // The panel is dark; a bright map in it would be the loudest thing on screen.
+        options.appearance = NSAppearance(named: .darkAqua)
+
+        // The snapshot is turned into a `CGImage` INSIDE the callback and only that crosses into
+        // the actor. `MKMapSnapshotter.Snapshot` and `NSImage` are not `Sendable`; `CGImage` is, on
+        // both this SDK and the one CI builds against. Same reason `PhotoBrowser.thumbnailCG`
+        // returns a `CGImage` — see that comment, and `kelvin-ci-swift-divergence`.
+        MKMapSnapshotter(options: options).start(with: .main) { [weak self] snapshot, _ in
+            let pinned = snapshot.flatMap { Self.pinned($0, size: size) }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.inFlight.remove(key)
+                guard let pinned else { return }
+                self.images[key] = NSImage(cgImage: pinned, size: size)
+            }
+        }
+    }
+
+    /// The photograph's position, marked. A map of a valley with nothing on it does not say "here".
+    ///
+    /// Drawn with Core Graphics rather than AppKit so it stays `nonisolated` and hands back a
+    /// `CGImage`, which is the only part of this that is allowed to cross into the actor.
+    nonisolated private static func pinned(_ snapshot: MKMapSnapshotter.Snapshot,
+                                           size: CGSize) -> CGImage? {
+        guard let base = snapshot.image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        else { return nil }
+        let w = Int(size.width), h = Int(size.height)
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        ctx.draw(base, in: CGRect(x: 0, y: 0, width: w, height: h))
+        let cx = Double(w) / 2, cy = Double(h) / 2
+        // The app's own warm accent, ringed in white so it reads on any terrain underneath.
+        ctx.setFillColor(CGColor(red: 1.0, green: 0.60, blue: 0.33, alpha: 1))
+        ctx.fillEllipse(in: CGRect(x: cx - 5, y: cy - 5, width: 10, height: 10))
+        ctx.setStrokeColor(CGColor(gray: 1, alpha: 0.9))
+        ctx.setLineWidth(1.5)
+        ctx.strokeEllipse(in: CGRect(x: cx - 6.5, y: cy - 6.5, width: 13, height: 13))
+        return ctx.makeImage()
+    }
+
+    func forgetAll() { images = [:] }
+}

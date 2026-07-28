@@ -2143,6 +2143,13 @@ final class AppState: ObservableObject {
         }
         loadShootLook(for: folder)
         capture = CaptureInfoReader.read(url: url)
+        // The open frame's own place, resolved immediately. The folder-wide pass only runs when the
+        // strip is unfolded, so opening a single photograph found the coordinate and never asked
+        // what it was called — the one case most likely to be someone's first look at the feature.
+        if let here = capture.location {
+            PlaceNames.shared.resolve(here)
+            PlaceMaps.shared.fetch(here)
+        }
         userMasks = []; paintingMaskId = nil; selectedMask = nil   // hand-drawn masks are per-photo
         // The subjects belong to the photograph, so they go out with it. Left standing,
         // the list would offer the last photo's people while this one decoded.
@@ -3630,6 +3637,15 @@ final class AppState: ObservableObject {
         // mid-run must not split a folder's files across two names.
         let label = exportLabel
 
+        // PHASE ONE — decide what each frame gets, and where it goes. Sequential, on the actor.
+        //
+        // Name allocation CANNOT be parallelised. `uniqueURL` resolves a collision by asking the
+        // filesystem what already exists, and nothing has been written yet at planning time — so two
+        // frames with the same stem would both be told the name is free and the second would clobber
+        // the first. Allocated names are therefore tracked in a set and fed back into the same
+        // existence check, which is what that parameter is for.
+        var jobs: [RenderJob] = []
+        var allocated = Set<URL>()
         for (index, url) in targets.enumerated() {
             let saved = EditStore.load(for: url)
             // WHICH RECIPE THIS FRAME GETS, and the order is the whole contract:
@@ -3637,8 +3653,7 @@ final class AppState: ObservableObject {
             // 1. The hand-made edit, rendered from the recipe stored with it. Exact, instant, and
             //    it outranks the shoot's look — see `ShootLook`.
             // 2. Otherwise the shoot's look, ADAPTED to this frame: decoded, perceived, measured
-            //    and run through the engine so the style resolves against its own histogram. This
-            //    is the expensive path and the one that makes "apply to the shoot" produce files.
+            //    and run through the engine so the style resolves against its own histogram.
             let recipe: Recipe?
             let lookName: String?
             var wasAdapted = false
@@ -3650,7 +3665,6 @@ final class AppState: ObservableObject {
                 guard let stored = saved.recipe else {
                     needsReopening.append(url.lastPathComponent); continue
                 }
-                statusMessage = "Exporting \(index + 1) of \(targets.count)…"
                 recipe = stored
                 lookName = saved.styleId
             } else if editedURLs.contains(url) {
@@ -3660,9 +3674,7 @@ final class AppState: ObservableObject {
                 unreadable += 1; continue
             } else if let styleId = effectiveStyle(for: url),
                       let style = CandidateStyle.all.first(where: { $0.id == styleId }) {
-                // Named in the progress, because this is seconds per frame rather than a render —
-                // a shoot of four hundred is a long wait and it has to look like work, not a hang.
-                statusMessage = "Adapting \(style.label) to photo \(index + 1) of \(targets.count)…"
+                statusMessage = "Reading photo \(index + 1) of \(targets.count)…"
                 do {
                     recipe = try await adaptedRecipe(for: url, style: style)
                 } catch {
@@ -3679,28 +3691,50 @@ final class AppState: ObservableObject {
                 in: directory,
                 stem: ExportNaming.stem(for: url, perception: nil, look: lookName,
                                         scheme: scheme, label: label),
-                ext: exportFormat.fileExtension)
+                ext: exportFormat.fileExtension,
+                exists: { allocated.contains($0) || FileManager.default.fileExists(atPath: $0.path) })
+            allocated.insert(out)
+            jobs.append(RenderJob(recipe: recipe, source: url, out: out, wasAdapted: wasAdapted))
+        }
 
-            // Read off the actor once, before the work crosses to a detached task. Reaching back
-            // into `self` from inside it is an await per property and, worse, a value that could
-            // change between photographs mid-export.
-            let format = exportFormat, metadata = exportMetadata
-            let work = RenderJob(recipe: recipe, source: url, out: out)
-            let result: Bool = await Task.detached(priority: .userInitiated) {
-                guard let image = try? ImageDecoder.decode(url: work.source) else { return false }
-                let bitmaps = work.recipe.masks?.isEmpty == false
-                    ? LocalMasks.measure(in: image).bitmaps : [:]
-                let rendered = Renderer.render(image, with: work.recipe, maskBitmaps: bitmaps)
-                do {
-                    try ImageWriter.write(rendered, to: work.out, format: format, metadata: metadata,
-                                          size: size, colorSpace: space)
-                    return true
-                } catch { return false }
-            }.value
-            if result {
-                written += 1
-                if wasAdapted { adaptedWritten += 1 }
-            } else { failed += 1 }
+        // PHASE TWO — decode, render and write. Concurrent, and this is where the time is.
+        //
+        // Measured on 60 MP RAWs with the perception cache warm: 10.3s a frame, of which the pixel
+        // work is essentially all of it — 7.2s in the write alone (the render is lazy and is forced
+        // there), 1.9s in full-resolution mask measurement, 0.9s in the proxy. Those stages are
+        // independent per frame and were running strictly one after another, so a 400-frame export
+        // took 68 minutes of a machine doing one thing at a time.
+        //
+        // The cap is MEMORY, not cores. A 60 MP frame is ~240 MB decoded before any intermediate,
+        // and Core Image will happily hold several renders in flight — so this is deliberately a
+        // small fixed number rather than `activeProcessorCount`, which on this hardware would
+        // cheerfully try twelve and swap.
+        let format = exportFormat, metadata = exportMetadata
+        let lanes = min(3, max(1, jobs.count))
+        var completed = 0
+        await withTaskGroup(of: (ok: Bool, adapted: Bool).self) { group in
+            var next = 0
+            func addJob() {
+                guard next < jobs.count else { return }
+                let job = jobs[next]
+                next += 1
+                group.addTask {
+                    let ok = await Self.renderAndWrite(job, format: format, metadata: metadata,
+                                                       size: size, colorSpace: space)
+                    return (ok, job.wasAdapted)
+                }
+            }
+            for _ in 0..<lanes { addJob() }
+            // One in, one out: the group never holds more than `lanes` decoded frames at once.
+            while let result = await group.next() {
+                completed += 1
+                statusMessage = "Exporting \(completed) of \(jobs.count)…"
+                if result.ok {
+                    written += 1
+                    if result.adapted { adaptedWritten += 1 }
+                } else { failed += 1 }
+                addJob()
+            }
         }
 
         isProcessing = false
@@ -3793,6 +3827,31 @@ final class AppState: ObservableObject {
         let recipe: Recipe
         let source: URL
         let out: URL
+        /// Whether this frame's recipe came from the shoot's look rather than a hand edit, so the
+        /// summary can say which half of the count was adapted. Carried on the job because the
+        /// answer is decided at planning time and read after the work finishes on another thread.
+        var wasAdapted = false
+    }
+
+    /// One frame: decode, measure, render, write.
+    ///
+    /// `nonisolated` and `async`, so it runs on the concurrent executor rather than hopping back to
+    /// the main actor — which is the entire point of the task group above. Nothing here touches
+    /// `AppState`; every value it needs is passed in.
+    nonisolated private static func renderAndWrite(_ job: RenderJob,
+                                           format: ImageWriter.Format,
+                                           metadata: ImageWriter.MetadataPolicy,
+                                           size: ImageWriter.Size,
+                                           colorSpace: ImageWriter.ColorSpace) async -> Bool {
+        guard let image = try? ImageDecoder.decode(url: job.source) else { return false }
+        let bitmaps = job.recipe.masks?.isEmpty == false
+            ? LocalMasks.measure(in: image).bitmaps : [:]
+        let rendered = Renderer.render(image, with: job.recipe, maskBitmaps: bitmaps)
+        do {
+            try ImageWriter.write(rendered, to: job.out, format: format, metadata: metadata,
+                                  size: size, colorSpace: colorSpace)
+            return true
+        } catch { return false }
     }
 
     /// Everything a detached export needs, boxed so it can cross the actor boundary. `CIImage` and
@@ -4904,14 +4963,25 @@ struct ContentView: View {
                     }
                     Text(location).font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
                         .textSelection(.enabled)
-                    if let url = c.mapURL {
-                        Link(destination: url) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "mappin.and.ellipse").font(.system(size: 9))
-                                Text("Show in Maps").font(Theme.mono(9))
-                            }.foregroundColor(Theme.glow)
-                        }
-                        .help("Opens Maps with these coordinates. \(Branding.displayName) does not fetch anything itself.")
+                    // THE MAP IS DRAWN HERE, not handed off to Maps.app.
+                    //
+                    // It was a "Show in Maps" link, on the reasoning that an inline map would send
+                    // coordinates to Apple and the app made no calls. D14 changed that premise —
+                    // place names already ask Apple where this is — so the honest question became
+                    // which kind of map, and the answer is a STILL one. An interactive `Map` streams
+                    // tiles for wherever it is panned, for as long as the panel is open; a snapshot
+                    // asks once for one fixed frame and is cached. Same shape of request as the name
+                    // beside it, governed by the same switch.
+                    if let point = c.location, let map = PlaceMaps.shared.image(for: point) {
+                        Image(nsImage: map)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(height: 96)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(RoundedRectangle(cornerRadius: 6)
+                                .stroke(Theme.hairline.opacity(0.8), lineWidth: 1))
+                            .accessibilityLabel(PlaceNames.shared.cachedName(for: point)
+                                                .map { "Map of \($0)" } ?? "Map of where this was taken")
                     }
                 }
             }
