@@ -36,9 +36,30 @@ final class PlaceNames: ObservableObject {
         UserDefaults.standard.object(forKey: Self.enabledKey) as? Bool ?? true
     }
 
-    /// Resolved names, keyed by the rounded coordinate. Published so headings redraw when a lookup
+    /// What a lookup returned, kept in full rather than reduced to one line.
+    ///
+    /// **Because no single field is reliably the answer.** Probed against a real shoot at Sunriver,
+    /// Oregon: `locality` said "Bend" (its post is addressed there), `areasOfInterest` said
+    /// "Deschutes National Forest", `name` gave a street address, and "Sunriver" appeared in no
+    /// field at all. Any one of those alone is either too coarse or plainly wrong, and there is no
+    /// ordering of them that fixes it.
+    ///
+    /// So the panel shows several and lets the photographer recognise the place — a ZIP they know,
+    /// a road they drove in on — while the headline stays the one thing that makes a sensible export
+    /// label. Showing what is known beats guessing which single field is right.
+    struct PlaceDetail: Codable, Equatable {
+        /// The headline, and the only part that pre-fills an export label.
+        var name: String
+        /// The large named feature containing the point — a forest, a park, a range.
+        var area: String?
+        /// Street, when there is one.
+        var street: String?
+        var postalCode: String?
+    }
+
+    /// Resolved places, keyed by the rounded coordinate. Published so headings redraw when a lookup
     /// lands, since resolution is asynchronous and the strip is already on screen.
-    @Published private(set) var names: [String: String] = [:]
+    @Published private(set) var names: [String: PlaceDetail] = [:]
 
     private var inFlight: Set<String> = []
     private let geocoder = CLGeocoder()
@@ -52,8 +73,14 @@ final class PlaceNames: ObservableObject {
         String(format: "%.3f,%.3f", point.latitude, point.longitude)
     }
 
-    /// The name for this point if it is already known — synchronous, so a view can ask while drawing.
+    /// The headline name for this point if it is known — synchronous, so a view can ask while
+    /// drawing. This is what a filmstrip heading and an export label use.
     func cachedName(for point: GeoPoint) -> String? {
+        names[Self.key(for: point)]?.name
+    }
+
+    /// Everything the lookup returned, for the panel.
+    func cachedDetail(for point: GeoPoint) -> PlaceDetail? {
         names[Self.key(for: point)]
     }
 
@@ -78,8 +105,8 @@ final class PlaceNames: ObservableObject {
                                      longitude: (point.longitude * 1000).rounded() / 1000)
             do {
                 let placemarks = try await self.geocoder.reverseGeocodeLocation(rounded)
-                guard let name = Self.describe(placemarks.first) else { return }
-                self.names[key] = name
+                guard let detail = Self.detail(placemarks.first) else { return }
+                self.names[key] = detail
                 Self.saveCache(self.names)
             } catch {
                 Self.log.debug("Place lookup failed: \(error.localizedDescription, privacy: .public)")
@@ -104,6 +131,22 @@ final class PlaceNames: ObservableObject {
     ///
     /// Deliberately short. This becomes a filmstrip heading and an export label, and a full postal
     /// address is neither.
+    /// Everything worth showing, from one placemark.
+    static func detail(_ placemark: CLPlacemark?) -> PlaceDetail? {
+        guard let placemark, let name = describe(placemark) else { return nil }
+        // The street only when it is a street. `name` is a full address when Apple has one, which
+        // duplicates the number and road already in `thoroughfare`, so the parts are used directly.
+        let street = [placemark.subThoroughfare, placemark.thoroughfare]
+            .compactMap { $0 }.joined(separator: " ")
+        // The area is dropped when it merely repeats the headline.
+        let area = placemark.areasOfInterest?.first
+        return PlaceDetail(
+            name: name,
+            area: (area.map { $0.caseInsensitiveCompare(name) == .orderedSame } ?? false) ? nil : area,
+            street: street.isEmpty ? nil : street,
+            postalCode: placemark.postalCode)
+    }
+
     static func describe(_ placemark: CLPlacemark?) -> String? {
         guard let placemark else { return nil }
         // THE TOWN FIRST, and `areasOfInterest` almost last.
@@ -136,14 +179,17 @@ final class PlaceNames: ObservableObject {
         EditStore.directory.deletingLastPathComponent().appendingPathComponent("places.json")
     }
 
-    private static func loadCache() -> [String: String] {
+    /// A cache written in the old one-string-per-place format simply misses, and every place is
+    /// looked up again. That is what a cache is for; a migration would be more code than the thing
+    /// it migrates.
+    private static func loadCache() -> [String: PlaceDetail] {
         guard let data = try? Data(contentsOf: cacheURL),
-              let decoded = try? JSONDecoder().decode([String: String].self, from: data)
+              let decoded = try? JSONDecoder().decode([String: PlaceDetail].self, from: data)
         else { return [:] }
         return decoded
     }
 
-    private static func saveCache(_ names: [String: String]) {
+    private static func saveCache(_ names: [String: PlaceDetail]) {
         do {
             try FileManager.default.createDirectory(at: cacheURL.deletingLastPathComponent(),
                                                     withIntermediateDirectories: true)

@@ -707,3 +707,20 @@ fallback that already has a design.
 "has no asterisk on it". Both were true and are no longer. The README now lists exactly two network
 calls — the update check and this — and says what each sends. **A privacy claim in a public README
 is a promise; it gets edited in the same commit that makes it untrue, or not at all.**
+
+### Two things found after the fact
+
+**`CLGeocoder` is deprecated as of macOS 26.0**, in favour of MapKit's newer reverse-geocoding
+request. It still works and nothing here changes, but the API this decision rests on has a shelf
+life and the replacement is worth taking before the next release rather than after.
+
+**The names are coarser than hoped, and that is the API's limit rather than a bug.** Probed against a
+real shoot at Sunriver, Oregon, every field came back: `locality` "Bend", `subLocality` nil,
+`areasOfInterest` "Deschutes National Forest", `name` a street address. **"Sunriver" is in none of
+them** — its post is addressed to Bend — and full precision returns the same, so rounding is not the
+cause. `locality` is the best of that set: a town is what a photographer calls a shoot, where a
+national forest is the largest feature containing the point dressed up as the most specific.
+
+The consequence is that a place name is a SUGGESTION and must stay one. It pre-fills the export
+label; it never becomes a filename on its own. That the label is editable is what makes a wrong
+guess cost a second.

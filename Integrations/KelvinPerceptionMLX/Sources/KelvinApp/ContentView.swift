@@ -3705,12 +3705,22 @@ final class AppState: ObservableObject {
         // independent per frame and were running strictly one after another, so a 400-frame export
         // took 68 minutes of a machine doing one thing at a time.
         //
-        // The cap is MEMORY, not cores. A 60 MP frame is ~240 MB decoded before any intermediate,
-        // and Core Image will happily hold several renders in flight — so this is deliberately a
-        // small fixed number rather than `activeProcessorCount`, which on this hardware would
-        // cheerfully try twelve and swap.
+        // ONE AT A TIME, AND THAT IS A MEASUREMENT, NOT AN OVERSIGHT.
+        //
+        // This ran three frames concurrently on the theory that the stages are independent per
+        // frame. Measured on 8 real 60 MP RAWs with the cache warm: 81.6s sequential, 80.2s with
+        // three lanes. A 1.7% difference — nothing — because the work is Core Image on a single
+        // GPU, and lanes do not multiply a GPU. They queue on the same device and arrive at the
+        // same time, having held three decoded 60 MP frames in memory to do it.
+        //
+        // So the lane count is 1 and the cost is paid honestly. The plan-then-execute split above
+        // stays, because it fixed a real filename race that the old inline loop had: name
+        // allocation now happens once, sequentially, against a set of what has already been
+        // claimed. Raising this number is not a speed-up available to anyone; making the RENDER
+        // cheaper is where the time is (`masks (full-res)` is 1.8s of a warm frame and `write`
+        // forces the whole graph).
         let format = exportFormat, metadata = exportMetadata
-        let lanes = min(3, max(1, jobs.count))
+        let lanes = 1
         var completed = 0
         await withTaskGroup(of: (ok: Bool, adapted: Bool).self) { group in
             var next = 0
@@ -4957,9 +4967,21 @@ struct ContentView: View {
                     // The name first when there is one, the degrees underneath it always. The name
                     // is a lookup that can fail or be switched off (D14); the coordinate is what the
                     // camera actually recorded, and it never stops being the ground truth.
-                    if let place = appState.capture.location.flatMap({ PlaceNames.shared.cachedName(for: $0) }) {
-                        Text(place).font(Theme.ui(11, .medium)).foregroundColor(Theme.ink)
+                    // SEVERAL LINES, not one guessed name. No single placemark field is reliably
+                    // the answer — at Sunriver, `locality` says "Bend", `areasOfInterest` says
+                    // "Deschutes National Forest", and "Sunriver" is in none of them. Showing the
+                    // town, the feature, the road and the postcode lets a photographer recognise
+                    // the place from whichever of those they know.
+                    if let detail = appState.capture.location
+                        .flatMap({ PlaceNames.shared.cachedDetail(for: $0) }) {
+                        Text(detail.name).font(Theme.ui(11, .medium)).foregroundColor(Theme.ink)
                             .fixedSize(horizontal: false, vertical: true)
+                        let extras = [detail.area, detail.street, detail.postalCode].compactMap { $0 }
+                        if !extras.isEmpty {
+                            Text(extras.joined(separator: " · "))
+                                .font(Theme.mono(9)).foregroundColor(Theme.inkDim)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                     Text(location).font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
                         .textSelection(.enabled)
