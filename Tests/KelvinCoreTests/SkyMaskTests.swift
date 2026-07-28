@@ -47,6 +47,26 @@ final class SkyMaskTests: XCTestCase {
         XCTAssertNotNil(SkyMask.detect(in: image), "expected a sky mask for a bright overcast top")
     }
 
+    /// The frame `brightFloor` was moved for: a heavy marine overcast over wet sand. These are
+    /// `_DSC6390`'s own numbers (2026-04-26 Cannon Beach) rounded to 8-bit — sky luma 0.62 at
+    /// saturation 0.04, sand at 0.37 and 0.31. Under the old floor of 0.60 the sky scored near
+    /// zero and this returned nil on a photograph that is two thirds sky.
+    func testDetectsAHeavyMarineOvercast() {
+        let image = halfImage(top: (155, 158, 162), bottom: (105, 92, 74))
+        guard let mask = SkyMask.detect(in: image) else {
+            return XCTFail("a grey overcast is a sky — it is the commonest sky on this coast")
+        }
+        // Scored with `SkyMetrics` rather than `maskedMeanLuma`, which counts only cells above 0.4
+        // alpha and so reports nothing at all for a mask this soft — the reading that sent the
+        // first version of this test red. What matters is where the mask's weight sits.
+        guard let region = try? SkyMetrics.referenceRegion(in: image),
+              let agreement = (try? SkyMetrics.agreement(of: mask, with: region)) ?? nil else {
+            return XCTFail("no reference region for a frame that is half sky")
+        }
+        XCTAssertGreaterThan(agreement.meanAlphaInRegion, 0.25, "the mask must carry the overcast")
+        XCTAssertLessThan(agreement.spillFraction, 0.05, "and none of it may land on the sand")
+    }
+
     func testNoSkyForDarkFrame() {
         // A uniformly dark frame has no sky: colour score is ~0 everywhere → coverage below floor.
         let image = halfImage(top: (20, 22, 24), bottom: (18, 20, 18))

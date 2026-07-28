@@ -18,6 +18,55 @@ import CoreVideo
 /// the source without a coordinate flip.
 public enum SkyMask {
 
+    /// Where the overcast/haze cue starts believing a bright desaturated cell is sky.
+    ///
+    /// **0.50, and every digit of it was measured.** It was 0.60, which is a fair description of a
+    /// bright sky and not of the one over the Oregon coast: on `_DSC6390` from 2026-04-26 Cannon
+    /// Beach — Haystack Rock under a full marine overcast filling the top two thirds of the frame —
+    /// the sky reads luma 0.52…0.67 at saturation 0.05, and the sand under it reads 0.32 at 0.22.
+    /// A floor of 0.60 scored most of that sky at zero, which is why "the lever does nothing on an
+    /// overcast frame" was a precise description of it.
+    ///
+    /// Swept with `kelvin-cli sky-metrics` over twelve Cannon Beach frames (real skies) against
+    /// eight Sunriver frames (interiors and people — no sky at all) and eight Rocky Brook Falls
+    /// frames (the waterfall-and-foliage case this file's connectivity rule exists for):
+    ///
+    /// | floor | sky mask α | sky orphaned | spill | no mask at all | skies where there is none |
+    /// |---|---|---|---|---|---|
+    /// | 0.60 (was) | 0.230 | 0.481 | 0.001 | 2 of 12 | 0 |
+    /// | **0.50** | **0.426** | **0.234** | **0.009** | **1 of 12** | **0** |
+    /// | 0.45 | 0.653 | 0.056 | 0.019 | 0 of 12 | **2 of 8** |
+    /// | 0.40 | 0.752 | 0.044 | 0.080 | 0 of 12 | **2 of 8** |
+    ///
+    /// 0.45 is where it breaks: the mask starts finding skies in a living room, which is the
+    /// false-positive failure the flood fill and the desaturation gate exist to prevent and which
+    /// no amount of better coverage pays for. 0.50 nearly doubles the alpha every sky adjustment is
+    /// multiplied by, halves the orphaned sky, and costs eight thousandths of spill.
+    ///
+    /// Overridable so the next corpus can re-measure this rather than argue about it — the same
+    /// reason `PerceptionProxy.defaultMaxEdge` is overridable. Re-run the sweep before moving it.
+    static let brightFloor = ProcessInfo.processInfo.environment["KELVIN_SKY_BRIGHT"]
+        .flatMap(Double.init).map { min(0.9, max(0.2, $0)) } ?? 0.50
+
+    /// How much brighter than `brightFloor` a cell must be before the overcast cue is fully
+    /// convinced. **0.20, and it was swept the same way**, at floor 0.50, on the same three shoots:
+    ///
+    /// | ramp | sky mask α | sky orphaned | spill | skies where there is none |
+    /// |---|---|---|---|---|
+    /// | 0.30 (was) | 0.426 | 0.234 | 0.009 | 0 |
+    /// | **0.20** | **0.589** | **0.126** | **0.012** | **0** |
+    /// | 0.15 | 0.648 | 0.097 | 0.013 | 0 |
+    /// | 0.10 | 0.693 | 0.077 | 0.014 | 0 |
+    ///
+    /// Unlike the floor, this one has no cliff in it — three shoots cannot separate 0.20 from 0.10
+    /// on the false-positive side, where every value scores the same 0.00 spill on the waterfall and
+    /// finds no sky in any interior. So the choice is the most conservative value that takes most of
+    /// the gain, and it is recorded as that rather than as a discovered optimum. A flat overcast now
+    /// reaches full confidence at luma 0.70 instead of 0.80, which is the difference between a mask
+    /// that states a sky is sky and one that hedges at 0.39.
+    static let brightRamp = ProcessInfo.processInfo.environment["KELVIN_SKY_RAMP"]
+        .flatMap(Double.init).map { min(0.6, max(0.05, $0)) } ?? 0.20
+
     /// Grayscale sky mask (white = sky) at `image`'s extent, or nil when the frame holds little
     /// or no sky (coverage below `coverageFloor`, 0…1 fraction of the frame).
     public static func detect(in image: CIImage, coverageFloor: Double = 0.015) -> CIImage? {
@@ -42,9 +91,10 @@ public enum SkyMask {
                 let sat = maxc <= 0 ? 0 : (maxc - minc) / maxc
                 // Clear sky: blue leads the other channels and the pixel is at least mid-bright.
                 let blue = l > 0.30 ? min(1, max(0, (b - max(r, g)) * 3.0)) : 0
-                // Overcast / hazy sky: bright and desaturated. Ramp brightness in over 0.60→0.90
-                // and fade out as saturation climbs past ~0.22 (that's a coloured surface, not sky).
-                let bright = l > 0.60 ? min(1, (l - 0.60) / 0.30) : 0
+                // Overcast / hazy sky: bright and desaturated. Ramp brightness in from
+                // `brightFloor` over `brightRamp` — both calibrated, see their notes — and fade out
+                // as saturation climbs past ~0.22 (a coloured surface, not sky).
+                let bright = l > brightFloor ? min(1, (l - brightFloor) / brightRamp) : 0
                 let desat = sat < 0.22 ? 1.0 : max(0, 1 - (sat - 0.22) / 0.18)
                 colour[i] = max(blue, bright * desat)
             }

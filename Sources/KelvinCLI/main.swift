@@ -946,7 +946,7 @@ case "sky-metrics":
     print("frame                          cover   luma  spread  ground |  mask α  orphan   spill")
     var readings: [SkyMetrics.Reading] = []
     var agreements: [SkyMetrics.MaskAgreement] = []
-    var noSkyRegion = 0, noMaskAtAll = 0, groundEaten = 0
+    var noSkyRegion = 0, noMaskAtAll = 0, groundEaten = 0, maskWithoutSky = 0
     // style id → (readings, divergence vs the unedited frame)
     var styleReadings: [String: [SkyMetrics.Reading]] = [:]
     var styleDivergence: [String: [SkyMetrics.Divergence]] = [:]
@@ -984,6 +984,10 @@ case "sky-metrics":
         }
         guard !region.isEmpty, let reading = (try? SkyMetrics.read(image, in: region)) ?? nil else {
             noSkyRegion += 1
+            // The cleanest false-positive signal there is: a sky mask on a frame with no sky in
+            // it. Counted separately, because loosening the mask to catch an overcast is exactly
+            // the change that would start finding skies in a living room.
+            if mask != nil { maskWithoutSky += 1 }
             print("\(padded)  (no sky)" + (mask == nil ? "" : "   ← but SkyMask found one"))
             continue
         }
@@ -1054,6 +1058,7 @@ case "sky-metrics":
     }
     print("")
     print("\(files.count) frames · no sky region \(noSkyRegion) · SkyMask returned nothing \(noMaskAtAll)"
+          + " · mask on a frame with no sky \(maskWithoutSky)"
           + " · region suspect (excluded from means) \(groundEaten)")
     print("orphan = share of the sky the mask scores below 0.1 alpha. Every sky adjustment in a")
     print("recipe is multiplied by mask α before it reaches a pixel.")
