@@ -2394,6 +2394,59 @@ final class AppState: ObservableObject {
     }
 
     func resetZoom() { zoom = 1; pan = .zero }
+
+    /// Space: back and forth between fitted and the last magnification used, which is how every
+    /// other editor's spacebar behaves. Remembering the ratio matters — a zoom toggle that always
+    /// returned to 2× would lose the 6× someone was inspecting focus at.
+    @Published private(set) var lastZoomRatio: Double = 2
+    func toggleZoomRatio() {
+        if zoom > 1.01 { lastZoomRatio = zoom; setZoom(1) } else { setZoom(lastZoomRatio) }
+    }
+
+    /// `U`: clear whatever decision this frame carries. `FlagStore.toggle` clears by re-applying the
+    /// same flag, so the honest way to unflag is to ask what it has and repeat it.
+    func clearFlagOnCurrent() {
+        guard let url = imageURL, let current = flags[url] else { return }
+        setFlag(current, for: url)
+    }
+
+    /// `/`: fold the strip away, or bring it back. Written through `FilmstripFold` so that using the
+    /// key counts as a decision exactly as clicking the control does — otherwise the next photo
+    /// opened would quietly overrule it.
+    func toggleFilmstrip() {
+        let now = UserDefaults.standard.bool(forKey: FilmstripFold.expandedKey)
+        FilmstripFold.recordUserChoice(expanded: !now)
+    }
+
+    /// `⌘I`: invert whichever mask is selected, auto or hand-drawn.
+    func invertSelectedMask() {
+        switch selectedMask {
+        case .auto(let id):
+            maskInvert[id] = !(maskInvert[id] ?? false)
+        case .user(let id):
+            guard let i = userMasks.firstIndex(where: { $0.id == id }) else { return }
+            userMasks[i].invert.toggle()
+        case nil:
+            return
+        }
+        onEdit()
+    }
+
+    /// `⇧]` / `⇧[`: soften or harden the selected mask's edge.
+    func adjustSelectedFeather(by delta: Double) {
+        func clamp(_ v: Double) -> Double { min(100, max(0, v)) }
+        switch selectedMask {
+        case .auto(let id):
+            let current = maskFeather[id] ?? baseMasks.first { $0.id == id }?.feather ?? 0
+            maskFeather[id] = clamp(current + delta)
+        case .user(let id):
+            guard let i = userMasks.firstIndex(where: { $0.id == id }) else { return }
+            userMasks[i].feather = clamp(userMasks[i].feather + delta)
+        case nil:
+            return
+        }
+        onEdit()
+    }
     func setZoom(_ z: Double) { zoom = min(8, max(1, z)); if zoom == 1 { pan = .zero } }
     /// Mask coordinates are stored in SOURCE space (masks are applied before geometry), while the
     /// preview shows the FRAMED image — so both directions route through the renderer's geometry
@@ -3571,6 +3624,7 @@ struct ContentView: View {
         // exist to carry the shortcut, not to be clicked.
         .overlay {
             if appState.proxyCI != nil {
+                VStack(spacing: 0) {
                 Group {
                     Button("") { appState.flagCurrentAndAdvance(.keep) }
                         .keyboardShortcut("p", modifiers: [])
@@ -3594,6 +3648,59 @@ struct ContentView: View {
                         .keyboardShortcut(.rightArrow, modifiers: [])
                     Button("") { Task { await appState.advance(by: -1) } }
                         .keyboardShortcut(.leftArrow, modifiers: [])
+                }
+                // A SECOND GROUP because SwiftUI's ViewBuilder takes ten children and no more, and
+                // a group that silently drops its eleventh shortcut would be a bug nobody could see.
+                Group {
+                    // Lightroom's vocabulary where Kelvin has the same action, so hands that already
+                    // know one editor do not have to learn this one. Only bound where the action
+                    // genuinely exists — see docs/SHORTCUTS-PROPOSED.md for what was left out and
+                    // why, including the keys that collide.
+                    //
+                    // `Z` joins `P` rather than replacing it: `P` is in the shipped shortcuts sheet
+                    // and in people's fingers, and taking it away to match a list would be a cost
+                    // paid by the only user this app currently has.
+                    Button("") { appState.flagCurrentAndAdvance(.keep) }
+                        .keyboardShortcut("z", modifiers: [])
+                    Button("") { appState.clearFlagOnCurrent() }
+                        .keyboardShortcut("u", modifiers: [])
+                    // Before/after as a TOGGLE, alongside press-and-hold. Holding is right when you
+                    // want a glance; a toggle is right when you want to look properly.
+                    Button("") { appState.showingOriginal.toggle() }
+                        .keyboardShortcut("\\", modifiers: [])
+                    Button("") { appState.toggleFilmstrip() }
+                        .keyboardShortcut("/", modifiers: [])
+                    Button("") { appState.setZoom(appState.zoom * 1.25) }
+                        .keyboardShortcut("=", modifiers: .command)
+                    Button("") { appState.setZoom(appState.zoom / 1.25) }
+                        .keyboardShortcut("-", modifiers: .command)
+                    Button("") { appState.toggleZoomRatio() }
+                        .keyboardShortcut(.space, modifiers: [])
+                    Button("") { appState.resetToCandidate() }
+                        .keyboardShortcut("r", modifiers: .command)
+                    Button("") { openExportPanel() }
+                        .keyboardShortcut("e", modifiers: .shift)
+                    Button("") { appState.invertSelectedMask() }
+                        .keyboardShortcut("i", modifiers: .command)
+                }
+                Group {
+                    // The mask kit. `M` opens the section rather than drawing anything, because
+                    // "masking tool" in the list is a mode and Kelvin's masks are objects you add.
+                    Button("") { appState.addUserMask(.brush) }
+                        .keyboardShortcut("b", modifiers: [])
+                    Button("") { appState.addUserMask(.linear) }
+                        .keyboardShortcut("l", modifiers: [])
+                    Button("") { appState.addUserMask(.radial) }
+                        .keyboardShortcut("r", modifiers: [])
+                    Button("") { appState.addUserMask(.colorRange) }
+                        .keyboardShortcut("c", modifiers: .shift)
+                    Button("") { appState.addUserMask(.luminance) }
+                        .keyboardShortcut("i", modifiers: .shift)
+                    Button("") { appState.adjustSelectedFeather(by: 4) }
+                        .keyboardShortcut("]", modifiers: .shift)
+                    Button("") { appState.adjustSelectedFeather(by: -4) }
+                        .keyboardShortcut("[", modifiers: .shift)
+                }
                 }
                 .opacity(0).frame(width: 0, height: 0)
             }
@@ -5985,17 +6092,33 @@ struct MaskControl: View {
 struct ShortcutsSheet: View {
     @Environment(\.dismiss) private var dismiss
 
+    // Grouped, because this list stopped being scannable at about eight rows. The headings are the
+    // same ones the panel uses, so the sheet reads in the order the work happens.
     private let shortcuts: [(key: String, description: String)] = [
-        ("P", "Flag photo as Keep & advance to next"),
-        ("X", "Flag photo as Reject & advance to next"),
-        ("O", "Toggle Mask Overlay red visualization"),
-        ("[ / ]", "Decrease / Increase brush size"),
-        ("1 – 4", "Select Candidate Edit 1, 2, 3, or 4"),
-        ("Hold", "Press & hold 'Hold to compare' for original"),
-        ("⌘Z", "Undo edit"),
-        ("⌘Shift Z", "Redo edit"),
+        ("— CULLING —", ""),
+        ("P  or  Z", "Flag as Keep & advance"),
+        ("X", "Flag as Reject & advance"),
+        ("U", "Clear this photo's flag"),
+        ("← / →", "Previous / next photo"),
+        ("— LOOKING —", ""),
+        ("1 – 4", "Select candidate 1, 2, 3 or 4"),
+        ("\\", "Toggle the original (or hold 'Hold to compare')"),
+        ("Space", "Zoom to the last ratio, or back to fit"),
+        ("⌘= / ⌘−", "Zoom in / out"),
+        ("/", "Show or hide the filmstrip"),
+        ("— MASKS —", ""),
+        ("B / L / R", "Add a brush, linear or radial mask"),
+        ("⇧C / ⇧I", "Add a colour-range or luminance mask"),
+        ("O", "Show or hide the red mask overlay"),
+        ("⌘I", "Invert the selected mask"),
+        ("[ / ]", "Brush size down / up"),
+        ("⇧[ / ⇧]", "Feather the selected mask in / out"),
+        ("— EDITING —", ""),
+        ("⌘Z / ⌘⇧Z", "Undo / redo"),
+        ("⌘R", "Reset every slider to the candidate"),
+        ("— FILES —", ""),
+        ("⇧E", "Export this photo"),
         ("⌘O", "Open another photo or folder"),
-        ("← / →", "Navigate to previous / next photo in strip"),
         ("⌘/", "Show this list")
     ]
 
@@ -6013,6 +6136,13 @@ struct ShortcutsSheet: View {
 
             VStack(spacing: 9) {
                 ForEach(shortcuts, id: \.key) { item in
+                    if item.description.isEmpty {
+                        Text(item.key.replacingOccurrences(of: "—", with: "").trimmingCharacters(in: .whitespaces))
+                            .font(Theme.mono(9, .semibold)).tracking(1.2)
+                            .foregroundColor(Theme.inkFaint)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 4)
+                    } else {
                     HStack(spacing: 12) {
                         Text(item.key)
                             .font(Theme.mono(10, .semibold))
@@ -6023,6 +6153,7 @@ struct ShortcutsSheet: View {
                         Text(item.description)
                             .font(Theme.ui(12)).foregroundColor(Theme.ink)
                         Spacer()
+                    }
                     }
                 }
             }
