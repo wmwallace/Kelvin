@@ -5222,40 +5222,227 @@ struct CandidateRow: View {
 
 // MARK: - Histogram (live tonal distribution + clipping)
 
+/// The tonal readout: three channel curves, additively blended, over a quarter-stop grid.
+///
+/// **It used to be one grey silhouette of luma, and luma is the one thing a photographer can already
+/// see by looking at the picture.** What it could not tell you is the part the eye is worst at —
+/// which *channel* is doing it. A warm cast, a blue shadow, a red channel clipping on a face while
+/// the frame's overall brightness looks perfectly healthy: all of that is invisible in a luma
+/// silhouette and obvious the moment the channels are drawn apart.
+///
+/// **The blend is the whole trick.** The three curves composite additively, so where the channels
+/// agree they sum back to neutral grey — which *is* the luma reading, for free, with no fourth
+/// series drawn — and where they disagree the difference shows as colour. Neutral photograph, grey
+/// histogram. Cast, and it fringes. Nothing here is decoration: every colour on screen is the data.
+///
+/// Drawn thin and lit rather than as three saturated blocks, because saturated fills at this size
+/// read as a toy. Fills sit low and the strokes carry the shape.
 struct HistogramView: View {
     let image: CIImage?
 
+    /// Channel colours, lifted off the primaries so they stay legible on a near-black surface while
+    /// still summing to something that reads as neutral where all three overlap.
+    private static let channelColors: [Color] = [
+        Color(hex: 0xFF4D4D), Color(hex: 0x4DE07A), Color(hex: 0x4D95FF)
+    ]
+    private static let channelNames = ["R", "G", "B"]
+
     var body: some View {
-        Canvas { ctx, size in
-            guard let bins = Self.luma(image), let peak = bins.max(), peak > 0 else { return }
-            let n = bins.count
-            var path = Path()
-            path.move(to: CGPoint(x: 0, y: size.height))
-            for (i, v) in bins.enumerated() {
-                let x = size.width * CGFloat(i) / CGFloat(n - 1)
-                let y = size.height * (1 - CGFloat(min(1, v / peak * 1.05)))
-                path.addLine(to: CGPoint(x: x, y: y))
+        let reading = Self.read(image)
+        VStack(alignment: .leading, spacing: 5) {
+            Canvas { ctx, size in
+                // The grid first and underneath everything: solid hairlines one shade off the
+                // surface, at the quarter stops. Not dashed — a dashed rule reads as a threshold
+                // someone chose, and these are just somewhere to measure against.
+                for q in 1..<4 {
+                    let x = size.width * CGFloat(q) / 4
+                    ctx.stroke(Path { $0.move(to: CGPoint(x: x, y: 0))
+                                      $0.addLine(to: CGPoint(x: x, y: size.height)) },
+                               with: .color(Theme.hairline.opacity(0.55)), lineWidth: 1)
+                }
+                guard let reading, reading.peak > 0 else { return }
+
+                // ONE shared peak across all three channels, never a peak per channel. Normalising
+                // each to its own maximum would flatten every cast in the shoot to the same shape —
+                // the exact thing this view now exists to show.
+                ctx.blendMode = .plusLighter
+                for (i, bins) in reading.channels.enumerated() {
+                    let color = Self.channelColors[i]
+                    let curve = Self.curve(bins, peak: reading.peak, in: size)
+                    var filled = curve
+                    filled.addLine(to: CGPoint(x: size.width, y: size.height))
+                    filled.addLine(to: CGPoint(x: 0, y: size.height))
+                    filled.closeSubpath()
+                    ctx.fill(filled, with: .linearGradient(
+                        Gradient(colors: [color.opacity(0.42), color.opacity(0.06)]),
+                        startPoint: .zero, endPoint: CGPoint(x: 0, y: size.height)))
+                    // Two passes for the stroke: a wide soft one under a fine bright one. Under
+                    // plusLighter that is a bloom, which is what a lit trace looks like — and it
+                    // costs one extra stroke rather than a blur filter on every slider tick.
+                    ctx.stroke(curve, with: .color(color.opacity(0.22)), lineWidth: 3.5)
+                    ctx.stroke(curve, with: .color(color.opacity(0.95)), lineWidth: 1.2)
+                }
+                ctx.blendMode = .normal
+
+                // Clipping is a STATUS, so it gets the status colour and never a channel's — with
+                // three channels drawn, a blue "shadows clipped" bar would read as the blue channel.
+                // A wedge in the corner the clipping happened in, and the caption says which
+                // channels in words, so the mark is never the only thing carrying the message.
+                if !reading.shadowClipped.isEmpty { Self.wedge(ctx, size: size, leading: true) }
+                if !reading.highlightClipped.isEmpty { Self.wedge(ctx, size: size, leading: false) }
             }
-            path.addLine(to: CGPoint(x: size.width, y: size.height))
-            path.closeSubpath()
-            ctx.fill(path, with: .linearGradient(
-                Gradient(colors: [.white.opacity(0.55), .white.opacity(0.12)]),
-                startPoint: .zero, endPoint: CGPoint(x: 0, y: size.height)))
-            // Clipping flags: a dab at each end when pixels pile at pure black / white.
-            if (bins.first ?? 0) / peak > 0.5 {
-                ctx.fill(Path(CGRect(x: 0, y: 0, width: 4, height: size.height)), with: .color(.blue.opacity(0.6)))
+            .frame(height: 58)
+
+            // THE TONE-COLOUR SIGNATURE: the frame's average colour at each point of its tonal
+            // range, from its blacks on the left to its whites on the right.
+            //
+            // This is the reading a colourist actually works in and no histogram shape can give
+            // you: not "how much dark" but "what colour the dark IS". Cool shadows warming into
+            // amber highlights is a split tone, and it shows up here as a gradient you can name in
+            // one look — where in the curves above it is three lines being slightly apart.
+            //
+            // Bins with no pixels in them stay transparent, so the strip lights up across exactly
+            // the range the photograph occupies and goes dark where it has nothing. An empty gap is
+            // a fact about the frame, not a hole in the drawing.
+            if let reading, reading.peak > 0 {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(LinearGradient(stops: reading.signatureStops,
+                                         startPoint: .leading, endPoint: .trailing))
+                    .frame(height: 7)
+                    .overlay(RoundedRectangle(cornerRadius: 3).stroke(Theme.hairline.opacity(0.6),
+                                                                     lineWidth: 0.5))
             }
-            if (bins.last ?? 0) / peak > 0.5 {
-                ctx.fill(Path(CGRect(x: size.width - 4, y: 0, width: 4, height: size.height)), with: .color(.red.opacity(0.6)))
+
+            // The legend, always present because there are three series — and lettered, so identity
+            // never rests on colour alone.
+            HStack(spacing: 7) {
+                ForEach(Array(Self.channelNames.enumerated()), id: \.offset) { i, name in
+                    Text(name)
+                        .font(Theme.mono(9, .semibold))
+                        .foregroundColor(Self.channelColors[i].opacity(0.9))
+                }
+                Spacer(minLength: 4)
+                if let reading, !reading.clippingSummary.isEmpty {
+                    Text(reading.clippingSummary)
+                        .font(Theme.mono(9))
+                        .foregroundColor(Theme.warn)
+                        .lineLimit(1)
+                }
             }
         }
-        .frame(height: 54)
         .padding(8)
-        .background(RoundedRectangle(cornerRadius: 7).fill(Color.black.opacity(0.35))
+        // A shallow top-down gradient rather than flat black: the curves are lit marks, and a
+        // surface with a little depth under them reads as an instrument rather than a swatch.
+        // Kept very close to the panel's own colour — this is depth, not a second accent.
+        .background(RoundedRectangle(cornerRadius: 7)
+            .fill(LinearGradient(colors: [Color.black.opacity(0.46), Color.black.opacity(0.26)],
+                                 startPoint: .top, endPoint: .bottom))
             .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.hairline, lineWidth: 1)))
+        .help(reading?.tooltip ?? "The tonal distribution of the rendered photo, by colour channel")
     }
 
-    /// 64-bin luma histogram sampled from the rendered proxy.
+    /// A small right-angled wedge in the top corner of the end that is clipping.
+    private static func wedge(_ ctx: GraphicsContext, size: CGSize, leading: Bool) {
+        let s: CGFloat = 8
+        let x0 = leading ? 0 : size.width
+        let dir: CGFloat = leading ? 1 : -1
+        var p = Path()
+        p.move(to: CGPoint(x: x0, y: 0))
+        p.addLine(to: CGPoint(x: x0 + s * dir, y: 0))
+        p.addLine(to: CGPoint(x: x0, y: s))
+        p.closeSubpath()
+        ctx.fill(p, with: .color(Theme.warn))
+    }
+
+    /// The drawn shape for one channel: a smoothed open curve across the top of the bins.
+    ///
+    /// Smoothed for DRAWING ONLY. A 64-bin estimate off a 100×100 sample is visibly jagged, and the
+    /// jaggedness is sampling noise rather than anything about the photograph. Clipping is detected
+    /// from the raw 8-bit values instead (see `read`), so nothing that matters is smoothed away —
+    /// which would be the one unforgivable version of this, a spike at pure white rounded off into
+    /// a comfortable slope.
+    private static func curve(_ bins: [Double], peak: Double, in size: CGSize) -> Path {
+        let n = bins.count
+        var path = Path()
+        for i in 0..<n {
+            let a = bins[max(0, i - 1)], b = bins[i], c = bins[min(n - 1, i + 1)]
+            let v = (a + 2 * b + c) / 4
+            let x = size.width * CGFloat(i) / CGFloat(n - 1)
+            let y = size.height * (1 - CGFloat(min(1, v / peak * 1.05)))
+            if i == 0 { path.move(to: CGPoint(x: x, y: y)) } else { path.addLine(to: CGPoint(x: x, y: y)) }
+        }
+        return path
+    }
+
+    /// What one pass over the sampled pixels yields.
+    struct Reading {
+        var channels: [[Double]]          // R, G, B — 64 bins each
+        var peak: Double                  // shared across channels, so casts stay visible
+        var shadowClipped: [String]
+        var highlightClipped: [String]
+        /// The mean colour of the pixels in each luma bin, and how many there were. Zero weight
+        /// means the photograph has nothing at that brightness.
+        var signature: [(r: Double, g: Double, b: Double, weight: Double)]
+
+        /// The signature as gradient stops.
+        ///
+        /// The colour is lifted toward full brightness before it is drawn. A mean shadow colour is
+        /// by definition dark, and dark-on-near-black is invisible — so the strip shows each tone's
+        /// *hue and saturation* at a legible lightness rather than its literal value, which the
+        /// curves above already carry. Without this the left half of the strip is a black smear.
+        var signatureStops: [Gradient.Stop] {
+            signature.enumerated().map { i, t in
+                let location = Double(i) / Double(max(1, signature.count - 1))
+                guard t.weight > 0 else { return .init(color: .clear, location: location) }
+                let peak = max(t.r, max(t.g, t.b))
+                // Scale so the strongest channel lands at 0.92. NOT clamped to 1 — clamping is what
+                // a first draft did, and since every shadow tone has a peak below 1 the "lift" could
+                // then only ever darken, leaving the left half of the strip the black smear it was
+                // written to prevent.
+                //
+                // But the gain is FLOORED AND CAPPED, because unbounded normalisation is its own
+                // bug and it was visible on screen: a bin averaging almost-black has a peak around
+                // 0.008, which asked for a seventy-eight-fold lift and turned 8-bit rounding noise
+                // into a confident white band at the shadow end. Below the floor there is no hue
+                // left in the data to show; above it the cap means very dark tones stay legibly
+                // darker than midtones instead of every tone being normalised to one brightness.
+                guard peak > 0.04 else {
+                    return .init(color: Color(white: 0.12), location: location)
+                }
+                let lift = min(0.92 / peak, 6)
+                return .init(color: Color(red: min(1, t.r * lift),
+                                          green: min(1, t.g * lift),
+                                          blue: min(1, t.b * lift)),
+                             location: location)
+            }
+        }
+
+        /// Clipping in words. Colour and position say it first; this says it in a form that survives
+        /// being colourblind, printed, or simply not looked at closely.
+        var clippingSummary: String {
+            var parts: [String] = []
+            if !shadowClipped.isEmpty { parts.append("▼ \(shadowClipped.joined())") }
+            if !highlightClipped.isEmpty { parts.append("▲ \(highlightClipped.joined())") }
+            return parts.joined(separator: "  ")
+        }
+
+        var tooltip: String {
+            guard !clippingSummary.isEmpty else {
+                return "Tonal distribution by channel — where the three agree they read grey, "
+                    + "so colour here means a cast"
+            }
+            var out: [String] = []
+            if !shadowClipped.isEmpty {
+                out.append("\(shadowClipped.joined(separator: ", ")) crushed to pure black")
+            }
+            if !highlightClipped.isEmpty {
+                out.append("\(highlightClipped.joined(separator: ", ")) blown to pure white")
+            }
+            return out.joined(separator: " · ") + " — detail is gone, not just dark or bright"
+        }
+    }
+
+    /// Three 64-bin channel histograms plus exact clipping counts, from one pass over the sample.
     ///
     /// The comment here used to say "Cheap (100×100 sample)" and it was not: `rgba8Sampled`
     /// rasterises the image at its FULL extent and only then downsamples, so asking for 100×100
@@ -5266,19 +5453,63 @@ struct HistogramView: View {
     /// `rgba8Sampled` because a dozen measurement paths depend on that function's exact resampling,
     /// and this is a histogram: a few bins of difference are invisible, whereas silently moving
     /// `FaceSkin` or `SubjectMask` numbers is how a calibrated threshold stops meaning what it did.
-    static func luma(_ image: CIImage?) -> [Double]? {
+    ///
+    /// Three channels cost no more than the one this replaced: it is the same raster and the same
+    /// single walk of the buffer, binning three values per pixel instead of computing one.
+    static func read(_ image: CIImage?) -> Reading? {
         guard let image else { return nil }
         let small = PerceptionProxy.downsample(image, maxEdge: 100)
         guard let data = try? ImageWriter.rgba8Sampled(small, width: 100, height: 100) else { return nil }
-        var bins = [Double](repeating: 0, count: 64)
+
+        var channels = [[Double]](repeating: [Double](repeating: 0, count: 64), count: 3)
+        var atFloor = [0, 0, 0], atCeiling = [0, 0, 0]
+        // Colour summed per LUMA bin — the tone-colour signature. Same walk, three more adds.
+        var toneSum = [[Double]](repeating: [Double](repeating: 0, count: 3), count: 64)
+        var toneCount = [Double](repeating: 0, count: 64)
+        var samples = 0
         data.withUnsafeBytes { rp in
             let px = rp.bindMemory(to: UInt8.self)
             for i in stride(from: 0, to: data.count, by: 4) {
-                let l = 0.299 * Double(px[i]) + 0.587 * Double(px[i + 1]) + 0.114 * Double(px[i + 2])
-                bins[min(63, Int(l / 256 * 64))] += 1
+                samples += 1
+                let r = Double(px[i]), g = Double(px[i + 1]), b = Double(px[i + 2])
+                let luma = 0.299 * r + 0.587 * g + 0.114 * b
+                let bin = min(63, Int(luma) >> 2)
+                toneSum[bin][0] += r; toneSum[bin][1] += g; toneSum[bin][2] += b
+                toneCount[bin] += 1
+                for c in 0..<3 {
+                    let v = px[i + c]
+                    channels[c][Int(v) >> 2] += 1
+                    // CLIPPING IS MEASURED ON THE RAW VALUE, not on the end bin. A 64-bin bin covers
+                    // four levels, so "bin 63 is tall" also fires on a frame that merely has bright
+                    // highlights with all their detail intact — which is how a clipping warning
+                    // becomes something people learn to ignore.
+                    if v == 0 { atFloor[c] += 1 }
+                    if v == 255 { atCeiling[c] += 1 }
+                }
             }
         }
-        return bins
+        guard samples > 0 else { return nil }
+        // A tenth of a percent of the frame. Below that it is a stray pixel or two — a specular
+        // highlight on a chrome edge is not a blown photograph, and warning about it trains people
+        // to stop reading the warning.
+        let threshold = max(1, samples / 1000)
+        let names = channelNames
+        let peak = channels.flatMap { $0 }.max() ?? 0
+        // A bin holding a handful of stray pixels is noise, not a tone the photograph has. Below
+        // that floor it stays transparent rather than contributing a wild mean colour drawn from
+        // three pixels.
+        let toneFloor = max(1.0, Double(samples) / 2000)
+        let signature = (0..<64).map { i -> (r: Double, g: Double, b: Double, weight: Double) in
+            let n = toneCount[i]
+            guard n >= toneFloor else { return (0, 0, 0, 0) }
+            return (toneSum[i][0] / n / 255, toneSum[i][1] / n / 255, toneSum[i][2] / n / 255, n)
+        }
+        return Reading(
+            channels: channels,
+            peak: peak,
+            shadowClipped: (0..<3).filter { atFloor[$0] > threshold }.map { names[$0] },
+            highlightClipped: (0..<3).filter { atCeiling[$0] > threshold }.map { names[$0] },
+            signature: signature)
     }
 }
 
