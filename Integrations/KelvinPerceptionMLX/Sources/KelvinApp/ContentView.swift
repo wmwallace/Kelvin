@@ -121,7 +121,12 @@ final class AppState: ObservableObject {
     @Published var perception: Perception?
     @Published var candidates: [CandidateViewModel] = []
     @Published var selectedCandidateId: String?
-    @Published var activeRecipe: Recipe?
+    /// NOT `@Published`, deliberately. It is rebuilt on every tick of every drag, and publishing it
+    /// woke the whole panel a second time per tick for something no view reads: the export and the
+    /// craft-fix paths take it directly, and the only view that ever wanted anything out of it was
+    /// the temperature rail, which reads the same number from `edit` (the recipe's globals ARE
+    /// `edit` — see `updateActiveRecipe`).
+    var activeRecipe: Recipe?
     /// A preview image and THE PHOTO IT WAS MADE FROM. The pair is the unit here, never the image
     /// on its own.
     ///
@@ -135,15 +140,25 @@ final class AppState: ObservableObject {
     /// Carrying the URL makes the mismatch unrepresentable rather than something each of those
     /// paths has to remember to avoid: an image belonging to another photo simply reads as nil, and
     /// the compare falls back to showing nothing rather than to showing the wrong photograph.
-    private struct TaggedPreview {
+    struct TaggedPreview {
         let url: URL
         let image: NSImage
     }
-    @Published private var active: TaggedPreview?
+    /// THE RENDER OUTPUT LIVES SOMEWHERE THE SLIDERS CANNOT SEE IT.
+    ///
+    /// These two were `@Published` on `AppState`, and every finished render therefore invalidated
+    /// every view observing it — which is the entire edit panel. Measured during an automated drag:
+    /// two full passes over the view tree per tick and 53 slider rows rebuilt in each, when the only
+    /// thing that actually changed was a preview image and a histogram.
+    ///
+    /// Their own object, held by reference, so writing to it notifies the preview and the histogram
+    /// and nothing else. `AppState` still owns it — this is about who is woken, not about where the
+    /// state belongs.
+    let preview = PreviewState()
     @Published private var original: TaggedPreview?
 
     /// The current edit, rendered — nil until the first render for THIS photo has landed.
-    var activePreviewImage: NSImage? { active.flatMap { $0.url == imageURL ? $0.image : nil } }
+    var activePreviewImage: NSImage? { preview.active.flatMap { $0.url == imageURL ? $0.image : nil } }
     /// The untouched original (proxy) of the photo now open, for the press-and-hold compare.
     var originalPreviewImage: NSImage? { original.flatMap { $0.url == imageURL ? $0.image : nil } }
     @Published var showingOriginal = false
@@ -1371,7 +1386,7 @@ final class AppState: ObservableObject {
     /// state — a switch is arriving somewhere rather than leaving. `loadedURL` deliberately stays
     /// put until the new photo actually loads, so a failed load can still be retried.
     private func clearPerPhotoState() {
-        activeRecipe = nil; active = nil; original = nil; lastRenderedCI = nil
+        activeRecipe = nil; preview.active = nil; original = nil; preview.lastRenderedCI = nil
         candidates = []; selectedCandidateId = nil; perception = nil
         activeCraftIssues = []; lastCraftReading = nil; exhaustedFixes = []
         userMasks = []; paintingMaskId = nil; selectedMask = nil
@@ -1425,8 +1440,8 @@ final class AppState: ObservableObject {
         isProcessing = false
         fullResCI = nil; proxyCI = nil
         candidates = []; selectedCandidateId = nil
-        activeRecipe = nil; active = nil; original = nil
-        lastRenderedCI = nil; activeCraftIssues = []; lastCraftReading = nil; exhaustedFixes = []
+        activeRecipe = nil; preview.active = nil; original = nil
+        preview.lastRenderedCI = nil; activeCraftIssues = []; lastCraftReading = nil; exhaustedFixes = []
         userMasks = []; paintingMaskId = nil; selectedMask = nil
         subjectInstances = []; highlightedInstanceId = nil
         brushCache = [:]
@@ -1455,7 +1470,7 @@ final class AppState: ObservableObject {
             // Forget what is in memory BEFORE moving on, or the stash on the way to the next photo
             // writes this frame's session and sidecar straight back after they were just removed.
             loadedURL = nil
-            original = nil; active = nil
+            original = nil; preview.active = nil
             if let next = folderPhotos.first {
                 Task { await openPhoto(next) }
             } else {
@@ -2625,8 +2640,8 @@ final class AppState: ObservableObject {
     /// abandoned one from spending real seconds ahead of the photo on screen.
     private var perceiveTask: Task<Perception, Error>?
 
-    /// The last rendered proxy (for the histogram + the debounced craft check).
-    @Published var lastRenderedCI: CIImage?
+    /// The last rendered proxy (for the histogram + the debounced craft check). Lives on
+    /// `preview` for the reason given there.
     private var craftToken = 0
 
     /// Baked brush strokes, keyed by mask id, with the stamp count they were baked at. Compositing
@@ -2674,6 +2689,13 @@ final class AppState: ObservableObject {
         }
         brushCache = brushCache.filter { live.contains($0.key) }   // drop deleted/cleared masks
         return out
+    }
+
+    /// The craft check's inputs, crossing to a background task. Same reasoning as `RenderInput`:
+    /// CIImage is documented thread-safe but not Sendable on the SDK CI builds against.
+    private struct MeasuredFrame: @unchecked Sendable {
+        let image: CIImage
+        let condition: Condition?
     }
 
     /// Moves the thread-safe-but-not-Sendable Core Image inputs across the concurrency boundary.
@@ -2756,9 +2778,9 @@ final class AppState: ObservableObject {
             let renderMs = Date().timeIntervalSince(renderStart) * 1000
             await MainActor.run {
                 MainWork.record("render (detached)", ms: renderMs)
-                self.lastRenderedCI = out.ci
+                self.preview.lastRenderedCI = out.ci
                 if let cg = out.cg, let renderedURL {
-                    self.active = TaggedPreview(url: renderedURL,
+                    self.preview.active = TaggedPreview(url: renderedURL,
                                                 image: NSImage(cgImage: cg, size: .zero))
                 }
                 self.renderInFlight = false
@@ -2774,7 +2796,34 @@ final class AppState: ObservableObject {
         craftToken += 1
         let token = craftToken
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            guard let self, self.craftToken == token, let r = self.lastRenderedCI else { return }
+            guard let self, self.craftToken == token, let r = self.preview.lastRenderedCI else { return }
+            // OFF THE MAIN THREAD. Measured on a rendered proxy: `ImageStatistics.compute` 1.2 ms
+            // and `FaceSkin.read` — which runs Vision — 10.2 ms, both of which used to run right
+            // here, on the thread drawing the window, 200 ms after every edit. The debounce made it
+            // rare rather than absent, and "rare" is what a stutter is.
+            let measured = MeasuredFrame(image: r, condition: self.perception?.lighting.condition)
+            Task.detached(priority: .userInitiated) {
+                guard let stats = try? ImageStatistics.compute(measured.image) else {
+                    await MainActor.run {
+                        guard self.craftToken == token else { return }
+                        self.lastCraftReading = nil; self.activeCraftIssues = []
+                    }
+                    return
+                }
+                let reading = CraftFix.Reading(stats: stats,
+                                               face: FaceSkin.read(in: measured.image),
+                                               condition: measured.condition)
+                let issues = reading.issues
+                await MainActor.run {
+                    // The token is checked AGAIN on the way back: an edit made while this was
+                    // measuring means these flags describe a frame that is no longer on screen.
+                    guard self.craftToken == token else { return }
+                    self.lastCraftReading = reading
+                    self.activeCraftIssues = issues
+                }
+            }
+            return
+            #if false
             // Statistics and face are kept, not just the flag list: a subject fix is sized from the
             // same measurement the flags came from, so what the button does and what the warning
             // says can never be reading different numbers.
@@ -2789,6 +2838,7 @@ final class AppState: ObservableObject {
                                            condition: self.perception?.lighting.condition)
             self.lastCraftReading = reading
             self.activeCraftIssues = reading.issues
+            #endif
         }
     }
 
@@ -3288,7 +3338,9 @@ final class AppState: ObservableObject {
     }
 
     // Active look's white balance for the rail (nil = as-shot).
-    var activeTemperature: Double? { activeRecipe?.global.temperatureK }
+    /// Straight from `edit` rather than from `activeRecipe`, which no longer publishes. Identical
+    /// by construction: `updateActiveRecipe` assigns `finalRecipe.global = edit`.
+    var activeTemperature: Double? { edit.temperatureK }
 
     /// Pure, so the batch worker can clamp off the actor too.
     nonisolated static func clampStep(_ v: Double, _ r: ClosedRange<Double>, _ step: Double) -> Double {
@@ -3356,6 +3408,52 @@ final class AppState: ObservableObject {
         guard let cg = sharedContext.createCGImage(ciImage, from: ciImage.extent) else { return nil }
         return NSImage(cgImage: cg, size: NSZeroSize)
     }
+}
+
+/// What a finished render produces, and the only thing a render wakes.
+@MainActor
+final class PreviewState: ObservableObject {
+    /// The rendered proxy, tagged with the photograph it belongs to so a frame that lands after a
+    /// photo switch is ignored rather than shown under the new one's name.
+    @Published var active: AppState.TaggedPreview?
+    /// The same pixels as a CIImage, for the histogram and the craft self-check. Materialised from
+    /// the CGImage rather than left as a filter graph — see the render site.
+    @Published var lastRenderedCI: CIImage?
+}
+
+/// The photograph on the canvas. Its own view so that a new render redraws the image without
+/// re-evaluating the panel beside it.
+struct PreviewImage: View {
+    @ObservedObject var preview: PreviewState
+    let url: URL?
+    let showingOriginal: Bool
+    let originalImage: NSImage?
+    let zoom: Double
+    let pan: CGSize
+
+    var body: some View {
+        let live = preview.active.flatMap { $0.url == url ? $0.image : nil }
+        if let img = showingOriginal ? originalImage : (live ?? originalImage) {
+            Image(nsImage: img)
+                .resizable().scaledToFit()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(24)
+                .scaleEffect(zoom, anchor: .center)
+                .offset(pan)
+                // Identity is the PHOTOGRAPH, not the rendered image. The image is replaced on
+                // every slider move, so keying the transition on it would crossfade the live edit
+                // and destroy the one thing this preview exists for.
+                .id(url)
+                .transition(.opacity)
+        }
+    }
+}
+
+/// The histogram, likewise: it reads the rendered pixels, so it belongs to the render rather than
+/// to the panel it is drawn at the top of.
+struct HistogramHost: View {
+    @ObservedObject var preview: PreviewState
+    var body: some View { HistogramView(image: preview.lastRenderedCI) }
 }
 
 // MARK: - Signature: the temperature rail
@@ -3626,24 +3724,15 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 GeometryReader { geo in
                     ZStack {
-                        let shown = appState.showingOriginal
-                            ? appState.originalPreviewImage
-                            : (appState.activePreviewImage ?? appState.originalPreviewImage)
-                        if let img = shown {
-                            Image(nsImage: img)
-                                .resizable().scaledToFit()
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                .padding(24)
-                                .scaleEffect(appState.zoom, anchor: .center)
-                                .offset(appState.pan)
-                                // Identity is the PHOTOGRAPH, not the rendered image. `shown` is
-                                // replaced on every slider move, so keying the transition on it
-                                // would crossfade the live edit and destroy the one thing this
-                                // preview exists for. Keyed on the URL, only a genuinely new frame
-                                // arriving gets the fade.
-                                .id(appState.imageURL)
-                                .transition(.opacity)
-                        } else if appState.isProcessing {
+                        PreviewImage(preview: appState.preview,
+                                     url: appState.imageURL,
+                                     showingOriginal: appState.showingOriginal,
+                                     originalImage: appState.originalPreviewImage,
+                                     zoom: appState.zoom,
+                                     pan: appState.pan)
+                        if appState.activePreviewImage == nil,
+                           appState.originalPreviewImage == nil,
+                           appState.isProcessing {
                             // A LOADING STATE, not a blank canvas and not the previous photograph.
                             //
                             // The previews are tagged with the photo they belong to, so once the
@@ -4182,7 +4271,7 @@ struct ContentView: View {
         let ch = appState.onEdit   // re-render on any slider change
         return ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                HistogramView(image: appState.lastRenderedCI)
+                HistogramHost(preview: appState.preview)
 
                 HStack(spacing: 8) {
                     Button(action: appState.undo) { editToolLabel("Undo", enabled: appState.canUndo, icon: "arrow.uturn.backward") }
@@ -4879,7 +4968,8 @@ struct HistogramView: View {
 ///
 /// The identity describes the ACTION, never the value — the value stays in the knob position and
 /// the monospaced readout, so nothing here is the only way to read the control.
-enum ToneIdentity {
+/// Equatable so `ToneSlider` can be skipped when nothing about it changed — see the wrapper there.
+enum ToneIdentity: Equatable {
     /// Geometry, softness, feather: no honest reading in light. Left exactly as it was — a rail
     /// that says nothing is decoration, and decoration in a darkroom panel costs attention the
     /// photograph should be getting.
@@ -5048,6 +5138,19 @@ struct ToneRail: View {
     }
 }
 
+/// A labelled slider.
+///
+/// DO NOT REACH FOR `.equatable()` HERE. It was tried, measured and removed. The theory was sound —
+/// SwiftUI cannot tell whether a `Binding` changed, so dragging Exposure re-evaluates all fourteen
+/// tone sliders and their rails — but wrapping the row in an `EquatableView` changed nothing, and an
+/// `==` hard-coded to return `true` changed nothing either: 12,000 body evaluations across a
+/// 120-step drag, with and without. SwiftUI declines the optimisation for a view holding dynamic
+/// properties, and this one holds `@State`, `@Binding` and `@Environment`.
+///
+/// What the panel actually costs is laying out ~53 of these per displayed frame, and the only fix
+/// that reaches it is finer-grained observation — `AppState` publishing 71 properties into one
+/// 1300-line body — which is a refactor rather than a wrapper. See the profiling notes in
+/// Diagnostics.swift.
 struct ToneSlider: View {
     let label: String
     @Binding var value: Double
