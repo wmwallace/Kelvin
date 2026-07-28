@@ -37,6 +37,46 @@ struct ShootLook: Codable, Equatable {
     func style(for photo: URL) -> String? {
         overrides[photo.standardizedFileURL.path] ?? style
     }
+
+    /// The record to write when `styleId` is applied to `scope` within a shoot of `allPhotos`.
+    ///
+    /// **Only an apply that covers every photograph in the folder may claim the folder itself.**
+    /// `style` is the shoot-wide fallback and `style(for:)` hands it to every frame with no
+    /// override — including the ones the scope deliberately left out. So writing it for a narrower
+    /// scope silently gives the look to rejected and undecided frames while the status line reports
+    /// only the count that was asked for, which is the worst combination available: wrong, and
+    /// reported as right. Anything narrower writes per-frame overrides instead and leaves the rest
+    /// of the shoot exactly as it was.
+    ///
+    /// Pure, so the rule that decides what four hundred photographs get is testable without a
+    /// window or a file.
+    func applying(_ styleId: String, to scope: [URL], inShootOf allPhotos: [URL]) -> ShootLook {
+        var next = self
+        if ShootLook.covers(scope, allPhotos) {
+            // "Apply this to everything" has to mean everything, or the frames singled out last
+            // week silently outrank the decision just made.
+            next.style = styleId
+            next.overrides = [:]
+        } else {
+            for url in scope { next.overrides[url.standardizedFileURL.path] = styleId }
+        }
+        return next
+    }
+
+    /// Whether `scope` reaches every photograph in `allPhotos` — the one condition under which an
+    /// apply may claim the shoot itself rather than writing per-frame overrides.
+    ///
+    /// One copy, because the record and the sentence the app says about it have to agree. They are
+    /// written in different places and the version of this bug that shipped was exactly a scope
+    /// rule and a status line disagreeing about what had just happened.
+    ///
+    /// An empty shoot covers nothing: otherwise "every photograph is in scope" is vacuously true
+    /// and applying to a folder that has not been listed yet would set a shoot-wide style.
+    static func covers(_ scope: [URL], _ allPhotos: [URL]) -> Bool {
+        guard !allPhotos.isEmpty else { return false }
+        let covered = Set(scope.map(\.standardizedFileURL))
+        return allPhotos.allSatisfy { covered.contains($0.standardizedFileURL) }
+    }
 }
 
 enum ShootLookStore {

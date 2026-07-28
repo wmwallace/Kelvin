@@ -74,6 +74,87 @@ final class CandidateCuratorTests: XCTestCase {
         ], count: 3)
         XCTAssertEqual(picked.count, 3, "four near-identical options still beat two")
     }
+
+    // MARK: Resolving a shoot's style against one frame
+    //
+    // This is the rule the canvas and the export must both obey. They disagreed once — the preview
+    // honoured curation and the export did not — so a frame whose style the curator had dropped
+    // showed one recipe and wrote another. Every case below is a way that can go wrong.
+
+    /// The ordinary case: the shoot asked for a style, this frame can take it, so it opens in it.
+    func testAStyleThatSurvivesCurationIsWhatTheFrameOpensIn() {
+        let r = CandidateCurator.resolve(from: [
+            scored("natural", 0.95, contrast: 0),
+            scored("vivid", 0.90, contrast: 30, vibrance: 30, exposure: 0.5)
+        ], requested: "vivid")
+        XCTAssertEqual(r.chosen?.recipe.id, "vivid")
+        XCTAssertTrue(r.honouredRequest)
+    }
+
+    /// The bug, in one test. Dramatic silhouettes this frame and the curator drops it; forcing it
+    /// back in because a folder-wide record named it hands back the one candidate the evaluator has
+    /// already judged unusable.
+    func testAStyleTheQualityFloorDroppedFallsBackToTheEnginesFirstChoice() {
+        let r = CandidateCurator.resolve(from: [
+            scored("natural", 0.95, contrast: 0),
+            scored("dramatic", 0.31, contrast: 40, vibrance: 30, exposure: 1.0)
+        ], requested: "dramatic")
+        XCTAssertEqual(r.chosen?.recipe.id, "natural", "a dropped style must not be forced back in")
+        XCTAssertFalse(r.honouredRequest, "the fallback has to be reported, not shown silently")
+    }
+
+    /// Curation is not a per-candidate verdict, which is why the export cannot get away with
+    /// scoring only the style it was asked for. This one clears the quality floor comfortably and
+    /// is still dropped — for being a near-duplicate of a candidate already chosen.
+    func testAStyleDroppedForBeingANearDuplicateAlsoFallsBack() {
+        let r = CandidateCurator.resolve(from: [
+            scored("natural", 0.96, contrast: 10),
+            scored("rich", 0.95, contrast: 11)          // same look, high score, dropped anyway
+        ], requested: "rich", count: 1)
+        XCTAssertEqual(r.chosen?.recipe.id, "natural")
+        XCTAssertFalse(r.honouredRequest)
+    }
+
+    /// And the third way a style disappears: the pool was deep enough that the slots ran out.
+    func testAStyleBeyondTheLastSlotFallsBack() {
+        let r = CandidateCurator.resolve(from: [
+            scored("natural", 0.95, contrast: 0),
+            scored("vivid", 0.94, contrast: 30, vibrance: 30, exposure: 0.5),
+            scored("cool", 0.93, contrast: -30, vibrance: -30, exposure: -0.5)
+        ], requested: "cool", count: 2)
+        XCTAssertEqual(r.curated.count, 2)
+        XCTAssertEqual(r.chosen?.recipe.id, "natural")
+        XCTAssertFalse(r.honouredRequest)
+    }
+
+    /// A shoot with no look decides nothing, and the engine's own ranking keeps winning — the state
+    /// every folder starts in.
+    func testNoRequestOpensOnTheEnginesFirstChoice() {
+        let r = CandidateCurator.resolve(from: [
+            scored("natural", 0.95, contrast: 0),
+            scored("vivid", 0.90, contrast: 30, vibrance: 30, exposure: 0.5)
+        ], requested: nil)
+        XCTAssertEqual(r.chosen?.recipe.id, "natural")
+        XCTAssertFalse(r.honouredRequest, "nothing was asked for, so nothing was honoured")
+    }
+
+    /// The curated set is exactly what `select` returns — resolving must not quietly reorder or
+    /// re-rank the picker on its way to choosing one.
+    func testResolveOffersExactlyWhatSelectDoes() {
+        let pool = [
+            scored("natural", 0.95, contrast: 0),
+            scored("bad", 0.31, contrast: 40),
+            scored("vivid", 0.90, contrast: 30, vibrance: 30, exposure: 0.5)
+        ]
+        XCTAssertEqual(CandidateCurator.resolve(from: pool, requested: "vivid").curated.map(\.recipe.id),
+                       CandidateCurator.select(from: pool).map(\.recipe.id))
+    }
+
+    func testResolvingAnEmptyPoolChoosesNothing() {
+        let r = CandidateCurator.resolve(from: [], requested: "vivid")
+        XCTAssertNil(r.chosen)
+        XCTAssertFalse(r.honouredRequest)
+    }
 }
 
 /// Divergence has to be able to *see* a white-balance difference, or a look whose whole character

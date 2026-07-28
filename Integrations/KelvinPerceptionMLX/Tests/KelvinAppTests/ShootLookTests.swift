@@ -112,6 +112,121 @@ final class ShootLookTests: XCTestCase {
         XCTAssertEqual(s.applyScope(), [a, c])
     }
 
+    // MARK: What an apply WRITES
+    //
+    // Distinct from what it covers, and the gap between the two was a real bug: `applyScope()`
+    // honoured the Keep flag while the record it produced claimed the whole folder anyway. The
+    // frames the scope left out got the look regardless — silently, because the status line
+    // reported the scope's count and the record is not something anyone can see.
+
+    /// An apply that covers the folder claims the folder. This is the common case and the only one
+    /// allowed to write the shoot-wide style.
+    func testAnApplyOverTheWholeShootBecomesTheShootsStyle() {
+        let a = url("a.ARW"), b = url("b.ARW")
+        let look = ShootLook().applying("vivid", to: [a, b], inShootOf: [a, b])
+        XCTAssertEqual(look.style, "vivid")
+        XCTAssertTrue(look.overrides.isEmpty)
+    }
+
+    /// "Apply this to everything" has to mean everything, or the frames singled out last week
+    /// silently outrank the decision just made.
+    func testAWholeShootApplyClearsOverridesItContradicts() {
+        let a = url("a.ARW"), b = url("b.ARW")
+        let existing = ShootLook(style: "natural", overrides: [a.path: "dramatic"])
+        let look = existing.applying("vivid", to: [a, b], inShootOf: [a, b])
+        XCTAssertEqual(look.style, "vivid")
+        XCTAssertTrue(look.overrides.isEmpty, "an override survived an apply that covered it")
+        XCTAssertEqual(look.style(for: a), "vivid")
+    }
+
+    /// THE BUG. Kept-only narrowed the scope and the record claimed the folder anyway, so every
+    /// reject and every undecided frame quietly got the look while the app reported the keeper
+    /// count. A narrower scope must write per-frame overrides instead.
+    func testAKeptOnlyApplyNeverClaimsTheFramesItLeftOut() {
+        let keeper = url("keeper.ARW"), reject = url("reject.ARW"), undecided = url("u.ARW")
+        let all = [keeper, reject, undecided]
+        let look = ShootLook().applying("vivid", to: [keeper], inShootOf: all)
+
+        XCTAssertNil(look.style, "a kept-only apply must not claim the whole folder")
+        XCTAssertEqual(look.style(for: keeper), "vivid")
+        XCTAssertNil(look.style(for: reject), "a rejected frame was given a look nobody asked for")
+        XCTAssertNil(look.style(for: undecided))
+    }
+
+    /// And a narrower apply leaves what the rest of the shoot already had exactly alone.
+    func testANarrowApplyLeavesTheRestOfTheShootsLookStanding() {
+        let a = url("a.ARW"), b = url("b.ARW")
+        let existing = ShootLook(style: "natural")
+        let look = existing.applying("soft", to: [a], inShootOf: [a, b])
+        XCTAssertEqual(look.style, "natural", "the shoot's existing style was overwritten")
+        XCTAssertEqual(look.style(for: a), "soft")
+        XCTAssertEqual(look.style(for: b), "natural")
+    }
+
+    /// A selection is narrower by definition, and always was — pinned so the fix to the kept-only
+    /// case cannot regress the case that already worked.
+    func testASelectionApplyWritesOverrides() {
+        let a = url("a.ARW"), b = url("b.ARW"), c = url("c.ARW")
+        let look = ShootLook().applying("dramatic", to: [b], inShootOf: [a, b, c])
+        XCTAssertNil(look.style)
+        XCTAssertEqual(look.overrides, [b.path: "dramatic"])
+    }
+
+    /// Paths that spell the same file differently must not write two entries — the same
+    /// normalisation `style(for:)` reads through.
+    func testAnApplyWritesTheCanonicalSpellingOfAPath() {
+        let canonical = URL(fileURLWithPath: "/shoot/a.ARW")
+        let awkward = URL(fileURLWithPath: "/shoot/./a.ARW")
+        let other = url("b.ARW")
+        let look = ShootLook().applying("soft", to: [awkward], inShootOf: [canonical, other])
+        XCTAssertEqual(look.overrides, [canonical.path: "soft"])
+    }
+
+    /// A scope that covers the folder by a different spelling still counts as covering it.
+    func testCoverageIsMeasuredOnCanonicalPathsToo() {
+        let canonical = URL(fileURLWithPath: "/shoot/a.ARW")
+        let awkward = URL(fileURLWithPath: "/shoot/./a.ARW")
+        XCTAssertEqual(ShootLook().applying("soft", to: [awkward], inShootOf: [canonical]).style,
+                       "soft")
+    }
+
+    /// An empty shoot claims nothing. Otherwise "every photo is covered" is vacuously true and an
+    /// apply against a folder that has not been listed yet would set a shoot-wide style.
+    func testAnApplyWithNoShootToApplyToClaimsNothing() {
+        let look = ShootLook().applying("vivid", to: [], inShootOf: [])
+        XCTAssertNil(look.style)
+        XCTAssertTrue(look.overrides.isEmpty)
+    }
+
+    // MARK: What an apply invalidates
+    //
+    // `openPhoto` returns early on a cached session and never reaches `loadPhoto`, which is the
+    // only place a shoot look picks a candidate. So a frame browsed before an apply came back
+    // exactly as it was — canvas showing the old look while export wrote the new one.
+
+    func testApplyingALookDropsTheCachedFramesItCovers() {
+        let a = url("a.ARW"), b = url("b.ARW"), outside = url("c.ARW")
+        let s = state(with: [a, b, outside])
+        XCTAssertEqual(s.staleSessionURLs(coveredBy: [a, b], cached: [a, b, outside]), [a, b],
+                       "a frame the apply covers must be re-read against the new look")
+    }
+
+    /// A hand edit outranks the shoot's look, so nothing about those frames changed — and dropping
+    /// one would spend a decode to arrive at the same picture.
+    func testAHandEditedFrameKeepsItsCachedSession() {
+        let a = url("a.ARW"), edited = url("edited.ARW")
+        let s = state(with: [a, edited])
+        s.editedURLs = [edited]
+        XCTAssertEqual(s.staleSessionURLs(coveredBy: [a, edited], cached: [a, edited]), [a])
+    }
+
+    /// Frames outside the scope were not touched by the apply and must not pay for a re-read.
+    func testAFrameOutsideTheScopeKeepsItsCachedSession() {
+        let a = url("a.ARW"), b = url("b.ARW")
+        let s = state(with: [a, b])
+        XCTAssertTrue(s.staleSessionURLs(coveredBy: [a], cached: [b]).isEmpty)
+    }
+
     // MARK: Selecting in the strip
 
     /// A plain click is still "show me this one". Anything else and the strip stops being a way to

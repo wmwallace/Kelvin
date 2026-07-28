@@ -60,9 +60,10 @@ struct WriteJob: @unchecked Sendable {
 /// One frame's stage timings, in seconds.
 struct FrameTiming {
     var decode = 0.0, proxy = 0.0, perceive = 0.0, statistics = 0.0
-    var proxyMasks = 0.0, engine = 0.0, fullResMasks = 0.0, render = 0.0, write = 0.0
+    var proxyMasks = 0.0, engine = 0.0, curate = 0.0, fullResMasks = 0.0, render = 0.0, write = 0.0
     var total: Double {
-        decode + proxy + perceive + statistics + proxyMasks + engine + fullResMasks + render + write
+        decode + proxy + perceive + statistics + proxyMasks + engine + curate
+            + fullResMasks + render + write
     }
 }
 
@@ -149,11 +150,32 @@ if first == "bench-export" {
 
             let stats = try clock(&t.statistics) { try ImageStatistics.compute(proxy) }
             let measured = clock(&t.proxyMasks) { LocalMasks.measure(in: proxy) }
-            let recipe = clock(&t.engine) {
-                RecipeEngine.candidate(perception: perception, statistics: stats, style: style,
-                                       subjectLuma: measured.subjectLuma,
-                                       skyLuma: measured.skyLuma,
-                                       iso: ExifReader.iso(url: url))
+            // THE WHOLE CANDIDATE SET, then curate — because that is what the app's export does.
+            //
+            // This used to build the requested style alone, which is exactly the divergence that
+            // made the app's export disagree with its own canvas: the curator drops styles that are
+            // wrong for a frame, and a benchmark that skips the curator measures a path nobody
+            // ships. `curate` is timed separately so the cost of getting it right is visible rather
+            // than buried in `engine`.
+            let iso = ExifReader.iso(url: url)
+            let generated = clock(&t.engine) {
+                RecipeEngine.candidates(perception: perception, statistics: stats,
+                                        subjectLuma: measured.subjectLuma,
+                                        skyLuma: measured.skyLuma, iso: iso)
+            }
+            let recipe = clock(&t.curate) { () -> Recipe in
+                var scored: [CandidateCurator.Scored] = []
+                for candidate in generated {
+                    let preview = Renderer.render(proxy, with: candidate, maskBitmaps: measured.bitmaps)
+                    guard let score = AestheticEvaluator.score(rendered: preview) else { continue }
+                    scored.append(.init(recipe: candidate, score: score))
+                }
+                if let chosen = CandidateCurator.resolve(from: scored, requested: style.id).chosen {
+                    return chosen.recipe
+                }
+                return RecipeEngine.candidate(perception: perception, statistics: stats, style: style,
+                                              subjectLuma: measured.subjectLuma,
+                                              skyLuma: measured.skyLuma, iso: iso)
             }
             // Full-resolution masks only when the recipe actually carries masks — same condition
             // the export loop uses, and it is a large part of the cost when it fires.
@@ -201,6 +223,7 @@ if first == "bench-export" {
         let stages: [(String, (FrameTiming) -> Double)] = [
             ("decode", \.decode), ("proxy", \.proxy), ("perceive", \.perceive),
             ("statistics", \.statistics), ("masks (proxy)", \.proxyMasks), ("engine", \.engine),
+            ("curate", \.curate),
             ("masks (full-res)", \.fullResMasks), ("render", \.render), ("write", \.write),
         ]
         print("\n── per-frame cost ──")

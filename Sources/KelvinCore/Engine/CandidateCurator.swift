@@ -87,6 +87,40 @@ public enum CandidateCurator {
         return chosen
     }
 
+    /// The curated set, and which of them a requested style actually resolves to.
+    public struct Resolution: Sendable {
+        /// What to offer, in the engine's order. The picker shows exactly this.
+        public let curated: [Scored]
+        /// What to open in. Nil only when there was nothing to curate.
+        public let chosen: Scored?
+        /// Whether the requested style survived curation. False means `chosen` is the fallback,
+        /// which is worth *saying* rather than quietly showing a different look — see `resolve`.
+        public let honouredRequest: Bool
+    }
+
+    /// Curate, then answer the question a shoot look asks: **which of these does this frame open in?**
+    ///
+    /// **This rule has to be applied identically in the preview and in the export, and the one time
+    /// it wasn't, they disagreed.** The reasoning below was written as a comment beside the preview
+    /// and never carried into the export path, so a frame whose requested style the curator had
+    /// dropped showed one recipe on the canvas and wrote a different one to disk. It lives here now
+    /// so there is one copy of it and both callers get it by construction.
+    ///
+    /// The fallback is the point. The curator drops styles that are wrong for a photograph —
+    /// Dramatic on a backlit sunset — and forcing one back in because a folder-wide record named it
+    /// would hand back the single candidate the evaluator has already judged unusable. So a frame
+    /// the shoot's style does not suit falls back to the engine's own first choice, and the caller
+    /// says so.
+    public static func resolve(from candidates: [Scored],
+                               requested: String?,
+                               count: Int = 4) -> Resolution {
+        let curated = select(from: candidates, count: count)
+        let match = requested.flatMap { id in curated.first { $0.recipe.id == id } }
+        return Resolution(curated: curated,
+                          chosen: match ?? curated.first,
+                          honouredRequest: match != nil)
+    }
+
     /// How far apart two candidates look, in the units the recipe is written in. Contrast and
     /// colour dominate what the eye reads as "a different look", so they carry the most weight;
     /// exposure is scaled up because a stop is a much bigger visual step than a point of contrast.

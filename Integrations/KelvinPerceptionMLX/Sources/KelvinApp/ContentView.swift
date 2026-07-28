@@ -532,10 +532,10 @@ final class AppState: ObservableObject {
     /// is written next to anyone's originals; the strip and the open photo simply resolve the style
     /// against each frame's own histogram from here on. Export is what makes files.
     ///
-    /// With frames selected in the strip, the look lands on those frames as overrides and the rest
-    /// of the shoot keeps whatever it had. With nothing selected, it becomes the shoot's style and
-    /// clears any override it contradicts — "apply this to everything" has to mean everything, or
-    /// the frames you singled out last week silently outrank the decision you just made.
+    /// An apply that covers the whole folder becomes the shoot's style and clears any override it
+    /// contradicts. Anything narrower — a strip selection, or the Keep filter with nothing
+    /// selected — lands as per-frame overrides and leaves the rest of the shoot alone. See
+    /// `ShootLook.applying(_:to:inShootOf:)`, which is where that rule lives and is tested.
     func applyLookToShoot() {
         guard let folder = currentShootFolder else {
             statusMessage = "Open a shoot first — a look is applied to the folder you are looking at"
@@ -547,14 +547,10 @@ final class AppState: ObservableObject {
             return
         }
 
-        var look = shootLook ?? ShootLook()
         let scope = applyScope()
-        if selectedPhotos.isEmpty {
-            look.style = styleId
-            look.overrides = [:]
-        } else {
-            for url in scope { look.overrides[url.standardizedFileURL.path] = styleId }
-        }
+        let coversWholeShoot = ShootLook.covers(scope, folderPhotos)
+        var look = (shootLook ?? ShootLook())
+            .applying(styleId, to: scope, inShootOf: folderPhotos)
         look.appliedAt = ISO8601DateFormatter().string(from: Date())
         ShootLookStore.save(look, for: folder)
         shootLook = look
@@ -564,9 +560,34 @@ final class AppState: ObservableObject {
         // contradicting the strip until you navigated away and back. Only when it is in scope, and
         // never over an edit somebody made by hand — that is the one thing a shoot look never wins
         // against, and silently discarding it here would be the worst version of this feature.
-        if let open = imageURL, scope.contains(open), !isTouched,
-           candidates.contains(where: { $0.id == styleId }) {
-            selectCandidate(id: styleId)
+        //
+        // Keyed on `loadedURL`, not `imageURL`: `candidates` and `isTouched` describe the frame
+        // whose pixels are actually in memory, and mid-decode those are two different photographs.
+        if let open = loadedURL, scope.contains(open), !isTouched {
+            if candidates.contains(where: { $0.id == styleId }) {
+                selectCandidate(id: styleId)
+            } else if let first = candidates.first {
+                // The curator dropped this style for THIS frame. Fall back to the engine's own
+                // first choice — the answer reopening the photo would give — rather than leaving
+                // the previous look standing, which is neither what was asked for nor what the
+                // export will write.
+                selectCandidate(id: first.id)
+            }
+        }
+
+        // EVERY OTHER FRAME IN SCOPE THAT IS SITTING IN THE SESSION CACHE HAS TO GO.
+        //
+        // `openPhoto` returns early on a cached session and never reaches `loadPhoto`, which is the
+        // only place the shoot look picks a candidate. So a frame browsed BEFORE this apply would
+        // be restored exactly as it was — canvas showing the old look, export writing the new one,
+        // and no way to tell from the strip which you were going to get.
+        //
+        // Hand-edited frames keep their session: a hand edit outranks the look, so nothing about
+        // them changed, and dropping one would spend a decode to arrive at the same picture.
+        let stale = staleSessionURLs(coveredBy: scope, cached: cachedSessionURLs)
+        for url in stale {
+            sessions.removeValue(forKey: url)
+            sessionOrder.removeAll { $0 == url }
         }
 
         // Start reading the frames nobody has opened yet. Applying a look is the moment someone
@@ -574,11 +595,19 @@ final class AppState: ObservableObject {
         // frame can be spent without anybody waiting on it.
         readShootAhead()
 
-        let base = selectedPhotos.isEmpty
-            ? "This shoot is in \(style.label) — \(scope.count) photo\(scope.count == 1 ? "" : "s"), "
-                + "each adapted to its own frame"
-            : "\(scope.count) selected frame\(scope.count == 1 ? "" : "s") set to \(style.label) — "
-                + "the rest of the shoot is unchanged"
+        // Says which of the three scopes actually happened, because they are three different
+        // promises. "This shoot is in Vivid" over a kept-only apply is a lie the record no longer
+        // tells and the status line must not either.
+        let n = scope.count, s = scope.count == 1 ? "" : "s"
+        let base: String
+        if coversWholeShoot {
+            base = "This shoot is in \(style.label) — \(n) photo\(s), each adapted to its own frame"
+        } else if selectedPhotos.isEmpty {
+            base = "\(n) kept photo\(s) set to \(style.label) — rejected and undecided frames are "
+                + "unchanged"
+        } else {
+            base = "\(n) selected frame\(s) set to \(style.label) — the rest of the shoot is unchanged"
+        }
         statusMessage = shootReadTotal > 0
             ? base + " · reading \(shootReadTotal) of them now, so export doesn't have to"
             : base + ". Export edited writes the files"
@@ -682,22 +711,30 @@ final class AppState: ObservableObject {
     /// different things depending on whether anything is selected, and a control that does not say
     /// which is how someone restyles four hundred frames meaning to restyle four.
     var applyButtonLabel: String {
-        selectedPhotos.isEmpty
-            ? "Apply to shoot"
-            : "Apply to \(selectedPhotos.count) selected"
+        let scope = applyScope()
+        if !selectedPhotos.isEmpty { return "Apply to \(selectedPhotos.count) selected" }
+        // "Apply to shoot" over a Kept-only scope names a folder and touches a fraction of it.
+        if !ShootLook.covers(scope, folderPhotos) { return "Apply to \(scope.count) kept" }
+        return "Apply to shoot"
     }
 
     var applyButtonHelp: String {
         let style = selectedCandidateId.flatMap { id in
             CandidateStyle.all.first { $0.id == id }
         }?.label ?? "the chosen look"
-        let n = applyScope().count
-        return selectedPhotos.isEmpty
-            ? "Put \(style) on all \(n) photo\(n == 1 ? "" : "s") in this shoot. Each frame is read "
-                + "and corrected on its own — the style is adapted, never copied. Nothing is written "
-                + "until you export."
-            : "Put \(style) on just the \(n) selected frame\(n == 1 ? "" : "s"). The rest of the "
-                + "shoot keeps the look it has."
+        let scope = applyScope()
+        let n = scope.count, s = n == 1 ? "" : "s"
+        let adapted = " Each frame is read and corrected on its own — the style is adapted, never "
+            + "copied. Nothing is written until you export."
+        if !selectedPhotos.isEmpty {
+            return "Put \(style) on just the \(n) selected frame\(s). The rest of the shoot keeps "
+                + "the look it has."
+        }
+        if !ShootLook.covers(scope, folderPhotos) {
+            return "Put \(style) on just the \(n) frame\(s) flagged Keep. Rejected and undecided "
+                + "frames keep the look they have."
+        }
+        return "Put \(style) on all \(n) photo\(s) in this shoot." + adapted
     }
 
     // MARK: Strip selection
@@ -1535,6 +1572,22 @@ final class AppState: ObservableObject {
     private var sessions: [URL: PhotoSession] = [:]
     private var sessionOrder: [URL] = []
     private static let maxSessions = 8
+
+    /// Which photographs are currently held in the cache. Read-only on purpose — `openPhoto` and
+    /// `stashCurrentSession` are the only things that may write it.
+    var cachedSessionURLs: Set<URL> { Set(sessions.keys) }
+
+    /// The cached frames an apply over `scope` has to throw away, so they are re-read against the
+    /// look that was just applied rather than restored as they were under the old one.
+    ///
+    /// Pure over the keys it is handed, so the rule is checkable without decoding a photograph.
+    /// Two frames are deliberately spared: the one whose pixels are loaded (the apply updates it in
+    /// place, and re-reading it would throw away a decode someone is looking at), and anything
+    /// carrying a hand edit, which outranks the shoot's look and is therefore unaffected by it.
+    func staleSessionURLs(coveredBy scope: [URL], cached: Set<URL>) -> Set<URL> {
+        let covered = Set(scope)
+        return cached.filter { covered.contains($0) && $0 != loadedURL && !editedURLs.contains($0) }
+    }
     @Published private var thumbnails: [URL: NSImage] = [:]
     /// URLs whose thumbnail is being fetched, so a redrawn strip doesn't queue the same work twice.
     private var thumbnailsInFlight: Set<URL> = []
@@ -2342,7 +2395,13 @@ final class AppState: ObservableObject {
             guard imageURL == url else { return }
             let scored = built.scored
             let previews = built.previews
-            let curated = CandidateCurator.select(from: scored, count: 4)
+            // THE SHOOT'S LOOK DECIDES WHICH CANDIDATE OPENS, when the shoot is in one — and the
+            // rule for that, including what happens when the curator drops the style, lives in
+            // `CandidateCurator.resolve` so the export path resolves it the same way. It used to
+            // live here as a comment, and the export path did not honour it.
+            let wanted = effectiveStyle(for: url)
+            let resolution = CandidateCurator.resolve(from: scored, requested: wanted, count: 4)
+            let curated = resolution.curated
             self.candidates = curated.compactMap { item in
                 let key = item.recipe.id ?? ""
                 guard let image = previews[key] else { return nil }
@@ -2353,21 +2412,14 @@ final class AppState: ObservableObject {
                     previewImage: image)
             }
             let models = self.candidates
-            // THE SHOOT'S LOOK DECIDES WHICH CANDIDATE OPENS, when the shoot is in one.
-            //
             // This is what makes applying a look to a folder mean anything: the style was chosen
             // once, and every frame resolves it against its own histogram, its own scene reading and
             // its own masks — which is exactly what `candidates` already are, one per style, built
             // from THIS photograph. So honouring the shoot look is choosing among them, not
             // replaying somebody else's numbers.
-            //
-            // Falls back to the engine's own ranking when the shoot has no look, and also when it
-            // asks for a style the curator did not offer for this frame: the curator drops styles
-            // that are wrong for a photo (Dramatic on a backlit sunset), and forcing one back in
-            // because a folder-wide record named it would hand back the one candidate the evaluator
-            // already judged unusable.
-            let wanted = effectiveStyle(for: url)
-            let shootStyle = wanted.flatMap { id in models.first { $0.id == id } }
+            let shootStyle = resolution.honouredRequest
+                ? models.first { $0.id == resolution.chosen?.recipe.id }
+                : nil
             if let shootStyle { selectCandidate(id: shootStyle.id) }
             else if let first = models.first { selectCandidate(id: first.id) }
 
@@ -3675,13 +3727,18 @@ final class AppState: ObservableObject {
             } else if let styleId = effectiveStyle(for: url),
                       let style = CandidateStyle.all.first(where: { $0.id == styleId }) {
                 statusMessage = "Reading photo \(index + 1) of \(targets.count)…"
+                let adapted: Recipe
                 do {
-                    recipe = try await adaptedRecipe(for: url, style: style)
+                    adapted = try await adaptedRecipe(for: url, style: style)
                 } catch {
                     failed += 1; continue
                 }
+                recipe = adapted
                 wasAdapted = true
-                lookName = style.label
+                // The recipe's OWN label, not the requested style's. They differ exactly when the
+                // curator dropped the shoot's style for this frame and it fell back — and a file
+                // named for a look it was not given is a lie that outlives the export.
+                lookName = adapted.label ?? style.label
             } else {
                 continue
             }
@@ -3786,6 +3843,21 @@ final class AppState: ObservableObject {
     /// look does not copy sliders. Frame 12 was shot into the sun and frame 13 was not; both are
     /// "Natural", and this is where Natural comes out different for each of them.
     ///
+    /// **It resolves the style the way the canvas does, curator and all.** This used to build the
+    /// requested `CandidateStyle` unconditionally while `loadPhoto` only selected it if it survived
+    /// `CandidateCurator` — so on a frame the curator had dropped the style for, the preview showed
+    /// one recipe and the export wrote another, with nothing on screen to say so. Both paths now go
+    /// through `CandidateCurator.resolve`, and the returned recipe carries its own label so the
+    /// filename names the look that was actually written.
+    ///
+    /// **KNOWN, UNFIXED: it measures at a different resolution from the canvas.** `loadPhoto`
+    /// computes statistics, masks and candidate scores on the 1200 px EDIT proxy; this measures on
+    /// the 768 px perception proxy. So the two agree on the *rule* and can still land differently
+    /// on a frame sitting near the quality floor or the divergence threshold — and the recipe's own
+    /// numbers can differ slightly for the same reason, which predates the curation split above.
+    /// Closing it means changing what export measures, which changes the pixels of every existing
+    /// shoot look, so it needs eval-harness evidence rather than a judgement call (CLAUDE.md).
+    ///
     /// Expensive on purpose — a decode, a perception pass and two Vision passes per photograph — so
     /// it runs at export, once, and never while someone is browsing.
     private func adaptedRecipe(for url: URL, style: CandidateStyle) async throws -> Recipe {
@@ -3818,9 +3890,29 @@ final class AppState: ObservableObject {
             // Per-photo subject + sky masks — each frame gets its own local decisions, measured on
             // its own proxy rather than inherited from whatever was open when the look was chosen.
             let m = LocalMasks.measure(in: work.proxy)
+            let iso = ExifReader.iso(url: url)
+            let recipes = RecipeEngine.candidates(perception: perception, statistics: stats,
+                                                  subjectLuma: m.subjectLuma, skyLuma: m.skyLuma,
+                                                  iso: iso)
+            // The whole set has to be built and scored, not just the one that was asked for.
+            // Curation is not a per-candidate verdict: a style is dropped by the quality floor, OR
+            // by being too close to one already chosen, OR by the four-slot cap — and the last two
+            // are answerable only with the rest of the pool in hand. Rendering the requested style
+            // alone and checking its score would agree with the canvas most of the time, which is
+            // the worst kind of nearly-right.
+            var scored: [CandidateCurator.Scored] = []
+            for recipe in recipes {
+                let rendered = Renderer.render(work.proxy, with: recipe, maskBitmaps: m.bitmaps)
+                guard let score = AestheticEvaluator.score(rendered: rendered) else { continue }
+                scored.append(.init(recipe: recipe, score: score))
+            }
+            let resolution = CandidateCurator.resolve(from: scored, requested: style.id, count: 4)
+            if let chosen = resolution.chosen { return chosen.recipe }
+            // Nothing scored at all — a frame the evaluator could not read. Fall back to building
+            // the requested style directly rather than failing the export: the photographer asked
+            // for this look, and the curator having nothing to say is not a reason to skip a file.
             return RecipeEngine.candidate(perception: perception, statistics: stats, style: style,
-                                          subjectLuma: m.subjectLuma, skyLuma: m.skyLuma,
-                                          iso: ExifReader.iso(url: url))
+                                          subjectLuma: m.subjectLuma, skyLuma: m.skyLuma, iso: iso)
         }.value
     }
 
