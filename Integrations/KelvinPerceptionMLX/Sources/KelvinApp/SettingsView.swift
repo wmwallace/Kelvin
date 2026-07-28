@@ -48,7 +48,7 @@ private struct GeneralSettings: View {
                        isOn: $appState.includeFolderOnOpen)
                 Text(appState.includeFolderOnOpen
                      ? "The other photos are listed in the filmstrip. Nothing is read from them until the strip is open."
-                     : "Only the photo you choose — no filmstrip, no arrow keys. Batch apply is unaffected; it asks for its own folder.")
+                     : "Only the photo you choose — no filmstrip, no arrow keys, and no way to apply a look to the shoot.")
                     .font(.caption).foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             } header: {

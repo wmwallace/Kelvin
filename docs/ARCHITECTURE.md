@@ -106,7 +106,8 @@ Fixed early so regressions are visible.
 | Cold RAW decode, 45 MP | < 1.5 s | Core Image, cached after |
 | Perception pass | < 2 s | 768px proxy, 4-bit model. Currently missed: D-model-3 measured ~4.5–6 s |
 | Full analysis, first open | < 4 s | decode + proxy + perception + 4 candidates |
-| Batch apply, 100 images | < 60 s | GPU-bound, parallel, no perception re-run |
+| Apply a look to a shoot | < 100 ms | one JSON record; nothing is rendered (D13) |
+| Export 100 look-carried frames | perception-bound | a decode + perception pass per frame, by design |
 
 The first row is the one users feel. Protect it above all others.
 
