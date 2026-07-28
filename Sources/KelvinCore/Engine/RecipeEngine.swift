@@ -209,13 +209,42 @@ public enum RecipeEngine {
         // mask because the global contrast control cannot do it — `CIColorControls` pivots at 0.5
         // and a sky sits near 0.71, so global contrast makes a sky brighter.
         //
-        // Held deliberately short of what the eye will take. A grad-ND is a half to a full stop in
-        // the hand; `skyDepth: 1.0` here is 0.45 EV, and every style but Dramatic is well under
-        // that. The number to argue about is this multiplier, and arguing about it wants the eval
-        // harness and a sky-region metric, neither of which can currently see a sky at all.
+        // **1.4 EV at `skyDepth: 1.0`, and it used to be 0.45.** The old value was chosen to be
+        // "deliberately short of what the eye will take" — a grad-ND is a half to a full stop in
+        // the hand — and that reasoning was right about the intent and wrong about the arithmetic,
+        // because an EV written into a mask is not an EV that reaches the picture. It is scaled by
+        // the mask's alpha (measured mean 0.55 on real coastal frames, and it was 0.19 before
+        // `SkyMask` learned to see an overcast), and it lands on top of the style's own global
+        // layer, which for these styles LIFTS a sky.
+        //
+        // Measured on 8 Cannon Beach frames with `kelvin-cli sky-metrics --perception`, which
+        // separates what the global half of a recipe does to a sky from what the mask then does:
+        //
+        //   Dramatic, at 0.45:  global +0.155 luma, mask −0.040 → net +0.115, sky spread 0.112
+        //   Dramatic, at 1.40:  global +0.155 luma, mask −0.099 → net +0.056, sky spread 0.166
+        //   the untouched original sky:                                        spread 0.175
+        //
+        // So the style whose whole claim is a graduated ND was flattening the sky it was supposed
+        // to be giving structure to, and the lever was not wrong in direction — the mask column is
+        // correctly ordered by `skyDepth` at every setting tried — it was about four times short of
+        // its own style's global lift.
+        //
+        // **1.4 EV in the mask is 0.41 of a stop in the picture**, measured, because alpha scales
+        // it and the contrast the same mask carries partly offsets it. That ratio is worth knowing
+        // before touching this number again: the parameter is about three times the effect, so
+        // reading it as stops overstates the move by that much. It is why the restraint test now
+        // measures a render instead of asserting on this line.
+        //
+        // The clamp moved with it (−0.6…0.4 → −1.8…1.2, the same ratio): at the old ceiling
+        // Dramatic saturated before it could express `skyDepth: 1.0` at all.
+        //
+        // Chosen by the owner from the measured sweep, on one overcast coastal shoot. That is a
+        // thin evidence base for retuning every style's sky, and it is the reason the numbers above
+        // are written down: re-run the sweep on a clear-sky and a golden-hour shoot before
+        // defending them.
         if style.skyDepth != 0 {
-            adj["exposure_ev"] = roundedClamp((adj["exposure_ev"] ?? 0) - style.skyDepth * 0.45,
-                                              to: -0.6...0.4, step: 0.01)
+            adj["exposure_ev"] = roundedClamp((adj["exposure_ev"] ?? 0) - style.skyDepth * 1.4,
+                                              to: -1.8...1.2, step: 0.01)
             // Contrast in a sky is cloud structure. A style that OPENS a sky (negative depth)
             // softens that structure rather than inverting it, so the negative side is gentler.
             let bite = style.skyDepth > 0 ? style.skyDepth * 16 : style.skyDepth * 8
@@ -230,10 +259,24 @@ public enum RecipeEngine {
         adj = adj.filter { $0.value != 0 }
         guard !adj.isEmpty else { return nil }
 
-        // A generous feather keeps the horizon soft; slightly hold back when only defogging.
+        // FEATHER 16, DOWN FROM 45, and it is the same arithmetic that took the subject mask from
+        // 35 to 6. `Renderer.prepareMask` blurs by `feather/100 × minEdge × 0.06` — a fraction of
+        // the FRAME, not of the mask's own resolution. At 45 on a 60 MP frame that is 171 px, and
+        // `SkyMask` classifies on a 160-cell grid whose cells are 59 px at that size: the mask was
+        // being blurred across nearly three of its own cells.
+        //
+        // A horizon genuinely is a gradual transition, which is what justified 45 and is why the
+        // shared 0.06 constant was left alone. But a sea stack standing up into the sky is not a
+        // horizon, and there the same blur pulls the undarkened rock into the mask and rings it
+        // with a halo of sky that did not get the pull. Invisible at 0.45 EV; plainly visible at
+        // 1.4, which is how it was found — see the renders in the commit that raised the lever.
+        //
+        // 16 is one grid cell (61 px against 59), the radius that smooths the upscale's
+        // stair-stepping and stops. Tried and rejected: 6, which is a third of a cell and lets the
+        // grid show through as visible mottling across a smooth overcast.
         return Mask(
             id: "sky", type: "sky", source: "segmentation", invert: false,
-            feather: 45, opacity: (veiled && !blown) ? 0.85 : 1.0, adjustments: adj
+            feather: 16, opacity: (veiled && !blown) ? 0.85 : 1.0, adjustments: adj
         )
     }
 

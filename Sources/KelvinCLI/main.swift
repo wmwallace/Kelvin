@@ -949,6 +949,7 @@ case "sky-metrics":
     var noSkyRegion = 0, noMaskAtAll = 0, groundEaten = 0, maskWithoutSky = 0
     // style id → (readings, divergence vs the unedited frame)
     var styleReadings: [String: [SkyMetrics.Reading]] = [:]
+    var styleGlobalOnly: [String: [SkyMetrics.Reading]] = [:]
     var styleDivergence: [String: [SkyMetrics.Divergence]] = [:]
     var styleLabels: [String: String] = [:]
     var styleOrder: [String] = []
@@ -1032,6 +1033,14 @@ case "sky-metrics":
             if let r = (try? SkyMetrics.read(out, in: region)) ?? nil {
                 styleReadings[id, default: []].append(r)
             }
+            // THE SAME RECIPE WITH ITS MASKS WITHHELD. `Renderer` skips any mask it is handed no
+            // bitmap for, so this is the recipe's global half alone — and the difference between
+            // the two is exactly what the sky mask contributed. Without this split, "the sky came
+            // out brighter" cannot be attributed: a lever that is doing nothing and a lever that is
+            // doing its job against a global layer doing more look identical in the total.
+            if let g = (try? SkyMetrics.read(Renderer.render(image, with: recipe), in: region)) ?? nil {
+                styleGlobalOnly[id, default: []].append(g)
+            }
             if let d = (try? SkyMetrics.compare(image, out, in: region)) ?? nil {
                 styleDivergence[id, default: []].append(d)
             }
@@ -1065,14 +1074,21 @@ case "sky-metrics":
 
     if perception != nil && !styleOrder.isEmpty {
         print("")
-        print("style        sky luma  spread   Δluma    sky |Δ|  frame |Δ|")
+        // Δluma is split into what the recipe's GLOBAL half did to the sky and what the sky MASK
+        // then did on top of it, because the two are separate arguments. A style whose global
+        // column is large and positive and whose mask column is small is a style being carried
+        // along by its own contrast curve — which is the whole complaint about grad-ND levers here.
+        print("style        sky luma  spread   Δluma   ← global   ← mask   sky |Δ|  frame |Δ|")
         for id in styleOrder {
             let rs = styleReadings[id] ?? [], ds = styleDivergence[id] ?? []
             guard !rs.isEmpty else { continue }
-            print(String(format: "%@ %8.3f %7.3f %+8.3f %9.3f %9.3f",
+            let gs = styleGlobalOnly[id] ?? []
+            let globalDelta = gs.isEmpty ? 0 : mean(gs.map(\.meanLuma)) - mean(readings.map(\.meanLuma))
+            let maskDelta = gs.isEmpty ? 0 : mean(rs.map(\.meanLuma)) - mean(gs.map(\.meanLuma))
+            print(String(format: "%@ %8.3f %7.3f %+8.3f %+9.3f %+8.3f %9.3f %9.3f",
                          (styleLabels[id] ?? id).padding(toLength: 11, withPad: " ", startingAt: 0),
                          mean(rs.map(\.meanLuma)), mean(rs.map(\.spread)),
-                         mean(ds.map(\.skyMeanLumaDelta)),
+                         mean(ds.map(\.skyMeanLumaDelta)), globalDelta, maskDelta,
                          mean(ds.map(\.skyMeanAbsDelta)), mean(ds.map(\.frameMeanAbsDelta))))
         }
         print("")

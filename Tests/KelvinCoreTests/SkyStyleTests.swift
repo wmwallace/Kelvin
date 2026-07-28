@@ -153,16 +153,60 @@ final class SkyStyleTests: XCTestCase {
 
     /// A grad-ND is half a stop to a stop in the hand. Nothing here should exceed that — the whole
     /// point of doing this through a mask is that it stays a photographic move.
+    ///
+    /// **This used to assert on the EV written into the mask, and that is the wrong quantity.** An
+    /// EV in a mask is not an EV in the picture: it is scaled by the mask's alpha, blended, and
+    /// partly offset by the contrast the same mask carries. Measured, `skyDepth: 1.0` at 1.4 EV
+    /// delivers **0.31 of a stop** on the fixture below and **0.41** on real Cannon Beach frames —
+    /// so the parameter is roughly three times the effect, and an assertion on the parameter says
+    /// almost nothing about whether the result is a photographic move.
+    ///
+    /// So the bound below is on the parameter as a sanity rail, and the test underneath it measures
+    /// what actually reaches the pixels.
     func testNoStyleTakesTheSkyFurtherThanAGradFilterWould() throws {
         for style in CandidateStyle.all {
             guard let adj = sky(style)?.adjustments else { continue }
             if let ev = adj["exposure_ev"] {
-                XCTAssertLessThanOrEqual(abs(ev), 0.6, "\(style.id) moved the sky \(ev) EV")
+                XCTAssertLessThanOrEqual(abs(ev), 1.8, "\(style.id) moved the sky \(ev) EV")
             }
             if let sat = adj["saturation"] {
                 XCTAssertLessThanOrEqual(sat, 36, "\(style.id) pushed sky saturation to \(sat)")
             }
         }
+    }
+
+    /// What the lever actually delivers, in the units a photographer would state it in.
+    ///
+    /// Two-sided on purpose. The original bug was a lever that did NOTHING — every candidate
+    /// emitted a byte-identical sky mask — so a floor guards against it going inert again, and a
+    /// ceiling guards against a grad filter becoming a special effect. A solid synthetic sky gives
+    /// the mask close to full alpha, which is the strongest the lever can ever be: no photograph
+    /// gets more than this.
+    func testTheSkyPullThatReachesThePixelsIsAGradFilter() throws {
+        let image = TestSupport.pixels(size: 240) { _, y in
+            y < 120 ? (150, 180, 230) : (60, 110, 60)
+        }
+        let measured = LocalMasks.measure(in: image)
+        XCTAssertNotNil(measured.bitmaps["sky"], "no sky mask, so this measures nothing")
+
+        let recipe = RecipeEngine.candidate(perception: landscape(), statistics: stats(),
+                                            style: .dramatic, skyLuma: measured.skyLuma ?? 0.68)
+        let region = try SkyMetrics.referenceRegion(in: image)
+        let withMask = try XCTUnwrap(
+            SkyMetrics.read(Renderer.render(image, with: recipe, maskBitmaps: measured.bitmaps),
+                            in: region))
+        let globalOnly = try XCTUnwrap(
+            SkyMetrics.read(Renderer.render(image, with: recipe), in: region))
+
+        // Display-referred luma, so a stop is a factor of 2^(1/2.2) ≈ 1.37 rather than 2.
+        // Measured −0.31 here and −0.41 on real frames; the bounds are wide enough that a
+        // recalibration does not have to touch this test, and tight enough that a lever going
+        // inert (the original bug) or turning into an effect both fail it.
+        let delivered = log2(pow(withMask.meanLuma / globalOnly.meanLuma, 2.2))
+        XCTAssertLessThan(delivered, -0.15,
+                          "the sky lever delivers only \(delivered) stops — it has gone inert again")
+        XCTAssertGreaterThan(delivered, -1.0,
+                             "the sky lever delivers \(delivered) stops, which is no longer a filter")
     }
 }
 
@@ -202,9 +246,15 @@ final class SubjectFeatherTests: XCTestCase {
         XCTAssertGreaterThan(try XCTUnwrap(backlitPortrait()).feather, 2)
     }
 
-    /// The sky keeps its generous feather — a horizon genuinely is a gradual transition, and it is
-    /// why the shared constant in the renderer was left alone.
-    func testTheSkyKeepsItsSoftHorizon() throws {
+    /// The sky's feather is one grid cell of its own mask — no more, no less.
+    ///
+    /// This asserted `> 30` when the sky mask carried 45, on the reasoning that a horizon genuinely
+    /// is a gradual transition. That reasoning holds for a horizon and fails for a sea stack: the
+    /// feather is a fraction of the FRAME, so 45 blurs 171 px on a 60 MP export while `SkyMask`'s
+    /// own cells are 59 px there — nearly three cells, which rings anything standing up into the
+    /// sky with a halo of undarkened sky. Both bounds below are that arithmetic: enough to smooth
+    /// one cell's stair-stepping, not enough to reach past it.
+    func testTheSkyFeatherIsAboutOneMaskCell() throws {
         let p = Perception(
             scene: .landscape,
             subject: Perception.Subject(present: false, type: .none, count: .none,
@@ -217,6 +267,12 @@ final class SubjectFeatherTests: XCTestCase {
             highlightLevel: 0.85, whitePoint: 0.97, highlightClip: 0, shadowClip: 0,
             chromaA: 0, chromaB: 0)
         let sky = try XCTUnwrap(RecipeEngine.skyMask(p, s, skyLuma: 0.68, style: .dramatic))
-        XCTAssertGreaterThan(sky.feather, 30)
+        // radius = feather/100 × minEdge × 0.06, against a 160-cell grid on a 6336 px short edge.
+        let radiusOn60MP = sky.feather / 100.0 * 6336.0 * 0.06
+        let cellOn60MP = 9504.0 / 160.0
+        XCTAssertGreaterThan(radiusOn60MP, cellOn60MP * 0.6,
+                             "\(Int(radiusOn60MP)) px will not smooth a \(Int(cellOn60MP)) px cell")
+        XCTAssertLessThan(radiusOn60MP, cellOn60MP * 1.5,
+                          "\(Int(radiusOn60MP)) px reaches past the cell — that is the halo")
     }
 }
