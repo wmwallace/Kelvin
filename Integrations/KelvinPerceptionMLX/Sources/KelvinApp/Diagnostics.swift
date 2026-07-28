@@ -125,6 +125,15 @@ enum MainWork {
         return out
     }
 
+    /// For work that happened somewhere else and is being reported back — a detached render, say,
+    /// whose duration is only known off the main actor.
+    static func record(_ label: String, ms: Double) {
+        guard HitchMonitor.enabled else { return }
+        var t = totals[label] ?? (0, 0, 0)
+        t.n += 1; t.ms += ms; t.worst = max(t.worst, ms)
+        totals[label] = t
+    }
+
     static func report() {
         guard HitchMonitor.enabled else { return }
         for (label, t) in totals.sorted(by: { $0.value.ms > $1.value.ms }) {
@@ -133,6 +142,30 @@ enum MainWork {
             FileHandle.standardError.write(Data(line.utf8))
         }
         totals = [:]
+    }
+}
+
+/// CPU actually burned on the main thread, from the kernel rather than from a timer.
+///
+/// The lateness monitor above answers "was the thread available", which conflates being BUSY with
+/// being throttled — and a benchmark app is throttled in ways a frontmost one is not. This answers
+/// the other half: how much of the wall clock did the thread that draws the window spend executing?
+/// If lateness is high and this is low, the work is not on the main thread and no amount of
+/// refactoring views will help.
+@MainActor
+enum MainThreadCPU {
+    static func seconds() -> Double {
+        var info = thread_basic_info()
+        // THREAD_BASIC_INFO_COUNT is a C macro and does not survive into Swift.
+        var count = mach_msg_type_number_t(MemoryLayout<thread_basic_info>.size / MemoryLayout<integer_t>.size)
+        let kr = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                thread_info(mach_thread_self(), thread_flavor_t(THREAD_BASIC_INFO), $0, &count)
+            }
+        }
+        guard kr == KERN_SUCCESS else { return 0 }
+        return Double(info.user_time.seconds) + Double(info.user_time.microseconds) / 1e6
+             + Double(info.system_time.seconds) + Double(info.system_time.microseconds) / 1e6
     }
 }
 
@@ -158,6 +191,8 @@ enum StressDrag {
     /// Sweeps exposure across ±1 EV at 60 Hz, the way a hand does when it is looking for the value.
     static func run(steps: Int, apply: @escaping (Double) -> Void) async {
         HitchMonitor.shared.reset()
+        let cpuStart = MainThreadCPU.seconds()
+        let wallStart = Date()
         var applyMs = 0.0, sleepMs = 0.0
         for i in 0..<steps {
             let phase = Double(i) / 30.0
@@ -172,9 +207,13 @@ enum StressDrag {
         // Which half of a step is slow says whether the thread is BUSY (the write blocks) or merely
         // UNAVAILABLE (a 16 ms sleep takes far longer to be resumed, because the main actor is
         // occupied by something the write only scheduled).
+        let cpu = MainThreadCPU.seconds() - cpuStart
+        let wall = Date().timeIntervalSince(wallStart)
         FileHandle.standardError.write(Data(String(
-            format: "  per step: apply %.1f ms, sleep-resume %.1f ms (asked for 16.7)\n",
-            applyMs / Double(steps), sleepMs / Double(steps)).utf8))
+            format: "  per step: apply %.1f ms, sleep-resume %.1f ms (asked for 16.7)\n" +
+                    "  main thread burned %.2fs of CPU over %.2fs wall = %.0f%% busy\n",
+            applyMs / Double(steps), sleepMs / Double(steps),
+            cpu, wall, cpu / wall * 100).utf8))
         HitchMonitor.shared.report("drag of \(steps) steps")
         MainWork.report()
         if exitsWhenDone { exit(0) }

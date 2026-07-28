@@ -2731,6 +2731,7 @@ final class AppState: ObservableObject {
         let side = RenderSideload(ctx: context,
                                   overlay: showOverlay ? activeSelectedMaskBitmap(extent: proxy.extent) : nil)
         Task.detached(priority: .userInitiated) {
+            let renderStart = Date()
             var rendered = Renderer.render(input.proxy, with: input.recipe, maskBitmaps: input.bitmaps)
             if let ov = side.overlay {
                 rendered = Renderer.renderMaskOverlay(rendered, maskBitmap: ov.bitmap, invert: ov.invert, feather: ov.feather, tightness: ov.tightness, opacity: 0.6)
@@ -2752,7 +2753,9 @@ final class AppState: ObservableObject {
             // regardless — `ImageStatistics` samples through `rgba8Sampled` — so nothing that was
             // being measured changes.
             let out = RenderOutput(ci: cg.map { CIImage(cgImage: $0) } ?? rendered, cg: cg)
+            let renderMs = Date().timeIntervalSince(renderStart) * 1000
             await MainActor.run {
+                MainWork.record("render (detached)", ms: renderMs)
                 self.lastRenderedCI = out.ci
                 if let cg = out.cg, let renderedURL {
                     self.active = TaggedPreview(url: renderedURL,
