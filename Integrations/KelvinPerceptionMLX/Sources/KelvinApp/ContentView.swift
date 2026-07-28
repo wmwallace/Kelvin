@@ -436,6 +436,10 @@ final class AppState: ObservableObject {
         lighting: Perception.Lighting(condition: .indoorDaylight, direction: .diffuse, contrastRange: .normal),
         problems: [], intent: .natural, confidence: 0.3)
 
+    /// True while a text field is taking keystrokes, so the single-key shortcuts can get out of the
+    /// way — see the shortcut block in `ContentView`.
+    @Published private(set) var isEditingText = false
+
     init() {
         Self.assertCoversTheContract()
         let appSupport = (FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -443,6 +447,39 @@ final class AppState: ObservableObject {
             .appendingPathComponent(Branding.displayName)
         let logURL = appSupport.appendingPathComponent("preferences.jsonl")
         self.store = PreferenceStore(logFileURL: logURL)
+        // After the stored properties, because it captures self.
+        watchTextEditing()
+    }
+
+    /// NOTICE WHEN SOMEONE IS TYPING, because most of this app's shortcuts are single letters.
+    ///
+    /// `B` adds a brush mask, `Z` keeps the photo, `X` rejects it — and there are two places where
+    /// letters are also just letters: renaming a mask, and naming a mask preset. A shortcut fires
+    /// from anywhere in the window, so without this, typing "black rocks" into a mask name adds a
+    /// brush mask, rejects the photograph and keeps the next one.
+    ///
+    /// The shortcuts are UNINSTALLED while a field is editing rather than made to do nothing. A
+    /// shortcut that no-ops still swallows the keystroke, so the letter would simply never appear —
+    /// which is a stranger bug than the one being fixed.
+    ///
+    /// Belt and braces on the way out: `textDidEndEditing` is the ordinary signal, but a window that
+    /// loses key while a field is focused may not send it, and a flag stuck at `true` would silently
+    /// kill every single-key shortcut in the app. Resigning key or active clears it too.
+    private func watchTextEditing() {
+        let centre = NotificationCenter.default
+        func observe(_ name: Notification.Name, _ editing: Bool) {
+            centre.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.isEditingText = editing }
+            }
+        }
+        // Both the control's notification and the field editor's: SwiftUI's `TextField` and the
+        // hand-built `NSTextField` in the preset sheet do not go through the same one.
+        observe(NSControl.textDidBeginEditingNotification, true)
+        observe(NSText.didBeginEditingNotification, true)
+        observe(NSControl.textDidEndEditingNotification, false)
+        observe(NSText.didEndEditingNotification, false)
+        observe(NSWindow.didResignKeyNotification, false)
+        observe(NSApplication.didResignActiveNotification, false)
     }
 
     /// Screenshot/demo affordance: KELVIN_DEMO_IMAGE=<path> auto-loads a photo on launch. Inert
@@ -3625,6 +3662,21 @@ struct ContentView: View {
         .overlay {
             if appState.proxyCI != nil {
                 VStack(spacing: 0) {
+                // ⌘ combinations are safe while typing — nothing types ⌘R — so they stay installed.
+                Group {
+                    Button("") { appState.setZoom(appState.zoom * 1.25) }
+                        .keyboardShortcut("=", modifiers: .command)
+                    Button("") { appState.setZoom(appState.zoom / 1.25) }
+                        .keyboardShortcut("-", modifiers: .command)
+                    Button("") { appState.resetToCandidate() }
+                        .keyboardShortcut("r", modifiers: .command)
+                    Button("") { appState.invertSelectedMask() }
+                        .keyboardShortcut("i", modifiers: .command)
+                }
+                // EVERYTHING BELOW IS A LETTER SOMEBODY MIGHT BE TYPING — including the shifted
+                // ones, since `⇧C` is how you type a capital C, and the arrow keys, which move a
+                // caret before they move to the next photograph.
+                if !appState.isEditingText {
                 Group {
                     Button("") { appState.flagCurrentAndAdvance(.keep) }
                         .keyboardShortcut("p", modifiers: [])
@@ -3670,18 +3722,10 @@ struct ContentView: View {
                         .keyboardShortcut("\\", modifiers: [])
                     Button("") { appState.toggleFilmstrip() }
                         .keyboardShortcut("/", modifiers: [])
-                    Button("") { appState.setZoom(appState.zoom * 1.25) }
-                        .keyboardShortcut("=", modifiers: .command)
-                    Button("") { appState.setZoom(appState.zoom / 1.25) }
-                        .keyboardShortcut("-", modifiers: .command)
                     Button("") { appState.toggleZoomRatio() }
                         .keyboardShortcut(.space, modifiers: [])
-                    Button("") { appState.resetToCandidate() }
-                        .keyboardShortcut("r", modifiers: .command)
                     Button("") { openExportPanel() }
                         .keyboardShortcut("e", modifiers: .shift)
-                    Button("") { appState.invertSelectedMask() }
-                        .keyboardShortcut("i", modifiers: .command)
                 }
                 Group {
                     // The mask kit. `M` opens the section rather than drawing anything, because
@@ -3700,6 +3744,7 @@ struct ContentView: View {
                         .keyboardShortcut("]", modifiers: .shift)
                     Button("") { appState.adjustSelectedFeather(by: -4) }
                         .keyboardShortcut("[", modifiers: .shift)
+                }
                 }
                 }
                 .opacity(0).frame(width: 0, height: 0)
