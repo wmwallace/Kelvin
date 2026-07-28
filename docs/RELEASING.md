@@ -225,8 +225,13 @@ a temporary keychain and run `security set-key-partition-list -S apple-tool:,app
 **Notarisation rejected.** `xcrun notarytool log <submission-id> --keychain-profile kelvin-notary`
 returns a JSON report naming the file and the reason.
 
-**`There is no Info.plist found at .../Sparkle.xcframework/Info.plist`.** SwiftPM left an empty
-artifact directory in the packaging scratch path — the download of Sparkle's binary artifact is
+**`There is no Info.plist found at .../Sparkle.xcframework/Info.plist`.** Guarded now —
+`scripts/sparkle-guard.sh` runs before the packaging build and before `make app`, `make open`,
+`make trace` and `make app-staged`, repairs an empty artifact in place from any healthy copy on the
+machine, and keeps a backup outside every scratch directory so there is always one to restore from.
+It should not reach you again. If it does, the message below explains what it was.
+
+SwiftPM left an empty artifact directory in the packaging scratch path — the download of Sparkle's binary artifact is
 unreliable here (it is why the version is pinned exactly; see the Package.swift note). The scratch
 path used for packaging is separate from the one `swift build` uses day to day, so it can be empty
 while everything else works. Fix it by copying the known-good artifact across rather than waiting

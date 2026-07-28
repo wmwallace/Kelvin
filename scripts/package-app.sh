@@ -99,6 +99,10 @@ COPYRIGHT="© $(date +%Y) William Wallace. Licensed under AGPL-3.0-only; source 
 # kelvin-app` with "Another instance of SwiftPM is already running" — at exactly the moment someone
 # is trying to test. Override with KELVIN_BUILD_PATH.
 SCRATCH="${KELVIN_BUILD_PATH:-${TMPDIR:-/tmp}kelvin-package-build}"
+# SwiftPM leaves the Sparkle artifact directory present but EMPTY often enough that it has killed a
+# release build here — signed, notarised, forty minutes in, and it never got past compiling. Cheap to
+# check, so check before spending any of that. See scripts/sparkle-guard.sh.
+"$ROOT/scripts/sparkle-guard.sh" "$SCRATCH"
 echo "▸ Building kelvin-app ($CONFIG)…"
 ( cd "$PKG" && swift build -c "$CONFIG" --product kelvin-app --scratch-path "$SCRATCH" )
 BUILD="$SCRATCH/$CONFIG"

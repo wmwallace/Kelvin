@@ -12,7 +12,7 @@ BUILD_PATH ?= $(TMPDIR)kelvin-build
 SWIFT := swift
 SWIFTFLAGS := --scratch-path "$(BUILD_PATH)"
 
-.PHONY: build test release clean bin eval render app open stage-model app-staged delta trace
+.PHONY: build test release clean bin eval render app open stage-model app-staged delta trace sparkle-guard
 
 build:
 	$(SWIFT) build $(SWIFTFLAGS)
@@ -38,22 +38,27 @@ render: build
 clean:
 	rm -rf "$(BUILD_PATH)" .build
 
+# Repair SwiftPM's Sparkle artifact if it has emptied itself, which it does. See the script; it has
+# cost two builds, one of them mid-release. A no-op when everything is fine.
+sparkle-guard:
+	@scripts/sparkle-guard.sh
+
 # Launch the editor from the build. Fastest path for development — no bundle assembly.
 # `scripts/package-app.sh` produces a working double-clickable Kelvin.app as well; the launch
 # failure that used to make bundles unusable was MLX not finding default.metallib and is fixed.
-app:
+app: sparkle-guard
 	cd Integrations/KelvinPerceptionMLX && $(SWIFT) run kelvin-app
 
 # Same, but opens on a specific photo — handy for jumping back into one frame.
 #   make open PHOTO=~/Pictures/shoot/_DSC0001.ARW
-open:
+open: sparkle-guard
 	cd Integrations/KelvinPerceptionMLX && KELVIN_DEMO_IMAGE="$(PHOTO)" $(SWIFT) run kelvin-app
 
 # Profile the edit panel: an automated slider drag with a main-thread stall monitor. Prints how
 # often and how long the thread that draws the window was unavailable. See Diagnostics.swift.
 #   make trace PHOTO=~/Pictures/shoot/_DSC0001.ARW [STEPS=200]
 STEPS ?= 200
-trace:
+trace: sparkle-guard
 	@test -n "$(PHOTO)" || { echo "usage: make trace PHOTO=<photo> [STEPS=$(STEPS)]"; exit 2; }
 	cd Integrations/KelvinPerceptionMLX && \
 	  KELVIN_DEMO_IMAGE="$(PHOTO)" KELVIN_TRACE_HITCHES=1 \
@@ -74,6 +79,6 @@ delta:
 
 # Run against the staged weights instead of the Hugging Face cache — the same path a shipped bundle
 # takes, so "does it load from disk" is testable before there is a bundle.
-app-staged: stage-model
+app-staged: stage-model sparkle-guard
 	cd Integrations/KelvinPerceptionMLX && \
 	  KELVIN_MODEL_PATH="$(PWD)/Vendor/PerceptionModel" $(SWIFT) run kelvin-app
