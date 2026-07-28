@@ -12,7 +12,7 @@ BUILD_PATH ?= $(TMPDIR)kelvin-build
 SWIFT := swift
 SWIFTFLAGS := --scratch-path "$(BUILD_PATH)"
 
-.PHONY: build test release clean bin eval render app open stage-model app-staged delta
+.PHONY: build test release clean bin eval render app open stage-model app-staged delta trace
 
 build:
 	$(SWIFT) build $(SWIFTFLAGS)
@@ -48,6 +48,16 @@ app:
 #   make open PHOTO=~/Pictures/shoot/_DSC0001.ARW
 open:
 	cd Integrations/KelvinPerceptionMLX && KELVIN_DEMO_IMAGE="$(PHOTO)" $(SWIFT) run kelvin-app
+
+# Profile the edit panel: an automated slider drag with a main-thread stall monitor. Prints how
+# often and how long the thread that draws the window was unavailable. See Diagnostics.swift.
+#   make trace PHOTO=~/Pictures/shoot/_DSC0001.ARW [STEPS=200]
+STEPS ?= 200
+trace:
+	@test -n "$(PHOTO)" || { echo "usage: make trace PHOTO=<photo> [STEPS=$(STEPS)]"; exit 2; }
+	cd Integrations/KelvinPerceptionMLX && \
+	  KELVIN_DEMO_IMAGE="$(PHOTO)" KELVIN_TRACE_HITCHES=1 \
+	  KELVIN_STRESS_DRAG=$(STEPS) KELVIN_STRESS_EXIT=1 $(SWIFT) run kelvin-app
 
 # Stage the perception weights for bundling into the app (see D-model-4). Refuses to stage weights
 # whose licence file is not present, because bundling them is redistribution.

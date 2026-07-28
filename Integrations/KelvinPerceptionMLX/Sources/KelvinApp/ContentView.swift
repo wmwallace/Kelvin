@@ -1816,6 +1816,18 @@ final class AppState: ObservableObject {
             } else {
                 statusMessage = "Ready · pick a look, or Batch apply it to a folder\(statusNote)"
             }
+            // The automated slider drag, when asked for. Here because it needs what a real drag
+            // needs: a photo open and a candidate loaded. See Diagnostics.swift.
+            if let steps = StressDrag.steps {
+                let baseline = edit.exposureEV
+                Task { [weak self] in
+                    await StressDrag.run(steps: steps) { [weak self] ev in
+                        guard let self else { return }
+                        self.edit.exposureEV = baseline + ev
+                        self.onEdit()
+                    }
+                }
+            }
         } catch {
             statusMessage = "Couldn't read that photo — \(error.localizedDescription)"
         }
@@ -1860,7 +1872,10 @@ final class AppState: ObservableObject {
         selectCandidate(id: candidates[index].id)
     }
 
-    func onEdit() { updateActiveRecipe(); scheduleCommit() }
+    func onEdit() {
+        MainWork.time("updateActiveRecipe") { updateActiveRecipe() }
+        MainWork.time("scheduleCommit") { scheduleCommit() }
+    }
 
     /// True while a Fix click is still working, so a second click can't start a parallel loop.
     @Published private(set) var fixInProgress = false
@@ -2721,7 +2736,22 @@ final class AppState: ObservableObject {
                 rendered = Renderer.renderMaskOverlay(rendered, maskBitmap: ov.bitmap, invert: ov.invert, feather: ov.feather, tightness: ov.tightness, opacity: 0.6)
             }
             let cg = side.ctx.createCGImage(rendered, from: rendered.extent)
-            let out = RenderOutput(ci: rendered, cg: cg)
+            // PUBLISH THE PIXELS, NOT THE RECIPE FOR THEM. `rendered` is a lazy CIImage — a filter
+            // graph — and handing that to the UI means everything that later reads it re-runs the
+            // whole chain, on whichever thread asks. Two things ask, and both ask on the main one:
+            // the histogram redraws inside a SwiftUI Canvas closure, and the craft check measures
+            // the frame 200 ms after the last edit. So each of them paid for a fresh render of the
+            // proxy — noise reduction, masks, exposure fusion and all — every time the window drew.
+            //
+            // Measured on a 61 MB Sony ARW: an automated 600-step drag that should take 10 seconds
+            // took 410, with the main thread unavailable 100% of the time in stalls of ~750 ms.
+            // The GPU was never the problem; the main thread was rendering.
+            //
+            // `cg` has already been rasterised for the preview, so wrapping it costs nothing and
+            // gives every downstream reader concrete 8-bit pixels. The craft measurements are 8-bit
+            // regardless — `ImageStatistics` samples through `rgba8Sampled` — so nothing that was
+            // being measured changes.
+            let out = RenderOutput(ci: cg.map { CIImage(cgImage: $0) } ?? rendered, cg: cg)
             await MainActor.run {
                 self.lastRenderedCI = out.ci
                 if let cg = out.cg, let renderedURL {
@@ -5040,6 +5070,16 @@ struct ToneSlider: View {
     @State private var resetTick = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    /// The value, snapped to `step` on the way in. See the Slider below for why the stepping cannot
+    /// live where it looks like it belongs.
+    private var steppedValue: Binding<Double> {
+        Binding(get: { value },
+                set: { raw in
+                    let snapped = (raw / step).rounded() * step
+                    value = min(max(snapped, range.lowerBound), range.upperBound)
+                })
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack {
@@ -5057,7 +5097,19 @@ struct ToneSlider: View {
                 // THEN was a render built: never true when it was read, so the feature was dead on
                 // arrival. A gesture's begin and end are the only honest place to bracket a
                 // gesture.
-                Slider(value: $value, in: range, step: step, onEditingChanged: onDragging)
+                // STEPPED IN THE BINDING, NOT IN THE SLIDER. This is the edit-panel stutter, and it
+                // was never Kelvin's own code: `Slider(value:in:step:)` becomes an `NSSlider` with
+                // ONE TICK MARK PER STEP — 701 of them for Temp (2500…9500 by 10), 301 for
+                // Straighten, 201 for Exposure. Laying one out runs
+                // `_rebuildTickMarkRectCache` → `rectOfTickMarkAtIndex:` → `_visualProvider` →
+                // `setUsesModernStyle:` → `_rebuildTickMarkRectCache`, re-entering itself per tick,
+                // thousands of frames deep. A 600-step automated drag on a 61 MB ARW spent 83% of
+                // the main thread inside that recursion and took 349 s instead of 10.
+                //
+                // Snapping in the binding keeps the behaviour — values still land on the step, and
+                // a sub-step drag now produces no change and therefore no render — while the
+                // control AppKit builds has no tick marks to lay out.
+                Slider(value: steppedValue, in: range, onEditingChanged: onDragging)
                     // The accent stays the same on every slider: it is the language of "where the
                     // value is", and the rail below is the language of "what this does". Making
                     // both vary at once would leave neither reliable.

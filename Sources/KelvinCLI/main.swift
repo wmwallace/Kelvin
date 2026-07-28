@@ -509,6 +509,95 @@ case "bench":
         }
     } catch { fail("\(error)") }
 
+case "bench-ui":
+    // What ELSE does an interactive frame cost, on the thread that draws the window?
+    //
+    // `bench` measures the render, which the app already runs off the main actor. But a frame is not
+    // only its render: the histogram redraws from the new pixels inside a SwiftUI `Canvas` closure,
+    // and the craft self-check re-measures them 200 ms after the last edit. Both of those read the
+    // rendered proxy, and both run where SwiftUI runs. Whatever they cost is time the panel is not
+    // scrolling and the slider is not tracking, and none of it appears in `bench`.
+    //
+    // Same discipline as the other two: the release notes admit "the edit panel can stutter while a
+    // render or scene read is in flight", and the fix has to be aimed at a number rather than at the
+    // most suspicious-looking code.
+    do {
+        let rest = Array(arguments.dropFirst())
+        guard let inPath = value(for: "--in", in: rest) else { fail("bench-ui requires --in") }
+        let full = try ImageDecoder.decode(url: URL(fileURLWithPath: inPath))
+        let proxy = PerceptionProxy.downsample(full, maxEdge: 1200)
+        let ctx = CIContext(options: [.cacheIntermediates: true])
+        // What the app actually holds after a render: a concrete bitmap, not a filter chain.
+        var g = GlobalAdjustments.neutral
+        g.exposureEV = 0.3; g.contrast = 12; g.vibrance = 8; g.shadows = 15; g.highlights = -20
+        let recipe = Recipe(schemaVersion: 1, id: nil, label: nil, provenance: nil, global: g,
+                            curve: nil, hsl: nil, masks: nil, detail: nil, geometry: nil)
+        let rendered = Renderer.render(proxy, with: recipe, maskBitmaps: [:])
+        guard let cg = ctx.createCGImage(rendered, from: rendered.extent) else { fail("render failed") }
+        let frame = CIImage(cgImage: cg)
+
+        func bench(_ label: String, _ n: Int = 11, _ body: () -> Void) {
+            body()                                   // warm up; first call pays for lazy setup
+            var times: [Double] = []
+            for _ in 0..<n {
+                let start = Date()
+                body()
+                times.append(Date().timeIntervalSince(start) * 1000)
+            }
+            times.sort()
+            print(String(format: "  %-38@ median %7.1f ms", label as NSString, times[n / 2]))
+        }
+
+        print("Main-thread work per frame — proxy \(Int(proxy.extent.width))×\(Int(proxy.extent.height))")
+        // The histogram, as HistogramView.luma does it: downsample first, then rasterise 100×100.
+        bench("histogram (Canvas draw closure)") {
+            let small = PerceptionProxy.downsample(frame, maxEdge: 100)
+            _ = try? ImageWriter.rgba8Sampled(small, width: 100, height: 100)
+        }
+        // The craft check, split into its two halves, because they are not remotely the same size.
+        bench("craft: ImageStatistics.compute") { _ = try? ImageStatistics.compute(frame) }
+        bench("craft: FaceSkin.read (Vision)", 5) { _ = FaceSkin.read(in: frame) }
+        if let stats = try? ImageStatistics.compute(frame) {
+            bench("craft: issues from the reading") {
+                _ = CraftFix.Reading(stats: stats, face: FaceSkin.read(in: frame), condition: nil).issues
+            }
+        }
+        print("  A frame at 60 Hz is 16.7 ms. Anything above that here is a dropped frame, on the")
+        print("  thread that scrolls the panel.")
+
+        // AND AGAIN WITH THE GPU BUSY, which is the case the release notes actually describe. Every
+        // measurement above goes through a CIContext, and a CIContext hands work to the GPU: it is
+        // thread-safe, not free of contention. When something else is already saturating the device
+        // — a full-resolution export, or the perception model generating tokens — the same call on
+        // the main thread waits for the device rather than for its own arithmetic.
+        //
+        // The load here is a Core Image render rather than MLX, because this executable is
+        // deliberately MLX-free. It is the same mechanism and a smaller hammer: whatever ratio shows
+        // up here is a floor for what a 2 B-parameter model does to the same numbers.
+        let busy = DispatchQueue(label: "gpu-load", qos: .userInitiated)
+        // A semaphore as a stop flag: signalled once, and the loop's non-blocking wait succeeds
+        // exactly once. Avoids hand-rolling a lock around a Bool for a benchmark.
+        let stop = DispatchSemaphore(value: 0)
+        busy.async {
+            var heavy = GlobalAdjustments.neutral
+            heavy.clarity = 60; heavy.texture = 40; heavy.dehaze = 30
+            let r = Recipe(schemaVersion: 1, id: nil, label: nil, provenance: nil, global: heavy,
+                           curve: nil, hsl: nil, masks: nil, detail: nil, geometry: nil)
+            while stop.wait(timeout: .now()) == .timedOut {
+                let out = Renderer.render(full, with: r, maskBitmaps: [:])
+                _ = ctx.createCGImage(out, from: out.extent)
+            }
+        }
+        print("\nThe same work, with a full-resolution render looping on another thread:")
+        bench("histogram (Canvas draw closure)") {
+            let small = PerceptionProxy.downsample(frame, maxEdge: 100)
+            _ = try? ImageWriter.rgba8Sampled(small, width: 100, height: 100)
+        }
+        bench("craft: ImageStatistics.compute") { _ = try? ImageStatistics.compute(frame) }
+        bench("craft: FaceSkin.read (Vision)", 5) { _ = FaceSkin.read(in: frame) }
+        stop.signal()
+    } catch { fail("\(error)") }
+
 case "bench-load":
     // Where does the time between "I picked a photo" and "here are your candidates" actually go?
     //

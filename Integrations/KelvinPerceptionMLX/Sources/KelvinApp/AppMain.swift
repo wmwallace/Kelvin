@@ -41,6 +41,8 @@ struct KelvinApp: App {
                 .frame(minWidth: 940, minHeight: 660)
                 .onAppear {
                     NSApplication.shared.activate(ignoringOtherApps: true)
+                    // Off unless KELVIN_TRACE_HITCHES is set. See Diagnostics.swift.
+                    HitchMonitor.shared.start()
                     // Load the model while the window sits on the empty state, rather than charging
                     // fifteen seconds to whichever photograph is opened first. Background priority:
                     // this must never compete with decoding a photo somebody just dropped.
