@@ -9,6 +9,12 @@ import KelvinCore
 /// and slightly wrong is worse than none, since people make exposure decisions from it. The rules
 /// pinned here are the ones that would silently lie — the shared peak that makes casts visible, and
 /// the clipping threshold that decides whether a warning means anything.
+///
+/// `@MainActor` because `HistogramView` is a SwiftUI `View` and therefore main-actor isolated, so
+/// `read` cannot be called from a nonisolated context. Omitting it compiled cleanly against the
+/// macOS 27 SDK on the author's machine and failed every job in CI — the same local-versus-CI
+/// divergence recorded on `PhotoBrowser.thumbnailCG`. Local green is not evidence here.
+@MainActor
 final class HistogramTests: XCTestCase {
 
     /// A flat image of one colour, which makes the expected histogram trivial to state.
