@@ -125,4 +125,73 @@ final class ExportNamingTests: XCTestCase {
             ExportNaming.uniqueURL(in: dir, stem: "other", ext: "jpg") { taken.contains($0.path) }
                 .lastPathComponent, "other.jpg")
     }
+
+
+    // MARK: The photographer's own label
+
+    /// The one token here that is not a model judgement. Every other token is hedged — dropped when
+    /// the read is unsure, omitted when uninformative — because a wrong filename goes to a client.
+    /// This one was typed by a person, so it is never dropped and never second-guessed.
+    func testTheLabelAppearsInEveryScheme() {
+        for scheme in ExportNaming.Scheme.allCases {
+            let name = ExportNaming.stem(for: raw, perception: perception(), look: "Soft",
+                                         scheme: scheme, label: "Lake Como")
+            XCTAssertTrue(name.contains("lake-como"),
+                          "\(scheme.rawValue) dropped the label: \(name)")
+        }
+    }
+
+    /// AFTER the stem, never before it. A prefix would sort nicely in a folder and break `ls
+    /// _DSC6595*`, which is how an export maps back to the RAW on the card — rule 1, and the reason
+    /// this codebase already had to undo a sanitised stem once.
+    func testTheLabelNeverDisplacesTheStem() {
+        for scheme in ExportNaming.Scheme.allCases {
+            let name = ExportNaming.stem(for: raw, perception: perception(), look: nil,
+                                         scheme: scheme, label: "Tuscany")
+            XCTAssertTrue(name.hasPrefix("_DSC6595"),
+                          "\(scheme.rawValue) put the label in front of the stem: \(name)")
+        }
+    }
+
+    /// Typed text is not a filename. Spaces, commas and case all have to go somewhere predictable,
+    /// and the panel shows this back before anything is written.
+    func testATypedLabelBecomesAFilenameToken() {
+        XCTAssertEqual(ExportNaming.labelToken("Lake Como, Day 2"), "lake-como-day-2")
+        XCTAssertEqual(ExportNaming.labelToken("  Smith / Jones  "), "smith-jones")
+        XCTAssertEqual(ExportNaming.labelToken(""), "")
+        XCTAssertEqual(ExportNaming.labelToken("   "), "")
+    }
+
+    /// A pasted paragraph must not crowd out the stem, and truncation lands on a word boundary so
+    /// the remainder still reads.
+    func testAnOverlongLabelIsCutOnAWordBoundary() {
+        let token = ExportNaming.labelToken(
+            "the annual midsummer wedding of alexandra and christopher at the old barn")
+        XCTAssertLessThanOrEqual(token.count, 40)
+        XCTAssertFalse(token.hasSuffix("-"), "truncation left a dangling separator: \(token)")
+        XCTAssertTrue(token.hasPrefix("the-annual-midsummer"), "got \(token)")
+    }
+
+    /// Rule 3 still holds for the label: a shoot folder whose files are already named for the place
+    /// should not say it twice.
+    func testALabelTheStemAlreadyCarriesIsNotRepeated() {
+        let already = URL(fileURLWithPath: "/photos/tuscany_0042.ARW")
+        let name = ExportNaming.stem(for: already, perception: nil, look: nil,
+                                     scheme: .original, label: "Tuscany")
+        XCTAssertEqual(name, "tuscany_0042")
+    }
+
+    /// No label is exactly the old behaviour — this feature must be invisible until used.
+    func testNoLabelChangesNothing() {
+        for scheme in ExportNaming.Scheme.allCases {
+            let without = ExportNaming.stem(for: raw, perception: perception(), look: "Soft",
+                                            scheme: scheme)
+            for empty in [nil, "", "   "] as [String?] {
+                XCTAssertEqual(
+                    ExportNaming.stem(for: raw, perception: perception(), look: "Soft",
+                                      scheme: scheme, label: empty),
+                    without, "\(scheme.rawValue) changed when given an empty label")
+            }
+        }
+    }
 }

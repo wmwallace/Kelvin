@@ -1343,6 +1343,23 @@ final class AppState: ObservableObject {
         ExportNaming.Scheme(rawValue: exportNamingId) ?? .descriptive
     }
 
+    /// The photographer's own word for this export — a place, a client, an event.
+    ///
+    /// **Deliberately not persisted, and cleared when the shoot changes.** Every other export
+    /// setting here is a statement about how someone works and is remembered; this one is a
+    /// statement about *this shoot*, and a remembered "Tuscany" is how a Reykjavik wedding gets
+    /// delivered labelled Tuscany. Same reasoning as `exportKeepersOnly`, with a worse failure:
+    /// that one exports the wrong count, this one puts the wrong word on a client's files.
+    @Published var exportLabel = ""
+
+    /// What the label will actually look like in a filename, or nil when there is nothing to show.
+    /// The panel prints this, because the sanitiser lowercases and hyphenates and nobody should
+    /// have to discover that after the files are written.
+    var exportLabelPreview: String? {
+        let clean = ExportNaming.labelToken(exportLabel)
+        return clean.isEmpty ? nil : clean
+    }
+
     var exportMetadata: ImageWriter.MetadataPolicy {
         stripLocationOnExport ? .withoutLocation : .asShot
     }
@@ -1521,7 +1538,7 @@ final class AppState: ObservableObject {
         let look = activeLookId.flatMap { LookPreset.named($0)?.name }
             ?? candidates.first { $0.id == selectedCandidateId }?.label
         return ExportNaming.filename(for: url, perception: perception, look: look, ext: ext,
-                                     scheme: exportNaming)
+                                     scheme: exportNaming, label: exportLabel)
     }
 
     /// "12 Mar, 14:03" from an ISO timestamp — a restored edit should say *when*, not show a
@@ -1971,6 +1988,10 @@ final class AppState: ObservableObject {
         if shootLookFolder != folder {
             selectedPhotos = []; selectionAnchor = nil
             stopReadingShoot()
+            // The export label names ONE shoot. Carrying "Lake Como" into the next folder is how a
+            // Reykjavik wedding gets delivered labelled Lake Como — a mistake nobody would catch
+            // until a client did.
+            exportLabel = ""
         }
         loadShootLook(for: folder)
         capture = CaptureInfoReader.read(url: url)
@@ -3457,6 +3478,9 @@ final class AppState: ObservableObject {
         var adaptedWritten = 0
         var needsReopening: [String] = []
         let size = exportSize, space = exportColorSpace, scheme = exportNaming
+        // Read once, before the loop: the label names THIS export, and a text field edited
+        // mid-run must not split a folder's files across two names.
+        let label = exportLabel
 
         for (index, url) in targets.enumerated() {
             let saved = EditStore.load(for: url)
@@ -3505,7 +3529,8 @@ final class AppState: ObservableObject {
 
             let out = ExportNaming.uniqueURL(
                 in: directory,
-                stem: ExportNaming.stem(for: url, perception: nil, look: lookName, scheme: scheme),
+                stem: ExportNaming.stem(for: url, perception: nil, look: lookName,
+                                        scheme: scheme, label: label),
                 ext: exportFormat.fileExtension)
 
             // Read off the actor once, before the work crosses to a detached task. Reaching back

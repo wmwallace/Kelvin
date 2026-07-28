@@ -123,6 +123,33 @@ enum PanelAccessories {
             [NSGridCell.emptyContentView, location, NSGridCell.emptyContentView, NSGridCell.emptyContentView]
         ]
         if showScope {
+            // The photographer's own word for this export. Only on the group panel: labelling a
+            // batch is the whole use — one photo is already being given a name in the save field
+            // above, and two places to name one file is a way to disagree with yourself.
+            //
+            // The preview updates as it is typed, because the sanitiser lowercases and hyphenates:
+            // "Lake Como, Day 2" becomes `lake-como-day-2`, and finding that out after four hundred
+            // files exist is exactly the kind of surprise this panel is supposed to prevent.
+            let label = NSTextField(string: state.exportLabel)
+            label.placeholderString = "Optional — a place, a client, an event"
+            label.target = target
+            label.action = #selector(ExportTarget.labelChanged(_:))
+            // Live, not just on Enter: an accessory in a modal panel does not get a second chance
+            // to tell you what it did.
+            NotificationCenter.default.addObserver(
+                target, selector: #selector(ExportTarget.labelEditing(_:)),
+                name: NSControl.textDidChangeNotification, object: label)
+            let labelPreview = NSTextField(labelWithString: "")
+            labelPreview.font = .monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+            labelPreview.textColor = .secondaryLabelColor
+            target.labelField = label
+            target.labelPreview = labelPreview
+            target.refreshLabelPreview()
+            rows.append([NSTextField(labelWithString: "Label:"), label,
+                         NSGridCell.emptyContentView, NSGridCell.emptyContentView])
+            rows.append([NSGridCell.emptyContentView, labelPreview,
+                         NSGridCell.emptyContentView, NSGridCell.emptyContentView])
+
             // Which photos, chosen with the flags the filmstrip already has: P marks a keeper
             // (the culling keys are P/X, straight from the shortcuts sheet — a string here once
             // said K, promising a key nobody bound, which is a mistake this codebase has already
@@ -207,6 +234,32 @@ enum PanelAccessories {
         }
         @objc func keepersChanged(_ sender: NSButton) {
             state?.exportKeepersOnly = (sender.state == .on)
+        }
+
+        weak var labelField: NSTextField?
+        weak var labelPreview: NSTextField?
+
+        @objc func labelChanged(_ sender: NSTextField) {
+            state?.exportLabel = sender.stringValue
+            refreshLabelPreview()
+        }
+
+        /// Fired on every keystroke via `NSControl.textDidChangeNotification`. The field's `action`
+        /// only fires on Enter or focus loss, and someone who types a label and clicks Export
+        /// immediately would otherwise have exported without it.
+        @objc func labelEditing(_ note: Notification) {
+            guard let field = note.object as? NSTextField, field === labelField else { return }
+            state?.exportLabel = field.stringValue
+            refreshLabelPreview()
+        }
+
+        func refreshLabelPreview() {
+            guard let state else { return }
+            if let token = state.exportLabelPreview {
+                labelPreview?.stringValue = "→ _DSC6595_\(token)…"
+            } else {
+                labelPreview?.stringValue = ""
+            }
         }
 
         /// A quality control beside PNG or TIFF is a control that does nothing, which is the exact

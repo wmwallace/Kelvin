@@ -69,8 +69,10 @@ public enum ExportNaming {
     ///   - original: the source photo, whose stem is preserved.
     ///   - perception: what the model read, or nil to fall back to just the stem + look.
     ///   - look: the style or preset applied ("Natural", "Red filter"), if any.
+    ///   - label: the photographer's own word for this export — a place, a client, an event.
+    ///     Applies to every scheme, because it is the one token here that is not a guess.
     public static func stem(for original: URL, perception: Perception?, look: String?,
-                            scheme: Scheme = .descriptive) -> String {
+                            scheme: Scheme = .descriptive, label: String? = nil) -> String {
         let base = preserved(original.deletingPathExtension().lastPathComponent)
         var parts = [base]
         // Dedup still works case-insensitively and across both separators, so a file already called
@@ -87,12 +89,27 @@ public enum ExportNaming {
             used.formUnion(words)
         }
 
+        // THE PHOTOGRAPHER'S OWN WORD GOES FIRST OF THE TOKENS, and it applies to every scheme.
+        //
+        // Every other token here is a model judgement, hedged accordingly: rule 2 says only describe
+        // what was actually judged, and the Scheme doc records four models disagreeing about golden
+        // hour. This one is not a judgement — someone typed it — so it is never dropped, never
+        // second-guessed, and it outranks the guesses in the name.
+        //
+        // AFTER the stem rather than before it, which is the one thing people will ask about. Rule 1
+        // is that the original stem comes first and survives verbatim, because `ls _DSC6595*` is how
+        // an export maps back to the RAW on the card. A prefix would read nicely in a sorted folder
+        // and break exactly that.
+        add(label.map(labelToken))
+
         switch scheme {
         case .original:
-            return base
+            // Still "the original name" — plus the word the photographer chose to add to it, which
+            // is the whole point of having asked.
+            return parts.joined(separator: "_")
         case .edited:
             // Lightroom's convention, and the one most photographers already have a workflow around.
-            return base + "-Edit"
+            return parts.joined(separator: "_") + "-Edit"
         case .look, .descriptive:
             break
         }
@@ -122,9 +139,10 @@ public enum ExportNaming {
     /// A full filename, extension included.
     public static func filename(
         for original: URL, perception: Perception?, look: String?, ext: String = "jpg",
-        scheme: Scheme = .descriptive
+        scheme: Scheme = .descriptive, label: String? = nil
     ) -> String {
-        stem(for: original, perception: perception, look: look, scheme: scheme) + "." + ext
+        stem(for: original, perception: perception, look: look, scheme: scheme, label: label)
+            + "." + ext
     }
 
     /// A destination that doesn't overwrite anything, by appending `-2`, `-3`, … if needed.
@@ -201,5 +219,20 @@ public enum ExportNaming {
         }
         while out.hasSuffix("-") { out.removeLast() }
         return out
+    }
+
+    /// What a photographer's typed label becomes in a filename.
+    ///
+    /// Public because the export panel shows it back before anything is written: the sanitiser
+    /// lowercases and hyphenates, so "Lake Como, Day 2" lands as `lake-como-day-2`, and nobody
+    /// should discover that after four hundred files exist. Capped so one pasted paragraph cannot
+    /// crowd out the stem that makes an export traceable.
+    public static func labelToken(_ raw: String) -> String {
+        let clean = sanitize(raw)
+        guard clean.count > 40 else { return clean }
+        // Cut on a word boundary rather than mid-word, so a truncated label still reads.
+        let cut = String(clean.prefix(40))
+        guard let lastDash = cut.lastIndex(of: "-"), lastDash > cut.startIndex else { return cut }
+        return String(cut[cut.startIndex..<lastDash])
     }
 }
