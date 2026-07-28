@@ -9,9 +9,13 @@
 A small vision model reads your photograph. Deterministic code writes the edit.<br>
 Everything runs on your machine — your photographs never leave it.
 
+[![Download for macOS](https://img.shields.io/github/v/release/wmwallace/Kelvin?label=download%20for%20macOS&color=e8833a&style=for-the-badge)](https://github.com/wmwallace/Kelvin/releases/latest)
+
+<sub>Signed and notarised · macOS 14+ · Apple silicon · the model ships inside, so it is a big download and no small ones later</sub>
+
 [![CI](https://github.com/wmwallace/Kelvin/actions/workflows/ci.yml/badge.svg)](https://github.com/wmwallace/Kelvin/actions/workflows/ci.yml)
 [![Licence: AGPL-3.0-only](https://img.shields.io/badge/licence-AGPL--3.0--only-4a7bab)](LICENSE)
-[![macOS 14+](https://img.shields.io/badge/macOS-14%2B-2f2f2f)](#running-it)
+[![macOS 14+](https://img.shields.io/badge/macOS-14%2B-2f2f2f)](#getting-it)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138)](Package.swift)
 [![Sponsor](https://img.shields.io/badge/%E2%99%A5-sponsor-ea4aaa)](https://github.com/sponsors/wmwallace)
 
@@ -76,7 +80,21 @@ sentence explaining what it saw. If it read the photograph wrongly, you can tell
 <p align="center"><sub>A shoot grouped by capture day. It also groups by burst, by place, or by near-duplicate — and
 under burst or near-duplicate it marks the sharpest frame of each run.</sub></p>
 
-## Running it
+## Getting it
+
+[**Download the latest release**](https://github.com/wmwallace/Kelvin/releases/latest) — a signed,
+notarised disk image. Drag it to Applications and open it; there is no right-click-Open dance and no
+Gatekeeper warning.
+
+It is about 1.5 GB, and that is the whole point: the perception model travels inside the app, so
+nothing is fetched on first run and the "no cloud" claim has no asterisk on it. Updates after the
+first one are small — a few megabytes — because releases ship a binary patch rather than the model
+again.
+
+The link above always resolves to the newest release. Nothing on this page names a version, so
+nothing here can quietly go stale the way a pinned download link does.
+
+## Building it
 
 macOS 14+, Xcode 16.3+.
 
