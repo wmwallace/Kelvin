@@ -99,7 +99,10 @@ lives in iCloud — that's your setup, and Kelvin neither adds to it nor takes i
 
 A released build carries the model inside it and needs no network to work. Built from source, it
 fetches the weights once, at a pinned revision. The one thing a release will ever ask the network
-is whether an update exists — and it asks you before it starts asking that.
+is whether an update exists. It does that on its own, because an alpha whose fixes only reach the
+people who agreed to a dialog is an alpha that stays broken for everyone else — the check sends no
+account, no identifier and nothing about your photographs, and both switches are in
+Settings ▸ General if you would rather it did not.
 
 Your originals are never modified: edits are kept in Kelvin's own folder, never beside your
 files. Exports carry the original metadata by default,

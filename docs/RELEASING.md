@@ -79,8 +79,11 @@ Decided before the first tag, so it never has to be re-decided under release pre
 ## Updates (Sparkle)
 
 The app carries Sparkle; a released copy checks `Branding.appcastURL`
-(`https://usekelvin.app/appcast.xml`) — only after the user consents, and that URL is frozen the
-moment the first binary ships. The plumbing:
+(`https://usekelvin.app/appcast.xml`) automatically, and that URL is frozen the moment the first
+binary ships. Automatic checking *and* automatic installation are both on by default
+(`SUEnableAutomaticChecks`, `SUAutomaticallyUpdate`), each with a switch in Settings ▸ General.
+Which makes the delta below load-bearing rather than an optimisation: an update that installs
+itself must not be a 1.4 GB download nobody asked for. The plumbing:
 
 - **Key pair**: generated 26 July 2026 with Sparkle's `generate_keys` (it lives in the build
   artifacts: `.build/artifacts/sparkle/Sparkle/bin/`). The private half lives in the login
@@ -178,10 +181,12 @@ Three things need doing before a binary leaves this machine, and none can be don
 - ~~Generate the Sparkle EdDSA key pair~~ — done 26 July 2026 (see Updates above). The private
   half is in the login Keychain and still needs backing up with the release identity.
 - ~~Check what the app says about the network once an update check exists.~~ Done with the
-  Sparkle integration: SECURITY.md scopes the appcast check as the one allowed request, the
-  README says a release asks before it ever checks, and Sparkle's standard permission prompt
-  gates automatic checking (`SUEnableAutomaticChecks` is deliberately not set — writing `false`
-  would suppress the prompt rather than defer to it).
+  Sparkle integration, and revised on 27 July 2026 when updates became automatic by default
+  (`SUEnableAutomaticChecks` and `SUAutomaticallyUpdate` are both written `true`). SECURITY.md
+  scopes the appcast check as the one allowed request, the README says it happens on its own and
+  why, and Settings ▸ General carries both switches. If that default is ever reversed, those three
+  places have to move together — a promise about the network is only worth what the least accurate
+  copy of it says.
 - **Back up the `.p12` and the `.p8` somewhere other than this Mac.** Apple lets you download a
   `.p8` once, ever. Back up the Sparkle private key alongside them.
 

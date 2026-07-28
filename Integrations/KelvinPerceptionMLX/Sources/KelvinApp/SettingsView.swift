@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import KelvinCore
 import KelvinPerceptionMLX
+import Sparkle
 
 /// Settings — ⌘, — which the app did not have.
 ///
@@ -16,10 +17,12 @@ import KelvinPerceptionMLX
 /// application should be able to answer "where is the source" from inside itself.
 struct SettingsView: View {
     @ObservedObject var appState: AppState
+    /// Nil in a build from source, which has no feed URL and therefore no updater. See UpdateSettings.
+    var updater: SPUUpdater?
 
     var body: some View {
         TabView {
-            GeneralSettings(appState: appState)
+            GeneralSettings(appState: appState, updater: updater)
                 .tabItem { Label("General", systemImage: "gearshape") }
             PerceptionSettings()
                 .tabItem { Label("Perception", systemImage: "eye") }
@@ -36,6 +39,7 @@ struct SettingsView: View {
 
 private struct GeneralSettings: View {
     @ObservedObject var appState: AppState
+    var updater: SPUUpdater?
 
     var body: some View {
         Form {
@@ -78,8 +82,70 @@ private struct GeneralSettings: View {
             } header: {
                 Text("Exporting")
             }
+
+            UpdateSettings(updater: updater)
         }
         .formStyle(.grouped)
+    }
+}
+
+/// The two update switches, and the only place the automatic default can be turned off.
+///
+/// Kelvin keeps itself up to date unless told not to. That is a deliberate reversal of where this
+/// started — Sparkle asking permission on first launch, defaulting to nothing — because a pre-alpha
+/// that only reaches the users who said yes to a dialog is a pre-alpha whose fixes mostly do not
+/// arrive. The cost is one outbound request the app would otherwise not make, so it is stated here
+/// rather than buried: the section says what is sent, in the window, next to the switch that stops
+/// it.
+///
+/// Sparkle owns the values. Reading them into `@State` on appear and writing back on change keeps
+/// the checkboxes honest even when something else changes them — Sparkle's own reminder sheets can.
+private struct UpdateSettings: View {
+    let updater: SPUUpdater?
+    @State private var checksAutomatically = false
+    @State private var installsAutomatically = false
+
+    var body: some View {
+        Section {
+            if updater == nil {
+                // A build from source has no feed and no updater. Saying so is better than showing
+                // two switches that would silently do nothing.
+                Text("This build has no updater. Releases check \(Branding.appcastURL); a copy built from source updates when you rebuild it.")
+                    .font(.caption).foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Toggle("Check for updates automatically", isOn: $checksAutomatically)
+                    .onChange(of: checksAutomatically) {
+                        updater?.automaticallyChecksForUpdates = checksAutomatically
+                        // Installing without checking is not a state that means anything.
+                        if !checksAutomatically { installsAutomatically = false }
+                    }
+                Toggle("Download and install them automatically", isOn: $installsAutomatically)
+                    .disabled(!checksAutomatically)
+                    .onChange(of: installsAutomatically) {
+                        updater?.automaticallyDownloadsUpdates = installsAutomatically
+                    }
+                Text(statement)
+                    .font(.caption).foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } header: {
+            Text("Updates")
+        }
+        .onAppear {
+            checksAutomatically = updater?.automaticallyChecksForUpdates ?? false
+            installsAutomatically = updater?.automaticallyDownloadsUpdates ?? false
+        }
+    }
+
+    private var statement: String {
+        guard checksAutomatically else {
+            return "Nothing is contacted until you choose Check for Updates… from the \(Branding.displayName) menu."
+        }
+        let what = installsAutomatically
+            ? "New versions install themselves and take effect next launch."
+            : "You are told when a new version exists and decide whether to install it."
+        return "\(what) The check is a request to \(Branding.appcastURL) for a few KB of XML — no account, no identifier, and nothing about your photographs."
     }
 }
 

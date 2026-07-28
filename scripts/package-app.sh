@@ -192,12 +192,23 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <!-- Sparkle. The feed URL comes from Branding.appcastURL and is FROZEN once any binary
-       ships — every installed copy checks it forever. SUEnableAutomaticChecks is deliberately
-       ABSENT: writing false would suppress Sparkle's permission prompt entirely, while leaving
-       it unset makes Sparkle ask the user before any automatic checking begins — the
-       consent-first behaviour SECURITY.md promises. -->
+       ships — every installed copy checks it forever.
+
+       UPDATES ARE AUTOMATIC BY DEFAULT, and both switches are in Settings ▸ General for anyone
+       who wants them off. This reverses the original stance, which was to ask first and default
+       to nothing: an alpha that only updates the people who happened to say yes to a dialog
+       leaves known-bad builds running, and every fix shipped after them is theoretical. The
+       privacy cost is bounded and stated plainly in SECURITY.md and the README — the check sends
+       no identity and carries no telemetry; it is a GET of a few KB of XML, and it says which
+       version asked only in as much as any HTTPS request has a user agent.
+
+       SUEnableAutomaticChecks=true also suppresses Sparkle's permission prompt, which is the
+       point: the prompt exists to obtain the consent this default already assumes. Leaving the
+       prompt AND defaulting to on would be asking a question whose answer is ignored. -->
   <key>SUFeedURL</key><string>$APPCAST_URL</string>
   <key>SUPublicEDKey</key><string>$SPARKLE_PUBKEY</string>
+  <key>SUEnableAutomaticChecks</key><true/>
+  <key>SUAutomaticallyUpdate</key><true/>
 </dict></plist>
 PLIST
 

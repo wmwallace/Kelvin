@@ -23,8 +23,8 @@ removes most of the usual categories. What remains is worth reporting:
   anyway and they will be forwarded.
 - **Any network activity beyond the update check.** Releases ship the perception weights inside
   the app. The one outbound request a release is allowed is Sparkle's update check against
-  `https://usekelvin.app/appcast.xml` — off until the user agrees to it, and it fetches the
-  appcast and nothing else. Any other packet leaving a release build is a bug by definition, and
+  `https://usekelvin.app/appcast.xml` — on by default, turned off in Settings ▸ General, and it
+  fetches the appcast and nothing else. Any other packet leaving a release build is a bug by definition, and
   a serious one given what the project claims. (A build from source, without `make stage-model`,
   fetches the weights once from Hugging Face at a pinned revision — that one is expected and
   documented.)

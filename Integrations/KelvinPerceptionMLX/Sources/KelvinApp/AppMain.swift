@@ -12,9 +12,11 @@ struct KelvinApp: App {
     /// `SUFeedURL` (scripts/package-app.sh writes it from `Branding.appcastURL`). A `swift run`
     /// dev build has no plist, so it gets no updater and no menu item rather than a broken one.
     ///
-    /// Checks are consent-first — Sparkle's standard controller asks the user before it ever
-    /// checks automatically, which is the only stance compatible with SECURITY.md: the update
-    /// check is the one outbound request a released build is allowed, and the user turns it on.
+    /// Checks are AUTOMATIC by default, set in the Info.plist the packaging script writes, and
+    /// both switches live in Settings ▸ General (see `UpdateSettings`). This reversed the original
+    /// consent-first stance deliberately: the update check is the one outbound request a release
+    /// makes, and an alpha that only updates the users who said yes to a dialog leaves known-bad
+    /// builds in the field. SECURITY.md and the README say so in the same words.
     private let updaterController: SPUStandardUpdaterController? =
         Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil
             ? SPUStandardUpdaterController(startingUpdater: true,
@@ -81,7 +83,7 @@ struct KelvinApp: App {
         // photograph's location — and both were reachable only from inside a file panel, which is
         // to say only while you were busy doing something else.
         Settings {
-            SettingsView(appState: appState)
+            SettingsView(appState: appState, updater: updaterController?.updater)
         }
     }
 
