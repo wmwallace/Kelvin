@@ -12,7 +12,7 @@ BUILD_PATH ?= $(TMPDIR)kelvin-build
 SWIFT := swift
 SWIFTFLAGS := --scratch-path "$(BUILD_PATH)"
 
-.PHONY: build test release clean bin eval render app open stage-model app-staged
+.PHONY: build test release clean bin eval render app open stage-model app-staged delta
 
 build:
 	$(SWIFT) build $(SWIFTFLAGS)
@@ -53,6 +53,14 @@ open:
 # whose licence file is not present, because bundling them is redistribution.
 stage-model:
 	scripts/stage-model.sh
+
+# The Sparkle delta patch from a previously shipped release to the app now in dist/. Without one,
+# every update re-downloads the bundled weights; see docs/RELEASING.md.
+#   make delta OLD=~/Downloads/Kelvin-0.1.0.dmg
+NEW ?= dist/Kelvin.app
+delta:
+	@test -n "$(OLD)" || { echo "usage: make delta OLD=<previous .dmg or .app> [NEW=$(NEW)]"; exit 2; }
+	scripts/make-delta.sh "$(OLD)" "$(NEW)"
 
 # Run against the staged weights instead of the Hugging Face cache — the same path a shipped bundle
 # takes, so "does it load from disk" is testable before there is a bundle.

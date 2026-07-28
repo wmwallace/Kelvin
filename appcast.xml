@@ -2,7 +2,13 @@
 <!-- Kelvin's update feed. Served at https://usekelvin.app/appcast.xml via a redirect to this
      file on main — so a release updates this by a commit, and the website is never touched.
      Each enclosure is signed with the Sparkle EdDSA key (docs/RELEASING.md); installed copies
-     verify against the public key baked into their Info.plist. -->
+     verify against the public key baked into their Info.plist.
+
+     From the second release onwards each item also carries a <sparkle:deltas> block, so an update
+     is a few MB rather than the whole 1.4 GB image again. Build it with scripts/make-delta.sh and
+     paste what it prints: sparkle:deltaFrom is the OLD build's CFBundleVersion — the number in
+     <sparkle:version>, not the marketing version — because that is the key Sparkle looks a delta
+     up by on the machine being updated. -->
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
   <channel>
     <title>Kelvin</title>

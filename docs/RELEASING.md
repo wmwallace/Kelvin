@@ -90,10 +90,80 @@ moment the first binary ships. The plumbing:
   it is not a secret); `KELVIN_SPARKLE_PUBKEY` overrides it if the pair is ever regenerated.
 - **Appcast**: served from the domain (a few KB, permanent URL); the DMG itself is a GitHub
   release asset. Each release's appcast entry is signed with `sign_update` (same artifacts
-  directory) using the Keychain key.
-- **Binary deltas, before the SECOND release**: with the weights inside, a full update is a
-  1.4 GB download. Sparkle's `BinaryDelta` makes a code-only update a few MB. Getting this wrong
-  once teaches users the app is expensive to keep updated.
+  directory). Pass the key as a *file* — `sign_update -f "<backup>/sparkle_private_key"`. Reading it
+  from the login Keychain raises an authorisation dialog, and with nobody to answer it the command
+  simply hangs rather than failing.
+- **Binary deltas**: required from the second release onwards, because with the weights inside a
+  full update is a 1.4 GB download. `scripts/make-delta.sh` builds one; see the next section.
+
+## Binary deltas
+
+A release ships 1.4 GB to deliver, usually, a few kilobytes of changed code — the rest is the same
+4-bit weights the user already has. A delta patch is how that stops being true, and it is the
+difference between an update people accept and one they learn to dismiss.
+
+```sh
+gh release download v0.1.0 --pattern '*.dmg' --dir /tmp        # the copy users actually installed
+scripts/make-delta.sh /tmp/Kelvin-0.1.0.dmg dist/Kelvin.app    # after the new app is stapled
+```
+
+That writes `dist/Kelvin-<version>-from-<oldbuild>.delta`, signs it, and prints the
+`<sparkle:deltas>` block to paste into `appcast.xml`. In between it applies the patch to a scratch
+copy and refuses to give you a delta whose result is not byte-identical to the new app *and* still
+passes `codesign` — a patch rewrites part of a signed bundle, which is exactly the operation that
+can leave a signature covering contents that no longer match.
+
+Measured, 0.1.0 → a rebuild of the same source: **87 KB**, produced and verified in 23 seconds, in
+place of a 1.4 GB download. That is the floor rather than the figure to quote — a release with real
+code in it is bounded by the compressed diff of the 45 MB executable, so expect single-digit
+megabytes. The weights, which are all the rest of it, do not change between releases and cost
+nothing.
+
+What is easy to get wrong:
+
+- **`sparkle:deltaFrom` is the build number, not the marketing version.** Sparkle looks a delta up by
+  the installed app's `CFBundleVersion` — `appcastItem.deltaUpdates[hostVersion]`, where
+  `hostVersion` is `SUHost.version`. For the 0.1.0 release that key is `191`. Write `0.1.0` there and
+  the appcast still validates, still publishes, and matches nobody; every user quietly takes the full
+  download. The script reads the number out of the old bundle so it cannot be typed wrongly.
+- **The patch must be built from the bundle that actually shipped**, which is why the recipe starts
+  by downloading the previous release rather than trusting whatever is left in `dist/`. Mounting the
+  image also sidesteps extended attributes: a `.app` that has been launched accumulates
+  `com.apple.macl` and `com.apple.provenance`, and Sparkle documents delta creation as rejecting
+  code-signing-related attributes. A copy read out of a read-only image carries none of them.
+- **One delta per predecessor.** A patch is a pair of versions, not a version. Someone two releases
+  behind matches no `deltaFrom` and takes the full download, so list a delta from every release still
+  plausibly installed inside the same `<sparkle:deltas>`.
+- **Do not raise `BinaryDelta --version`** past what the *older* app understands. The patch is read
+  by the Sparkle already on the user's disk, not the one being installed. Today the default is
+  right: the tool and the shipped framework come from the same pinned Sparkle, and
+  `BinaryDelta info` reports the result as version 4.2, LZMA.
+
+The `.delta` is not notarised, and does not need to be: it is not a bundle, it is authenticated by
+its EdDSA signature, and the app it reconstructs was stapled before the patch was made — the ticket
+is a file inside `Contents`, so it travels through the patch like everything else.
+
+And the reassuring part: if a delta is missing, mis-keyed, unsigned or fails to apply, Sparkle logs
+"Failed to download delta update. Falling back to regular update…" and downloads the full image.
+Getting this wrong costs bandwidth, not installs.
+
+## Cutting a release
+
+In order, because several of these are irreversible:
+
+1. `make test` green, and the version decided (see the version scheme above).
+2. `make stage-model`, then `scripts/package-app.sh` with `KELVIN_SIGN_IDENTITY`,
+   `KELVIN_NOTARY_PROFILE` and `KELVIN_VERSION` set. Two notarisation waits, ~35 min total.
+3. Run the first-run checks below on the DMG, not just the app.
+4. `scripts/make-delta.sh` against every still-installed predecessor.
+5. Tag `vX.Y.Z` on the exact commit that was built, and push it.
+6. `gh release create vX.Y.Z dist/Kelvin-X.Y.Z.dmg dist/*.delta` with notes that say what changed
+   and what still does not work.
+7. Add the item to `appcast.xml` — `sparkle:version` is the `CFBundleVersion` of the build you just
+   made, which the packaging script printed into its `Info.plist` — and **commit it to `main`**. The
+   feed at `usekelvin.app/appcast.xml` redirects to the file on `main`, so a release is published by
+   a commit and the website is never touched.
+8. Watch an installed copy of the previous release actually take the update.
 
 ## Sizes
 

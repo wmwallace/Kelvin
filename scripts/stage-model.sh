@@ -92,6 +92,14 @@ for file in "$SOURCE"/*; do
     cp -L "$file" "$STAGE/"
 done
 
+# READABLE BY EVERY USER OF THE MACHINE, not just whoever ran this. Hugging Face writes its cache
+# blobs 0600, `cp` carries that through, and a bundle assembled from it ships weights only the
+# installing account can open — so a second person on a family Mac launches the app from
+# /Applications and it fails on the first photo with no obvious cause. Found by Sparkle's
+# BinaryDelta, which warns about irregular permissions inside a bundle; v0.1.0 shipped this way.
+# Directories need +x to be traversable, hence a+rX rather than a+r.
+chmod -R a+rX "$STAGE"
+
 echo
 echo "Staged $(du -sh "$STAGE" | cut -f1):"
 ls -1 "$STAGE" | sed 's/^/  /'
