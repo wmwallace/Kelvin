@@ -656,3 +656,54 @@ folders people have already worked in.
   the progress line both say so rather than letting it read as a hang.
 - **The record is keyed by folder path**, so moving a shoot orphans its look — the same known limit
   `EditStore` has, recorded here for the same reason.
+
+---
+
+## D14 — Place names: one network call, on by default · **Decided 28 July 2026**
+
+`GeoPoint.swift` said "No reverse geocoding, ever — `CLGeocoder` is a call to Apple's servers, and
+this app does not make calls." The owner reversed that deliberately.
+
+**The reasoning, which is narrower than "we allow network now".** The promise this app makes is that
+*your photographs are processed on your machine rather than uploaded to be processed*. A rounded
+coordinate exchanged for a town name is not that. Nothing about the photograph is sent — not the
+pixels, not the filename, not an identifier — and the thing that comes back is the name of a place.
+
+**On by default, with an opt-out** in Settings ▸ Scene reading ▸ Network. Off means `PlaceNames`
+never constructs a `CLGeocoder` at all; it is inert, not merely quiet.
+
+### What that bought
+
+The filmstrip's Place grouping showed degrees, which is a heading nobody reads. It now says
+"Sunriver, Oregon". The same names pre-fill the export label, which is the token a photographer
+actually wants in a filename — see the label added the same day.
+
+### The guards
+
+- **Coordinates are rounded to three decimal places (~110 m) before they are sent.** Finer than a
+  place name resolves anyway, coarser than a doorstep, and it collapses a 400-frame shoot in one
+  valley to a single request rather than four hundred — which is also the difference between a
+  feature and a rate-limit error.
+- **One lookup per place, cached to disk.** Turning the switch off offers to forget the cache,
+  because keeping a list of everywhere someone has been after they said stop is the wrong kind of
+  quiet.
+- **Core stays clean.** The lookup lives in `PlaceNames` in the app. `KelvinCore` imports no
+  CoreLocation and makes no network call, so the CLI and the evaluation harness remain provably
+  offline.
+- **Degrees remain the fallback, permanently.** The lookup is asynchronous and can fail; a heading
+  that blanks while waiting on a network would be worse than one that reads in degrees.
+
+### What was considered and not chosen
+
+A **bundled offline dataset** (GeoNames-style, a few MB against a 1.6 GB model) would have given
+city-level names with no network and no toggle, keeping the Privacy line literally true. It was
+rejected for granularity: "Sunriver Resort" is what the place is called, and a nearest-town lookup
+would say "Bend" from twenty miles away. If the network claim ever becomes contentious, this is the
+fallback that already has a design.
+
+### Consequence
+
+`README.md` said "no upload... because there's no server to talk to" and that the "no cloud" claim
+"has no asterisk on it". Both were true and are no longer. The README now lists exactly two network
+calls — the update check and this — and says what each sends. **A privacy claim in a public README
+is a promise; it gets edited in the same commit that makes it untrue, or not at all.**

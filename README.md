@@ -87,7 +87,7 @@ notarised disk image. Drag it to Applications and open it; there is no right-cli
 Gatekeeper warning.
 
 It is about 1.5 GB, and that is the whole point: the perception model travels inside the app, so
-nothing is fetched on first run and the "no cloud" claim has no asterisk on it. Updates after the
+nothing is fetched on first run and no photograph you open is ever sent anywhere to be read. Updates after the
 first one are small — a few megabytes — because releases ship a binary patch rather than the model
 again.
 
@@ -111,19 +111,32 @@ Opens RAW, JPEG, HEIC, PNG and TIFF.
 
 ## It runs on your Mac
 
-The editing and the scene reading both happen locally. There's no account, no upload and no
-telemetry, because there's no server to talk to. If your library already lives in iCloud then it
+The editing and the scene reading both happen locally. There's no account, no telemetry, and your
+photographs are never uploaded. Two small things do use the network — an update check, and place
+names for geotagged photos — and both are listed below and switchable off. If your library already lives in iCloud then it
 lives in iCloud — that's your setup, and Kelvin neither adds to it nor takes it away.
 
 A released build carries the model inside it and needs no network to work. Built from source, it
-fetches the weights once, at a pinned revision. The one thing a release will ever ask the network
-is whether an update exists. It does that on its own, because an alpha whose fixes only reach the
+fetches the weights once, at a pinned revision. A release asks the network two things, both of them
+switchable off in Settings. The first is whether an update exists. It does that on its own, because an alpha whose fixes only reach the
 people who agreed to a dialog is an alpha that stays broken for everyone else — the check sends no
 account, no identifier and nothing about your photographs, and both switches are in
 Settings ▸ General if you would rather it did not.
 
+The second is place names. If a photograph carries GPS coordinates, Kelvin asks Apple what that
+place is called, so the filmstrip can group your shoot under “Sunriver, Oregon” rather than under a
+pair of numbers. **The coordinate goes; the photograph does not** — not the pixels, not the
+filename, not an identifier. It is rounded to about 110 m before it is sent, each place is looked up
+once and remembered, and the switch is in Settings ▸ Scene reading under Network. Turn it off and no
+coordinate ever leaves your Mac.
+
+That is the whole list. Everything that reads or edits a photograph happens on your machine, which
+is the promise this app is actually making — your pictures are processed here, not uploaded to be
+processed somewhere else.
+
 Your originals are never modified: edits are kept in Kelvin's own folder, never beside your
-files. Exports carry the original metadata by default,
+files. The one thing that touches them is culling — you can move rejected frames to the Trash from
+the filmstrip, which asks first and puts them in the Finder's Trash so you can get them back. Exports carry the original metadata by default,
 **including location** — there's a switch in the export panel to strip it, with tests that read the
 file back to check.
 

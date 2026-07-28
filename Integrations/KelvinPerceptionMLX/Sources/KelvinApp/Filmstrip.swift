@@ -164,6 +164,9 @@ struct FilmstripView: View {
     let onSelect: (URL, _ extend: Bool, _ toggle: Bool) -> Void
     /// The frames picked out for an action. Empty means the action covers the whole shoot.
     var selected: Set<URL> = []
+    /// Move frames to the Trash. Passed the selection when the clicked frame is part of one, so
+    /// "select forty soft frames, delete them" is one gesture rather than forty.
+    var onTrash: ([URL]) -> Void = { _ in }
     var onDismiss: (URL) -> Void = { _ in }
     var flags: [URL: PhotoFlag] = [:]
     var totalCount: Int = 0
@@ -371,7 +374,10 @@ struct FilmstripView: View {
                 }
             }
             .pickerStyle(.segmented)
-            .frame(width: 220)
+            // Widened for the sixth chip. A segmented control given less room than its labels need
+            // truncates them rather than wrapping, and "Undecid…" beside "Flagg…" is a row of
+            // guesses.
+            .frame(width: 268)
             .controlSize(.small)
 
             groupControl
@@ -782,6 +788,24 @@ struct FilmstripView: View {
         .animation(Motion.gated(Motion.quick, reduceMotion), value: isCurrent)
         .animation(Motion.gated(Motion.quick, reduceMotion), value: hovered == url)
         .onHover { hovered = $0 ? url : (hovered == url ? nil : hovered) }
+        // THE DESTRUCTIVE ONE LIVES BEHIND A RIGHT-CLICK, and the hover X keeps meaning what it has
+        // always meant. Two actions that differ by whether files survive must not be adjacent
+        // targets a slipped click can swap between.
+        //
+        // The menu acts on the SELECTION when this frame is part of one — the point of gathering up
+        // forty soft frames is to decide about them once.
+        .contextMenu {
+            let scope = selected.contains(url) ? Array(selected) : [url]
+            Button(scope.count == 1 ? "Remove from this session"
+                                    : "Remove \(scope.count) from this session") {
+                for u in scope { onDismiss(u) }
+            }
+            Divider()
+            Button(scope.count == 1 ? "Move to Trash…" : "Move \(scope.count) to Trash…",
+                   role: .destructive) {
+                onTrash(scope)
+            }
+        }
         // The filename, and what the scan measured if it has been past. The number travels with the
         // flag deliberately: an automatic judgement with no visible measurement behind it is one you
         // can neither check nor disagree with.

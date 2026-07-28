@@ -874,6 +874,10 @@ final class AppState: ObservableObject {
             if self.stripGrouping == .place, !index.hasAnyLocation {
                 self.stripGrouping = .none
             }
+            // Ask for the place names now the positions are known. One lookup per distinct rounded
+            // coordinate, so a shoot in one valley costs a single request rather than four hundred —
+            // and nothing happens at all when the setting is off.
+            PlaceNames.shared.resolveAll(Array(index.locations.values))
         }
     }
 
@@ -891,7 +895,7 @@ final class AppState: ObservableObject {
     /// Which frames the strip is showing.
     enum StripFilter: String, CaseIterable {
         case all = "All", keepers = "Keepers", undecided = "Undecided"
-        case edited = "Edited", soft = "Focus"
+        case edited = "Edited", soft = "Focus", flagged = "Flagged"
     }
     @Published var stripFilter: StripFilter = .all
 
@@ -911,6 +915,12 @@ final class AppState: ObservableObject {
             // Review, not a verdict: this is the list to LOOK at, so the false positives are
             // the point of it rather than something hidden by it.
             case .soft:      return focus[url]?.isSoft == true
+            // EVERYTHING THE SCAN NOTICED, which `Focus` deliberately is not. The scan reports four
+            // concerns and only the two about sharpness could be filtered on — a frame flagged
+            // `veryDark` or `veryBright` drew a badge on its thumbnail and then could not be
+            // gathered up, so the one action those flags exist to enable (look at them together,
+            // decide, move on) meant scrolling the whole shoot hunting for triangles.
+            case .flagged:   return isFlaggedByScan(url)
             }
         }
     }
@@ -1073,10 +1083,19 @@ final class AppState: ObservableObject {
             return Self.timeOfDay.string(from: start)
         case .location:
             guard let anchor = group.anchor else { return nil }
-            // Coordinates, not a place name. Reverse geocoding is a network call, and this app does
-            // not make network calls (non-negotiable: everything runs on-device). Degrees with one
-            // decimal place is about 11 km — enough to tell two venues apart, and it does not
-            // pretend to a precision the heading is not for.
+            // A place name when one is known, degrees otherwise.
+            //
+            // This used to read "Coordinates, not a place name. Reverse geocoding is a network call,
+            // and this app does not make network calls." That was reversed deliberately (D14): the
+            // promise Kelvin makes is that your PHOTOGRAPHS are processed here rather than uploaded
+            // to be processed, and a rounded coordinate exchanged for a town name is not that. It is
+            // a switch in Settings, on by default, and `PlaceNames` is inert when it is off.
+            //
+            // Degrees remain the fallback and always will: the lookup is asynchronous, it can fail,
+            // and a heading that goes blank waiting for the network would be worse than one that
+            // reads in degrees. One decimal place is about 11 km — enough to tell two venues apart
+            // without pretending to a precision the heading is not for.
+            if let name = PlaceNames.shared.cachedName(for: anchor) { return name }
             return Self.coordinates(anchor)
         }
     }
@@ -1144,6 +1163,19 @@ final class AppState: ObservableObject {
     @Published var triage: [URL: PhotoTriage.Verdict] = [:]
 
     var softCount: Int { folderPhotos.filter { focus[$0]?.isSoft == true }.count }
+
+    /// Did the scan notice anything at all about this frame — sharpness or exposure.
+    ///
+    /// Deliberately a union rather than "has an exposure concern": someone reviewing what the scan
+    /// found wants all of it in one pass, and a filter that silently omitted the soft frames would
+    /// be the more surprising of the two possible wrong answers.
+    func isFlaggedByScan(_ url: URL) -> Bool {
+        if focus[url]?.isSoft == true { return true }
+        return triage[url]?.concerns.isEmpty == false
+    }
+
+    /// How many frames the scan flagged, for the filter chip's count.
+    var flaggedCount: Int { folderPhotos.filter { isFlaggedByScan($0) }.count }
 
     /// What else the scan noticed about a frame, beyond sharpness: a frame so dark or so bright that
     /// most of it carries no detail. Focus concerns are excluded because the soft badge and the Focus
@@ -1807,6 +1839,82 @@ final class AppState: ObservableObject {
 
     /// Remove a photo from the strip for this session, and forget any edit it had. The file itself
     /// is never touched — this is about clearing the working set, not deleting someone's work.
+    // MARK: Removing frames — from the working set, or from the disk
+
+    /// Frames awaiting a confirmed trash. Non-empty puts the confirmation in front of the user.
+    @Published var pendingTrash: [URL] = []
+
+    /// Ask to move frames to the Trash. Nothing happens until `confirmTrash` runs.
+    func requestTrash(_ urls: [URL]) {
+        let targets = urls.isEmpty ? [] : urls
+        guard !targets.isEmpty else { return }
+        pendingTrash = targets
+    }
+
+    /// What the confirmation says. Names the file when there is one, counts them when there are
+    /// several — "Move 14 photos to the Trash" is a different decision from "move this one".
+    var trashPrompt: String {
+        pendingTrash.count == 1
+            ? "Move “\(pendingTrash[0].lastPathComponent)” to the Trash?"
+            : "Move \(pendingTrash.count) photos to the Trash?"
+    }
+
+    /// **Move to the Trash. Never unlink.**
+    ///
+    /// This is the only thing in Kelvin that touches an original, and it exists because culling a
+    /// shoot by deletion is how photographers actually work — the scan finds forty frames where
+    /// nothing came out sharp and they want them gone, not hidden.
+    ///
+    /// `trashItem` and not `removeItem`, and the difference is the whole design. Non-negotiable #3
+    /// says the original is never written to; deleting one is a bigger departure than writing to it,
+    /// so the only version of this worth shipping is the recoverable one. The Finder shows them, ⌘Z
+    /// in the Finder puts them back, and the word "Trash" in the button says exactly that.
+    ///
+    /// **The edits are deliberately NOT deleted.** A trashed photo can be put back, and someone who
+    /// restores a frame should find their work on it intact. Orphaned sidecars cost a few kilobytes;
+    /// destroying an afternoon's editing because a file went to the Trash costs the afternoon.
+    func confirmTrash() {
+        let targets = pendingTrash
+        pendingTrash = []
+        guard !targets.isEmpty else { return }
+
+        var trashed = 0
+        var failures: [String] = []
+        for url in targets {
+            do {
+                try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+                trashed += 1
+                // Out of the working set too, or the strip keeps drawing a frame that is gone.
+                dismissedURLs.insert(url)
+                editedURLs.remove(url)
+                selectedPhotos.remove(url)
+                sessions.removeValue(forKey: url)
+                sessionOrder.removeAll { $0 == url }
+                folderPhotos.removeAll { $0 == url }
+            } catch {
+                failures.append(url.lastPathComponent)
+            }
+        }
+
+        // If the open photo went with them, move to something still here rather than leaving the
+        // canvas showing a file that no longer exists.
+        if let open = imageURL, targets.contains(open) {
+            if let next = folderPhotos.first {
+                Task { await openPhoto(next) }
+            } else {
+                closeCurrentPhoto()
+            }
+        }
+
+        if failures.isEmpty {
+            statusMessage = "Moved \(trashed) photo\(trashed == 1 ? "" : "s") to the Trash — "
+                + "recover them there if you change your mind"
+        } else {
+            statusMessage = "Moved \(trashed) to the Trash · \(failures.count) could not be moved "
+                + "(\(failures.prefix(3).joined(separator: ", ")))"
+        }
+    }
+
     func dismiss(_ url: URL) {
         dismissedURLs.insert(url)      // survives the folder re-scan that happens on every open
         // THE SIDECAR STAYS. This called `EditStore.remove(for:)`, while the tooltip said "Remove
@@ -4021,6 +4129,21 @@ struct ContentView: View {
         }
         .task { await appState.loadDemoIfRequested() }
         .sheet(isPresented: $showShortcutsSheet) { ShortcutsSheet() }
+        // The only confirmation in the app, for the only action that touches an original. It names
+        // the Trash rather than saying "delete", because where the files go is the reason this is
+        // an acceptable thing to offer at all.
+        .confirmationDialog(
+            appState.trashPrompt,
+            isPresented: Binding(get: { !appState.pendingTrash.isEmpty },
+                                 set: { if !$0 { appState.pendingTrash = [] } }),
+            titleVisibility: .visible
+        ) {
+            Button("Move to Trash", role: .destructive) { appState.confirmTrash() }
+            Button("Cancel", role: .cancel) { appState.pendingTrash = [] }
+        } message: {
+            Text("They go to the Finder's Trash, so you can put them back. Your edits are kept "
+                 + "either way — restore a photo and its edit is still there.")
+        }
     }
 
     @State private var showShortcutsSheet = false
@@ -4252,6 +4375,7 @@ struct ContentView: View {
                                       appState.stripClick(url, extend: extend, toggle: toggle)
                                   },
                                   selected: appState.selectedPhotos,
+                                  onTrash: { appState.requestTrash($0) },
                                   onDismiss: { appState.dismiss($0) },
                                   flags: appState.flags,
                                   totalCount: appState.folderPhotos.count,

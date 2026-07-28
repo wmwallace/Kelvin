@@ -136,6 +136,18 @@ public enum PhotoTriage {
         public var summary: String {
             concerns.isEmpty ? "no measured faults" : concerns.map(\.message).joined(separator: ", ")
         }
+
+        /// Public so a caller can construct a verdict without running the scan — the app's own tests
+        /// need a shoot with known findings, and every member here is already public. The scan
+        /// itself builds these through `verdict(for:)`; this is for describing a result, not
+        /// producing one.
+        public init(concerns: [Concern], focus: FocusMeasure.Reading,
+                    statistics: ImageStatistics, signature: Signature) {
+            self.concerns = concerns
+            self.focus = focus
+            self.statistics = statistics
+            self.signature = signature
+        }
     }
 
     /// Apply the rules above. Split out from the I/O so the whole decision surface is a pure

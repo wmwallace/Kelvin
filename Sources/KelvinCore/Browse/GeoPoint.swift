@@ -9,9 +9,16 @@ import Foundation
 /// `Double`s in it and none of the conformances is the wrong trade. `CaptureInfo` keeps its
 /// `coordinate` for the map link; this is what the browser groups on.
 ///
-/// **No reverse geocoding, ever.** Turning a coordinate into "Brighton Beach" means a network
-/// request — `CLGeocoder` is a call to Apple's servers, and this app does not make calls. Nothing
-/// here resolves a name; the browser groups by proximity and shows degrees.
+/// **No reverse geocoding in Core, and none without asking.** This type resolves no names: it holds
+/// degrees, and the browser groups by proximity.
+///
+/// It used to say "No reverse geocoding, ever — this app does not make calls." That was reversed by
+/// the owner in D14, and the reasoning is worth keeping next to the data rather than only in the
+/// decision log: the promise Kelvin makes is that your *photographs* are processed here rather than
+/// uploaded to be processed, and a rounded coordinate exchanged for a town name is not that. The
+/// lookup lives in `PlaceNames` in the app, behind a switch in Settings, and Core stays free of
+/// CoreLocation and of any network at all — which is what keeps the headless tools and the whole
+/// evaluation harness honest.
 public struct GeoPoint: Sendable, Equatable, Hashable, Codable {
     /// Degrees, positive north. EXIF stores the magnitude unsigned with the hemisphere in a
     /// separate tag; by the time a point exists here the sign has already been applied.

@@ -157,6 +157,10 @@ private struct UpdateSettings: View {
 /// source, and because "runs on your machine" is a claim someone should be able to check rather
 /// than take on trust.
 private struct PerceptionSettings: View {
+    /// On by default (D14). The default lives in `PlaceNames.isEnabled` too; both read the same key,
+    /// and the pane must never be the only thing that knows what the default is.
+    @AppStorage(PlaceNames.enabledKey) private var placeNamesEnabled = true
+
     var body: some View {
         Form {
             Section {
@@ -171,6 +175,30 @@ private struct PerceptionSettings: View {
                 Text(PerceptionInfo.networkStatement)
                     .font(.callout)
                     .fixedSize(horizontal: false, vertical: true)
+
+                // Placed here, under Network, and not under a friendlier heading. This is the one
+                // switch in the app that governs whether anything leaves the machine, and burying
+                // it beside a cosmetic preference would be the wrong kind of quiet.
+                Toggle("Look up place names for geotagged photos", isOn: $placeNamesEnabled)
+                Text(placeNamesEnabled
+                     ? "The coordinate is sent to Apple and a place name comes back, so the strip can "
+                       + "say “Sunriver, Oregon” instead of degrees. Your photograph is not sent — not "
+                       + "the pixels, not the filename. Coordinates are rounded to about 110 m first, "
+                       + "and each place is looked up once and remembered."
+                     : "Off. No coordinate ever leaves this Mac, and the strip groups by proximity and "
+                       + "shows degrees.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if !placeNamesEnabled, !PlaceNames.shared.names.isEmpty {
+                    // Turning it off and keeping a list of everywhere someone has been would be
+                    // exactly the kind of quiet this switch exists to prevent.
+                    Button("Forget the \(PlaceNames.shared.names.count) place names already looked up") {
+                        PlaceNames.shared.forgetAll()
+                    }
+                    .font(.caption)
+                }
             } header: {
                 Text("Network")
             }
