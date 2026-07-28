@@ -515,7 +515,20 @@ public enum Renderer {
         if feather > 0 {
             let minEdge = min(maskBitmap.extent.width, maskBitmap.extent.height)
             let radius = max(1.0, feather / 100.0 * Double(minEdge) * 0.06)
-            m = m.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: radius])
+            // CLAMPED FIRST, or the frame's own edge feathers the mask away.
+            //
+            // Outside a finite CIImage's extent is transparent black, so blurring a mask that runs
+            // to the border averages it against nothing and pulls it down — measured at radius 16.8
+            // px on a 1200 px proxy, a mask reading 1.0 came back 0.51 in the bottom row and did not
+            // recover until ~40 rows in (~320 rows at 60 MP). That is a subject standing on the
+            // bottom of the frame — which is most portraits — silently getting HALF the lift the
+            // recipe asked for, strongest exactly where the person is.
+            //
+            // Clamping replicates the edge pixels outward so the blur averages the mask against
+            // itself. A mask that is uniform over the whole frame now feathers to itself, which is
+            // the invariant `FeatherEdgeTests` pins.
+            m = m.clampedToExtent()
+                 .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: radius])
                  .cropped(to: maskBitmap.extent)
         }
         if tightness > 0 {
