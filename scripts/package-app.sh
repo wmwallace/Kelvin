@@ -209,6 +209,49 @@ cat > "$APP/Contents/Info.plist" <<PLIST
        SUEnableAutomaticChecks=true also suppresses Sparkle's permission prompt, which is the
        point: the prompt exists to obtain the consent this default already assumes. Leaving the
        prompt AND defaulting to on would be asking a question whose answer is ignored. -->
+  <!-- WHAT KELVIN CAN BE ASKED TO OPEN, so it appears in Finder's "Open With" and can be chosen
+       as the default with "Change All". Without this the app is unreachable from a photograph —
+       the only ways in are the Open panel and a drop on the window.
+
+       LSHandlerRank is Alternate, DELIBERATELY, for both entries. `Default` would tell Launch
+       Services that Kelvin should take over JPEG and RAW the moment it is installed, and silently
+       reassigning a photographer's double-click is not a decision an app gets to make on their
+       behalf — least of all one that opens a 1.6 GB model to show a picture. Alternate puts Kelvin
+       in the menu and lets the user promote it; Preview stays the default until they say otherwise.
+
+       Role is Editor rather than Viewer because Kelvin edits, even though it never writes to the
+       original — the edit is a recipe beside the file, and that is still editing.
+
+       RAW is one umbrella UTI: every vendor type Apple knows (com.sony.arw-raw-image and the rest)
+       conforms to public.camera-raw-image, so this covers the whole list in ImageDecoder without
+       repeating it and without going stale when Apple adds a body. The few exotic formats with no
+       system UTI — .iiq, .fff, .mos, .x3f — are still openable by drag and by Open; they simply
+       cannot be declared, because there is nothing to declare them as. -->
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>Photograph</string>
+      <key>CFBundleTypeRole</key><string>Editor</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.jpeg</string>
+        <string>public.png</string>
+        <string>public.tiff</string>
+        <string>public.heic</string>
+        <string>public.heif</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key><string>Camera RAW Image</string>
+      <key>CFBundleTypeRole</key><string>Editor</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.camera-raw-image</string>
+      </array>
+    </dict>
+  </array>
   <key>SUFeedURL</key><string>$APPCAST_URL</string>
   <key>SUPublicEDKey</key><string>$SPARKLE_PUBKEY</string>
   <key>SUEnableAutomaticChecks</key><true/>

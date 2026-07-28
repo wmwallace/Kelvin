@@ -3,10 +3,58 @@ import AppKit
 import KelvinCore
 import Sparkle
 
+/// Photographs handed to Kelvin by the system — "Open With", a double-click once Kelvin is the
+/// default, or a drop on the Dock icon.
+///
+/// **A queue rather than a direct call, because the request usually arrives first.** Launch
+/// Services delivers the open event during startup, and `appState` is a `@StateObject` that does
+/// not exist until SwiftUI first evaluates the scene's body. Opening Kelvin BY double-clicking a
+/// RAW — which is the whole point of being a handler — therefore hits a nil state every time,
+/// while opening a second photo into an already-running app works. The failure only shows up in
+/// the case the feature exists for.
+@MainActor
+final class OpenRequests {
+    static let shared = OpenRequests()
+    private var pending: [URL] = []
+    private weak var state: AppState?
+
+    /// Called once the window exists. Drains anything that arrived before it did.
+    func attach(_ state: AppState) {
+        self.state = state
+        let queued = pending
+        pending = []
+        queued.forEach(deliver)
+    }
+
+    /// One photograph, or the first of a selection: Kelvin edits one frame at a time and lists the
+    /// rest of the folder around it, so opening five files and opening one of them are the same
+    /// request. A folder arrives here too and `open(_:)` already knows what to do with it.
+    func receive(_ urls: [URL]) {
+        guard let first = urls.first else { return }
+        state == nil ? pending.append(first) : deliver(first)
+    }
+
+    private func deliver(_ url: URL) {
+        guard let state else { return }
+        Task { await state.open(url) }
+    }
+}
+
+/// The only reason this exists. SwiftUI's `onOpenURL` is for custom schemes; a file handed over by
+/// Launch Services arrives through the `NSApplicationDelegate`.
+@MainActor
+final class DocumentOpenDelegate: NSObject, NSApplicationDelegate {
+    func application(_ sender: NSApplication, open urls: [URL]) {
+        OpenRequests.shared.receive(urls)
+    }
+}
+
 @main
 struct KelvinApp: App {
     /// Held at App level so both the window and the File menu act on one state.
     @StateObject private var appState = AppState()
+
+    @NSApplicationDelegateAdaptor(DocumentOpenDelegate.self) private var openDelegate
 
     /// Sparkle, but only where Sparkle can mean anything: a bundle whose Info.plist carries
     /// `SUFeedURL` (scripts/package-app.sh writes it from `Branding.appcastURL`). A `swift run`
@@ -42,6 +90,9 @@ struct KelvinApp: App {
             ContentView(appState: appState)
                 .frame(minWidth: 940, minHeight: 660)
                 .onAppear {
+                    // Before anything else that can take time: a photograph double-clicked in
+                    // Finder is already waiting, and it should open ahead of the model warming.
+                    OpenRequests.shared.attach(appState)
                     NSApplication.shared.activate(ignoringOtherApps: true)
                     // Off unless KELVIN_TRACE_HITCHES is set. See Diagnostics.swift.
                     HitchMonitor.shared.start()
