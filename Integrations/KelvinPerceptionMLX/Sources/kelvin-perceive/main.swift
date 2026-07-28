@@ -14,6 +14,17 @@ import KelvinPerceptionMLX
 //       labelling step that feeds `kelvin-cli eval`. Resumable (skips already-labelled),
 //       and the model loads once (the provider is an actor that caches it).
 //
+//   kelvin-perceive bench-export --in-dir <shoot> [--out-dir <dir>] [--limit N]
+//                                 [--style natural] [--no-cache]
+//       Time the ADAPTED EXPORT path — the one a shoot carrying an applied look takes —
+//       stage by stage, and say what it costs at shoot scale.
+//
+//       This exists because `docs/ARCHITECTURE.md` carries a budget row for exporting
+//       look-carried frames and nothing could measure it. The stages below are the same
+//       sequence, in the same order, as `AppState.adaptedRecipe` followed by the render
+//       and write in `exportEdited`: decode → proxy → perceive → statistics → local masks
+//       → engine → full-res masks → render → write. If that path changes, change this.
+//
 // First run downloads ~1.6 GB (the 4-bit model) from Hugging Face; then inference is seconds.
 // Measured, not estimated — and avoidable entirely with `make stage-model` plus KELVIN_MODEL_PATH.
 
@@ -39,7 +50,131 @@ guard let first = args.first else {
 
 let provider = MLXPerceptionProvider()
 
-if first == "label" {
+/// One frame's stage timings, in seconds.
+struct FrameTiming {
+    var decode = 0.0, proxy = 0.0, perceive = 0.0, statistics = 0.0
+    var proxyMasks = 0.0, engine = 0.0, fullResMasks = 0.0, render = 0.0, write = 0.0
+    var total: Double {
+        decode + proxy + perceive + statistics + proxyMasks + engine + fullResMasks + render + write
+    }
+}
+
+/// Materialise a lazy CIImage so later measurements do not silently re-render the full frame.
+/// The same trick `AppState` uses; duplicated here because that one lives in the app target.
+let benchContext: CIContext = {
+    if let device = MTLCreateSystemDefaultDevice() {
+        return CIContext(mtlDevice: device, options: [.cacheIntermediates: true])
+    }
+    return CIContext()
+}()
+func materialise(_ image: CIImage) -> CIImage {
+    guard let cg = benchContext.createCGImage(image, from: image.extent) else { return image }
+    return CIImage(cgImage: cg)
+}
+func clock<T>(_ into: inout Double, _ body: () throws -> T) rethrows -> T {
+    let t = Date(); defer { into = Date().timeIntervalSince(t) }
+    return try body()
+}
+
+if first == "bench-export" {
+    guard let inDir = flag("--in-dir", in: args) else { die("bench-export requires --in-dir") }
+    let outDir = flag("--out-dir", in: args)
+        ?? NSTemporaryDirectory() + "kelvin-bench-\(UUID().uuidString)"
+    let limit = flag("--limit", in: args).flatMap(Int.init)
+    let styleId = flag("--style", in: args) ?? "natural"
+    let noCache = args.contains("--no-cache")
+    guard let style = CandidateStyle.all.first(where: { $0.id == styleId }) else {
+        die("unknown style '\(styleId)'")
+    }
+    let outURL = URL(fileURLWithPath: outDir, isDirectory: true)
+
+    do {
+        var images = try BatchApply.imageFiles(in: URL(fileURLWithPath: inDir, isDirectory: true))
+        guard !images.isEmpty else { die("no images in \(inDir)") }
+        if let limit { images = Array(images.prefix(limit)) }
+        try FileManager.default.createDirectory(at: outURL, withIntermediateDirectories: true)
+
+        note("Export benchmark — \(images.count) frame(s), style \(style.label)")
+        note("Model \(provider.activeModelID); writing to \(outURL.path)\n")
+
+        var timings: [FrameTiming] = []
+        var cacheHits = 0
+        let wallStart = Date()
+        for (i, url) in images.enumerated() {
+            var t = FrameTiming()
+            let full = try clock(&t.decode) { try ImageDecoder.decode(url: url) }
+            let proxy = clock(&t.proxy) { materialise(PerceptionProxy.downsample(full)) }
+
+            // The same cache the app uses, hit in the same order — so this measures shipped
+            // behaviour rather than a benchmark's idea of it. Run twice on one shoot to see the
+            // difference the cache makes; `--no-cache` measures the cold path deliberately.
+            let perceiveStart = Date()
+            let perception: Perception
+            if !noCache, let cached = PerceptionStore.load(for: url, modelId: provider.activeModelID) {
+                perception = cached
+                cacheHits += 1
+            } else {
+                perception = try await provider.perceive(proxy)
+                PerceptionStore.save(perception, for: url, modelId: provider.activeModelID)
+            }
+            t.perceive = Date().timeIntervalSince(perceiveStart)
+
+            let stats = try clock(&t.statistics) { try ImageStatistics.compute(proxy) }
+            let measured = clock(&t.proxyMasks) { LocalMasks.measure(in: proxy) }
+            let recipe = clock(&t.engine) {
+                RecipeEngine.candidate(perception: perception, statistics: stats, style: style,
+                                       subjectLuma: measured.subjectLuma,
+                                       skyLuma: measured.skyLuma,
+                                       iso: ExifReader.iso(url: url))
+            }
+            // Full-resolution masks only when the recipe actually carries masks — same condition
+            // the export loop uses, and it is a large part of the cost when it fires.
+            let bitmaps = clock(&t.fullResMasks) {
+                (recipe.masks?.isEmpty == false) ? LocalMasks.measure(in: full).bitmaps : [:]
+            }
+            let rendered = clock(&t.render) { Renderer.render(full, with: recipe, maskBitmaps: bitmaps) }
+            let out = outURL.appendingPathComponent(url.deletingPathExtension().lastPathComponent + ".jpg")
+            try clock(&t.write) {
+                try ImageWriter.write(rendered, to: out, format: .jpeg(quality: 0.97))
+            }
+            timings.append(t)
+            note(String(format: "  %2d/%d  %-24@ %5.2fs", i + 1, images.count,
+                        url.lastPathComponent as NSString, t.total))
+        }
+        let wall = Date().timeIntervalSince(wallStart)
+
+        func stat(_ pick: (FrameTiming) -> Double) -> (mean: Double, share: Double) {
+            let values = timings.map(pick)
+            let mean = values.reduce(0, +) / Double(values.count)
+            let totalMean = timings.map(\.total).reduce(0, +) / Double(timings.count)
+            return (mean, totalMean > 0 ? mean / totalMean * 100 : 0)
+        }
+        let stages: [(String, (FrameTiming) -> Double)] = [
+            ("decode", \.decode), ("proxy", \.proxy), ("perceive", \.perceive),
+            ("statistics", \.statistics), ("masks (proxy)", \.proxyMasks), ("engine", \.engine),
+            ("masks (full-res)", \.fullResMasks), ("render", \.render), ("write", \.write),
+        ]
+        print("\n── per-frame cost ──")
+        for (name, pick) in stages {
+            let s = stat(pick)
+            print(String(format: "  %-18@ %6.2fs  %5.1f%%", name as NSString, s.mean, s.share))
+        }
+        let totals = timings.map(\.total).sorted()
+        let mean = totals.reduce(0, +) / Double(totals.count)
+        print(String(format: "  %-18@ %6.2fs", "TOTAL" as NSString, mean))
+        print(String(format: "\n  min %.2fs · median %.2fs · max %.2fs · wall %.1fs for %d frames",
+                     totals.first ?? 0, totals[totals.count / 2], totals.last ?? 0, wall, timings.count))
+        print("  perception: \(cacheHits) served from cache, \(timings.count - cacheHits) read fresh")
+
+        print("\n── at shoot scale (sequential, as the app runs it today) ──")
+        for n in [100, 400, 1000] {
+            let seconds = mean * Double(n)
+            print(String(format: "  %4d frames  %6.1f min", n, seconds / 60))
+        }
+    } catch {
+        die("\(error)")
+    }
+} else if first == "label" {
     // ---- Batch corpus labelling ----
     guard let inDir = flag("--in-dir", in: args) else { die("label requires --in-dir") }
     guard let outDir = flag("--out-dir", in: args) else { die("label requires --out-dir") }
