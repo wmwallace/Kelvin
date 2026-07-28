@@ -68,7 +68,11 @@ struct FrameTiming {
 /// divergence has bitten in this change alone (see `HistogramTests`). Static members of a type carry
 /// no such isolation, which makes this the boring, portable spelling.
 enum Bench {
-    static let context: CIContext = {
+    /// `nonisolated(unsafe)` because `CIContext` is `Sendable` on the macOS 27 SDK and NOT on the
+    /// one CI builds against — so this line warns "unnecessary" here and is required there. The
+    /// same trap, with the same annotation and the same reason, is on `AppState.sharedContext`;
+    /// that comment is the canonical one. Do not delete this to silence the local warning.
+    nonisolated(unsafe) static let context: CIContext = {
         if let device = MTLCreateSystemDefaultDevice() {
             return CIContext(mtlDevice: device, options: [.cacheIntermediates: true])
         }
