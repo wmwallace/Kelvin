@@ -5720,7 +5720,40 @@ struct ContentView: View {
         // covers the batch, which writes hundreds of files from the same setting — so the checkbox
         // that says what travels has to be somewhere you meet before either.
         panel.accessoryView = PanelAccessories.exportOptions(appState, savePanel: panel)
-        if panel.runModal() == .OK, let url = panel.url {
+
+        // OPEN BESIDE THE PHOTOGRAPH, IN ITS OWN "Edited" FOLDER.
+        //
+        // This used to open wherever the save panel happened to have been last, which for a shoot
+        // opened from a card is somewhere else entirely — an export from Tuesday's job landing in
+        // Monday's folder is the kind of mistake nobody notices until a client does. The answer a
+        // photographer wants nine times in ten is "next to the originals, but not among them", and
+        // it is the same answer the group export already gives.
+        //
+        // The folder has to exist for `directoryURL` to point at it, so it is created here rather
+        // than at write time — and removed again below if the export is cancelled and nothing
+        // landed in it, because a folder that appears merely because you opened a panel and
+        // changed your mind is litter.
+        var createdFolder: URL?
+        if let source = appState.imageURL?.deletingLastPathComponent() {
+            let edited = source.appendingPathComponent(Branding.exportFolderName, isDirectory: true)
+            if !FileManager.default.fileExists(atPath: edited.path) {
+                if (try? FileManager.default.createDirectory(at: edited,
+                                                             withIntermediateDirectories: true)) != nil {
+                    createdFolder = edited
+                }
+            }
+            if FileManager.default.fileExists(atPath: edited.path) { panel.directoryURL = edited }
+        }
+
+        let choice = panel.runModal()
+        // Only a folder THIS call created, and only while it is still empty. Never a folder that
+        // was already there, and never one the export has just written into.
+        if let createdFolder,
+           (try? FileManager.default.contentsOfDirectory(atPath: createdFolder.path))?.isEmpty == true,
+           choice != .OK {
+            try? FileManager.default.removeItem(at: createdFolder)
+        }
+        if choice == .OK, let url = panel.url {
             Task { await appState.exportFullResolution(to: url) }
         }
     }
@@ -5739,7 +5772,9 @@ struct ContentView: View {
         panel.title = "Export edited photos"
         panel.message = "Choose a folder for the edited copies. Your originals are never modified."
         panel.nameFieldLabel = "Folder:"
-        panel.nameFieldStringValue = "Edited"
+        // The same constant the single-photo export opens into, so exporting one frame and then the
+        // whole shoot puts both in one place rather than in "Edited" and "Edits".
+        panel.nameFieldStringValue = Branding.exportFolderName
         panel.canCreateDirectories = true
         if let folder = appState.imageURL?.deletingLastPathComponent() {
             panel.directoryURL = folder

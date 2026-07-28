@@ -26,6 +26,15 @@ public enum Branding {
     /// filesystem: "kelvin-edit.jpg".
     public static let exportStem = displayName.lowercased() + "-edit"
 
+    /// The subfolder an export lands in, inside the folder the photographs came from.
+    ///
+    /// One constant because both export paths use it and they must agree: a photographer who
+    /// exports one frame and then the whole shoot should find both in the same place, not in
+    /// "Edited" and "Edits". Writing INTO the source folder is refused outright by
+    /// `Destination.prepare`, which compares filesystem identity — so a subfolder is not a
+    /// convention here, it is the only safe answer, and the originals cannot be touched.
+    public static let exportFolderName = "Edited"
+
     /// Reverse-DNS bundle identifier. Treated as sacred once users exist (CLAUDE.md):
     /// changing it orphans preferences, keychain entries, and the sandbox container.
     ///

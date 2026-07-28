@@ -173,6 +173,13 @@ enum PanelAccessories {
              NSGridCell.emptyContentView, NSGridCell.emptyContentView],
             [NSGridCell.emptyContentView, location, NSGridCell.emptyContentView, NSGridCell.emptyContentView]
         ]
+        // WHICH ROWS SPAN THE FULL WIDTH, named rather than counted from an index.
+        //
+        // This was `2..<rows.count`, i.e. "everything after the first two", and adding a row in the
+        // middle silently merged a row that needed its four columns — the Suffix field collapsed to
+        // a sliver and its label landed on top of the checkbox below. A two-column row and a
+        // full-width row are different kinds of row; say which is which.
+        var mergedRows = Set([rows.count - 2, rows.count - 1])   // the example, and the checkbox
         if showScope {
             // The photographer's own word for this export. Only on the group panel: labelling a
             // batch is the whole use — one photo is already being given a name in the save field
@@ -198,8 +205,10 @@ enum PanelAccessories {
             target.refreshLabelPreview()
             rows.append([NSTextField(labelWithString: "Label:"), label,
                          NSGridCell.emptyContentView, NSGridCell.emptyContentView])
+            mergedRows.insert(rows.count - 1)
             rows.append([NSGridCell.emptyContentView, labelPreview,
                          NSGridCell.emptyContentView, NSGridCell.emptyContentView])
+            mergedRows.insert(rows.count - 1)
 
             // Which photos, chosen with the flags the filmstrip already has: P marks a keeper
             // (the culling keys are P/X, straight from the shortcuts sheet — a string here once
@@ -225,15 +234,14 @@ enum PanelAccessories {
             }
             rows.append([NSGridCell.emptyContentView, keepers,
                          NSGridCell.emptyContentView, NSGridCell.emptyContentView])
+            mergedRows.insert(rows.count - 1)
         }
         let grid = NSGridView(views: rows)
         grid.rowSpacing = 10
         grid.columnSpacing = 8
         grid.column(at: 1).width = 150
         grid.column(at: 3).width = 150
-        // From the naming EXAMPLE down. The Name popup itself stays in the 150-wide column so it
-        // lines up with Format and Colour above it rather than stretching across the panel.
-        for mergedRow in 3..<rows.count {
+        for mergedRow in mergedRows.sorted() {
             grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3),
                             verticalRange: NSRange(location: mergedRow, length: 1))
         }
