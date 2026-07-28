@@ -4835,6 +4835,13 @@ struct ContentView: View {
                 // clickable coordinate. An affordance that quietly leaves the app is the thing
                 // being avoided here.
                 VStack(alignment: .leading, spacing: 3) {
+                    // The name first when there is one, the degrees underneath it always. The name
+                    // is a lookup that can fail or be switched off (D14); the coordinate is what the
+                    // camera actually recorded, and it never stops being the ground truth.
+                    if let place = appState.capture.location.flatMap({ PlaceNames.shared.cachedName(for: $0) }) {
+                        Text(place).font(Theme.ui(11, .medium)).foregroundColor(Theme.ink)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     Text(location).font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
                         .textSelection(.enabled)
                     if let url = c.mapURL {
@@ -4847,6 +4854,22 @@ struct ContentView: View {
                         .help("Opens Maps with these coordinates. \(Branding.displayName) does not fetch anything itself.")
                     }
                 }
+            }
+            // WHAT THE MODEL SAW, in its own words, with the rest of the facts about the photograph
+            // rather than buried under the candidates.
+            //
+            // It reads as a caption because that is what it is, and it is the text that would go
+            // into a delivered file's description field if that ever ships. Marked as a reading
+            // rather than presented as fact: everything else in this panel was recorded by the
+            // camera, and this one line was guessed by a 2B model.
+            if let note = appState.perception?.notes, !note.isEmpty {
+                Divider().overlay(Theme.hairline.opacity(0.5)).padding(.vertical, 2)
+                Text(note)
+                    .font(Theme.ui(11))
+                    .foregroundColor(Theme.inkDim)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("KELVIN'S READING")
+                    .font(Theme.mono(8)).tracking(1.2).foregroundColor(Theme.inkFaint)
             }
         }
         .padding(10)
@@ -4918,6 +4941,17 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 18) {
                 HistogramHost(preview: appState.preview)
 
+                // DIRECTLY UNDER THE HISTOGRAM, which is where the facts about a photograph belong:
+                // the two things here that are not controls, together, above everything you reach
+                // for. It sat last, below the entire mask kit, and was reported as "collapsed by
+                // default" when it had been `defaultOpen: true` all along — nine sections and a long
+                // scroll between the photograph and the facts about it is indistinguishable from
+                // being folded away. Position was the bug, not the fold state.
+                if appState.capture.camera != nil || appState.capture.summaryText != nil
+                    || appState.perception != nil {
+                    CollapsibleSection("Photo", icon: "camera", defaultOpen: true) { capturePanel }
+                }
+
                 HStack(spacing: 8) {
                     Button(action: appState.undo) { editToolLabel("Undo", enabled: appState.canUndo, icon: "arrow.uturn.backward") }
                         .buttonStyle(.plain).disabled(!appState.canUndo)
@@ -4946,19 +4980,17 @@ struct ContentView: View {
                 // turned into the wrong numbers). Those are entirely different bugs and, without
                 // this, indistinguishable from the outside.
                 if let seen = appState.sceneSummary {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(seen.headline)
-                            .font(Theme.mono(10)).foregroundColor(Theme.inkDim)
-                            .textSelection(.enabled)
-                        if let note = seen.note {
-                            Text(note)
-                                .font(Theme.ui(11)).foregroundColor(Theme.ink)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .textSelection(.enabled)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.bottom, 4)
+                    // The CATEGORICAL read only. The model's sentence moved up to the Photo panel
+                    // with the rest of the facts about the photograph, and printing it in both
+                    // places put the same line on screen twice, forty points apart.
+                    //
+                    // What stays here is what earns its place here: these are the tokens the engine
+                    // actually branched on, so they explain why THESE four candidates and not others.
+                    Text(seen.headline)
+                        .font(Theme.mono(10)).foregroundColor(Theme.inkDim)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.bottom, 4)
                 }
                 if appState.candidates.isEmpty {
                     // Say what's happening instead of leaving a hole. The photo is already on
@@ -5246,13 +5278,6 @@ struct ContentView: View {
                 }
                 }
 
-                // Last: a record of the photograph, not a control reached for mid-edit.
-                if appState.capture.camera != nil || appState.capture.summaryText != nil {
-                    // Open by default. This is the one section that is pure information rather
-                    // than a control — what the camera recorded, which you read to decide what to
-                    // do, not something you fold away once you have set it.
-                    CollapsibleSection("Capture", icon: "camera", defaultOpen: true) { capturePanel }
-                }
                 }
             }
             .padding(20)
