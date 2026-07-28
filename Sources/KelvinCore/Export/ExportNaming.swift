@@ -71,13 +71,28 @@ public enum ExportNaming {
     ///   - look: the style or preset applied ("Natural", "Red filter"), if any.
     ///   - label: the photographer's own word for this export — a place, a client, an event.
     ///     Applies to every scheme, because it is the one token here that is not a guess.
+    ///   - prefix: a word the photographer wants in FRONT of everything, for the delivery folder
+    ///     that has to sort or filter by client or job. Opt-in and empty by default — see below for
+    ///     why the stem still leads when it is not set.
+    ///   - suffix: a word pinned to the very end, after every generated token.
     public static func stem(for original: URL, perception: Perception?, look: String?,
-                            scheme: Scheme = .descriptive, label: String? = nil) -> String {
+                            scheme: Scheme = .descriptive, label: String? = nil,
+                            prefix: String? = nil, suffix: String? = nil) -> String {
         let base = preserved(original.deletingPathExtension().lastPathComponent)
-        var parts = [base]
+        // A PREFIX IS OPT-IN, AND THE DEFAULT IS STILL "THE STEM COMES FIRST".
+        //
+        // Rule 1 is that the original stem survives verbatim and leads, because `ls _DSC6595*` is
+        // how an export maps back to the RAW on the card, and that is worth protecting by default.
+        // But it is the photographer's own filing system, and a delivery folder that has to sort by
+        // client or job needs the client in front. Typing one is an explicit instruction, not a
+        // guess, so it wins over the default — and the stem is still there, one token along, so the
+        // glob becomes `ls *_DSC6595*` rather than impossible.
+        let front = (prefix?.isEmpty == false) ? sanitize(prefix ?? "") : ""
+        var parts = front.isEmpty ? [base] : [front, base]
         // Dedup still works case-insensitively and across both separators, so a file already called
         // "sunset_landscape" or "Sunset-Landscape" does not get told what it is twice.
-        var used = Set(base.lowercased().split(whereSeparator: { $0 == "-" || $0 == "_" }).map(String.init))
+        var used = Set(parts.joined(separator: "-").lowercased()
+            .split(whereSeparator: { $0 == "-" || $0 == "_" }).map(String.init))
 
         func add(_ token: String?) {
             guard let token, !token.isEmpty else { return }
@@ -106,10 +121,10 @@ public enum ExportNaming {
         case .original:
             // Still "the original name" — plus the word the photographer chose to add to it, which
             // is the whole point of having asked.
-            return parts.joined(separator: "_")
+            return appending(suffix, to: parts.joined(separator: "_"))
         case .edited:
             // Lightroom's convention, and the one most photographers already have a workflow around.
-            return parts.joined(separator: "_") + "-Edit"
+            return appending(suffix, to: parts.joined(separator: "_") + "-Edit")
         case .look, .descriptive:
             break
         }
@@ -133,15 +148,31 @@ public enum ExportNaming {
             parts.removeLast()
             name = parts.joined(separator: "_")
         }
+        // THE SUFFIX IS APPENDED AFTER THE TRIM, deliberately. Everything above is a guess the
+        // trimmer is allowed to discard; a word someone typed is not, and dropping it because a
+        // scene descriptor made the name long would be the app overruling an instruction.
+        if let suffix, !suffix.isEmpty {
+            let clean = sanitize(suffix)
+            if !clean.isEmpty { name += "_" + clean }
+        }
         return name
+    }
+
+    /// Pin a typed word to the end of a name that is otherwise finished.
+    private static func appending(_ suffix: String?, to name: String) -> String {
+        guard let suffix, !suffix.isEmpty else { return name }
+        let clean = sanitize(suffix)
+        return clean.isEmpty ? name : name + "_" + clean
     }
 
     /// A full filename, extension included.
     public static func filename(
         for original: URL, perception: Perception?, look: String?, ext: String = "jpg",
-        scheme: Scheme = .descriptive, label: String? = nil
+        scheme: Scheme = .descriptive, label: String? = nil,
+        prefix: String? = nil, suffix: String? = nil
     ) -> String {
-        stem(for: original, perception: perception, look: look, scheme: scheme, label: label)
+        stem(for: original, perception: perception, look: look, scheme: scheme, label: label,
+             prefix: prefix, suffix: suffix)
             + "." + ext
     }
 

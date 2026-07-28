@@ -1461,6 +1461,15 @@ final class AppState: ObservableObject {
     /// that one exports the wrong count, this one puts the wrong word on a client's files.
     @Published var exportLabel = ""
 
+    /// A word pinned to the FRONT of every exported name, and one pinned to the END.
+    ///
+    /// Not persisted, for the same reason `exportLabel` is not: a prefix is a statement about the
+    /// job in hand — a client, a shoot number — and a remembered one delivers next month's wedding
+    /// under last month's client name. The scheme above IS remembered, because "how I like files
+    /// named" is a habit; "who this is for" is not.
+    @Published var exportPrefix = ""
+    @Published var exportSuffix = ""
+
     /// What the label will actually look like in a filename, or nil when there is nothing to show.
     /// The panel prints this, because the sanitiser lowercases and hyphenates and nobody should
     /// have to discover that after the files are written.
@@ -1683,7 +1692,8 @@ final class AppState: ObservableObject {
         let look = activeLookId.flatMap { LookPreset.named($0)?.name }
             ?? candidates.first { $0.id == selectedCandidateId }?.label
         return ExportNaming.filename(for: url, perception: perception, look: look, ext: ext,
-                                     scheme: exportNaming, label: exportLabel)
+                                     scheme: exportNaming, label: exportLabel,
+                                     prefix: exportPrefix, suffix: exportSuffix)
     }
 
     /// "12 Mar, 14:03" from an ISO timestamp — a restored edit should say *when*, not show a
@@ -3738,9 +3748,10 @@ final class AppState: ObservableObject {
         var adaptedWritten = 0
         var needsReopening: [String] = []
         let size = exportSize, space = exportColorSpace, scheme = exportNaming
-        // Read once, before the loop: the label names THIS export, and a text field edited
-        // mid-run must not split a folder's files across two names.
+        // Read once, before the loop: these name THIS export, and a text field edited mid-run must
+        // not split a folder's files across two naming conventions.
         let label = exportLabel
+        let prefix = exportPrefix, suffix = exportSuffix
 
         // PHASE ONE — decide what each frame gets, and where it goes. Sequential, on the actor.
         //
@@ -3800,7 +3811,8 @@ final class AppState: ObservableObject {
             let out = ExportNaming.uniqueURL(
                 in: directory,
                 stem: ExportNaming.stem(for: url, perception: nil, look: lookName,
-                                        scheme: scheme, label: label),
+                                        scheme: scheme, label: label,
+                                        prefix: prefix, suffix: suffix),
                 ext: exportFormat.fileExtension,
                 exists: { allocated.contains($0) || FileManager.default.fileExists(atPath: $0.path) })
             allocated.insert(out)
@@ -5707,7 +5719,7 @@ struct ContentView: View {
         // moment you are deciding it is the moment you are choosing where the file goes. It also
         // covers the batch, which writes hundreds of files from the same setting — so the checkbox
         // that says what travels has to be somewhere you meet before either.
-        panel.accessoryView = PanelAccessories.exportOptions(appState)
+        panel.accessoryView = PanelAccessories.exportOptions(appState, savePanel: panel)
         if panel.runModal() == .OK, let url = panel.url {
             Task { await appState.exportFullResolution(to: url) }
         }

@@ -81,10 +81,13 @@ enum PanelAccessories {
 
     /// `showScope` adds the "kept only" row and belongs only on the export-EDITED panel — a scope
     /// choice over many photos is meaningless when the panel is exporting exactly one.
-    static func exportOptions(_ state: AppState, showScope: Bool = false) -> NSView {
+    static func exportOptions(_ state: AppState, showScope: Bool = false,
+                              savePanel: NSSavePanel? = nil) -> NSView {
         let container = FlippedView()
         let target = ExportTarget.shared
         target.state = state
+        target.savePanel = savePanel
+        target.suggestedName = savePanel?.nameFieldStringValue
 
         let format = NSPopUpButton()
         format.addItems(withTitles: ["JPEG", "HEIC", "PNG", "TIFF 16-bit"])
@@ -104,6 +107,11 @@ enum PanelAccessories {
         let quality = NSSlider(value: state.exportQuality, minValue: 0.4, maxValue: 1,
                                target: target, action: #selector(ExportTarget.qualityChanged(_:)))
         quality.isContinuous = true
+        // A HORIZONTAL NSSlider HAS NO NATURAL WIDTH. Left to its intrinsic size inside a stack it
+        // collapses to about the width of its own knob, which is why this rendered as a stray blob
+        // sitting on top of the number instead of a slider: there was nothing to slide along.
+        quality.translatesAutoresizingMaskIntoConstraints = false
+        quality.widthAnchor.constraint(equalToConstant: 118).isActive = true
         let qualityLabel = NSTextField(labelWithString: "\(Int(state.exportQuality * 100))")
         qualityLabel.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
 
@@ -115,11 +123,54 @@ enum PanelAccessories {
         target.qualityLabel = qualityLabel
         target.refresh()
 
+        // HOW THE FILES GET NAMED, decided where the files are being written.
+        //
+        // The four schemes existed but lived only in Settings, which is the wrong room: naming is a
+        // property of THIS export — the shoot you are delivering now — and a setting you last
+        // touched a month ago is not a decision you are making. It matters most on the group panel,
+        // where one click writes hundreds of names and there is no save field to correct them in.
+        let naming = NSPopUpButton()
+        for scheme in ExportNaming.Scheme.allCases { naming.addItem(withTitle: scheme.label) }
+        naming.selectItem(at: ExportNaming.Scheme.allCases.firstIndex { $0 == state.exportNaming } ?? 0)
+        naming.target = target; naming.action = #selector(ExportTarget.namingChanged(_:))
+        // A word in FRONT and a word at the END, both optional and both live. The scheme decides
+        // what Kelvin contributes; these are what the photographer contributes, and they are the
+        // two positions a delivery folder actually needs — sort-by-client wants the front, and
+        // "which round of edits is this" wants the end.
+        let prefix = NSTextField(string: state.exportPrefix)
+        prefix.placeholderString = "Optional — e.g. a client"
+        prefix.target = target; prefix.action = #selector(ExportTarget.prefixChanged(_:))
+        let suffix = NSTextField(string: state.exportSuffix)
+        suffix.placeholderString = "Optional — e.g. v2"
+        suffix.target = target; suffix.action = #selector(ExportTarget.suffixChanged(_:))
+        target.prefixField = prefix
+        target.suffixField = suffix
+        // Live, for the same reason the label is: a modal accessory gets no second chance to tell
+        // you what it did, and `action` alone fires only on Enter or focus loss — so typing a
+        // prefix and clicking Export immediately would have exported without it.
+        for field in [prefix, suffix] {
+            NotificationCenter.default.addObserver(
+                target, selector: #selector(ExportTarget.affixEditing(_:)),
+                name: NSControl.textDidChangeNotification, object: field)
+        }
+
+        let namingExample = NSTextField(labelWithString: "")
+        namingExample.font = .monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        namingExample.textColor = .secondaryLabelColor
+        target.namingExample = namingExample
+        target.refreshNamingExample()
+
         var rows: [[NSView]] = [
             [NSTextField(labelWithString: "Format:"), format,
              NSTextField(labelWithString: "Size:"), size],
             [NSTextField(labelWithString: "Colour:"), space,
              NSTextField(labelWithString: "Quality:"), stack(quality, qualityLabel)],
+            [NSTextField(labelWithString: "Name:"), naming,
+             NSGridCell.emptyContentView, NSGridCell.emptyContentView],
+            [NSTextField(labelWithString: "Prefix:"), prefix,
+             NSTextField(labelWithString: "Suffix:"), suffix],
+            [NSGridCell.emptyContentView, namingExample,
+             NSGridCell.emptyContentView, NSGridCell.emptyContentView],
             [NSGridCell.emptyContentView, location, NSGridCell.emptyContentView, NSGridCell.emptyContentView]
         ]
         if showScope {
@@ -180,7 +231,9 @@ enum PanelAccessories {
         grid.columnSpacing = 8
         grid.column(at: 1).width = 150
         grid.column(at: 3).width = 150
-        for mergedRow in 2..<rows.count {
+        // From the naming EXAMPLE down. The Name popup itself stays in the 150-wide column so it
+        // lines up with Format and Colour above it rather than stretching across the panel.
+        for mergedRow in 3..<rows.count {
             grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3),
                             verticalRange: NSRange(location: mergedRow, length: 1))
         }
@@ -260,6 +313,61 @@ enum PanelAccessories {
             } else {
                 labelPreview?.stringValue = ""
             }
+            refreshNamingExample()
+        }
+
+        // MARK: Naming
+
+        weak var namingExample: NSTextField?
+        /// The save panel this accessory belongs to, when there is one — only the single-photo
+        /// export has a filename field to keep in step.
+        weak var savePanel: NSSavePanel?
+        /// The last name this accessory put in that field, so a name the photographer typed
+        /// themselves is never overwritten by a scheme change. Changing the scheme asks for a new
+        /// suggestion; it does not ask to lose what you wrote.
+        var suggestedName: String?
+
+        weak var prefixField: NSTextField?
+        weak var suffixField: NSTextField?
+
+        @objc func prefixChanged(_ sender: NSTextField) {
+            state?.exportPrefix = sender.stringValue
+            refreshNamingExample(); syncSavePanelName()
+        }
+        @objc func suffixChanged(_ sender: NSTextField) {
+            state?.exportSuffix = sender.stringValue
+            refreshNamingExample(); syncSavePanelName()
+        }
+        @objc func affixEditing(_ note: Notification) {
+            guard let field = note.object as? NSTextField else { return }
+            if field === prefixField { state?.exportPrefix = field.stringValue }
+            else if field === suffixField { state?.exportSuffix = field.stringValue }
+            else { return }
+            refreshNamingExample(); syncSavePanelName()
+        }
+
+        @objc func namingChanged(_ sender: NSPopUpButton) {
+            state?.exportNamingId = ExportNaming.Scheme.allCases[sender.indexOfSelectedItem].rawValue
+            refreshNamingExample()
+            syncSavePanelName()
+        }
+
+        /// Show the name this export will actually produce, for the photo in hand — not a canned
+        /// illustration. On the group panel it stands for every file the click is about to write.
+        func refreshNamingExample() {
+            guard let state else { return }
+            let real = state.imageURL == nil
+                ? nil : state.suggestedExportName(ext: state.exportFormat.fileExtension)
+            namingExample?.stringValue = real ?? state.exportNaming.example
+        }
+
+        func syncSavePanelName() {
+            guard let state, let panel = savePanel, state.imageURL != nil else { return }
+            let next = state.suggestedExportName(ext: state.exportFormat.fileExtension)
+            // Only when the field still holds what we last put there.
+            guard panel.nameFieldStringValue == suggestedName || suggestedName == nil else { return }
+            panel.nameFieldStringValue = next
+            suggestedName = next
         }
 
         /// A quality control beside PNG or TIFF is a control that does nothing, which is the exact
@@ -270,6 +378,9 @@ enum PanelAccessories {
             quality?.isEnabled = lossy
             qualityLabel?.stringValue = lossy ? "\(Int(state.exportQuality * 100))" : "—"
             qualityLabel?.textColor = lossy ? .labelColor : .tertiaryLabelColor
+            // The format decides the extension, so the suggested name moves with it.
+            refreshNamingExample()
+            syncSavePanelName()
         }
     }
 
