@@ -27,11 +27,14 @@ public struct CaptureInfo: Sendable, Equatable {
     /// Why there is no position, when there isn't one.
     ///
     /// "No location shown" and "no location recorded" look identical from outside, and the first
-    /// reads as the app having failed to look. Measured on a real 110-frame shoot: every single
-    /// frame carried a GPS block and not one carried a fix — the camera wrote `Status = V` (void,
-    /// EXIF 2.3 tag 0x0009) with no latitude or longitude at all, which is what a body does when its
-    /// receiver is enabled and never locks. The reader was right to show nothing and wrong to say
-    /// nothing.
+    /// reads as the app having failed to look.
+    ///
+    /// Measured on a real 110-frame shoot: 107 frames carried a valid fix (`Status = A`) and three
+    /// carried a GPS block with no latitude or longitude in it at all. That happens on a body with
+    /// no internal receiver — an A7R IV takes its position from a paired phone — whenever a frame is
+    /// taken before the link has handed one over. Three silent gaps in a folder of otherwise
+    /// geotagged frames is exactly the case worth explaining, because the obvious reading of it is
+    /// that the app lost them.
     public enum PositionStatus: String, Sendable, Equatable {
         /// No GPS block in the file. The ordinary case for a camera without a receiver.
         case absent

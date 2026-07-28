@@ -181,10 +181,12 @@ final class CaptureInfoTests: XCTestCase {
         XCTAssertEqual(CaptureInfo().positionStatus, .absent)
     }
 
-    /// **The case a real 110-frame shoot turned out to be, every single frame.** The body wrote a
-    /// GPS block with `Status = V` — void — and no coordinates at all, which is what a camera does
-    /// when its receiver is on and never locks. Showing nothing is right; saying nothing is not,
-    /// because "no location shown" and "no location recorded" look identical from outside.
+    /// Three frames of a real 110-frame shoot were exactly this: a GPS block with no latitude or
+    /// longitude in it, while the other 107 carried a valid fix. A body that takes its position
+    /// from a paired phone writes this for any frame shot before the link hands one over.
+    ///
+    /// Showing nothing is right; saying nothing is not. Three gaps in a folder of otherwise
+    /// geotagged frames reads as the app having lost them.
     func testAVoidFixIsDistinguishedFromHavingNoGPSAtAll() {
         var info = CaptureInfo()
         info.positionStatus = .void
