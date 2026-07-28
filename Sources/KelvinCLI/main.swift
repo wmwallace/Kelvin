@@ -30,6 +30,7 @@ func printUsage() {
       \(tool) corpus-degrade --in-dir <good-photos> --out-dir <corpus>
       \(tool) eval --corpus <dir> [--out <report.json>] [--engine-version <v>]
       \(tool) triage-compare --in-dir <dir> [--limit <n>]
+      \(tool) sky-metrics --in-dir <dir> [--limit <n>] [--perception <p.json>] [--dump-dir <dir>]
       \(tool) instances --in <image>
 
     triage-compare options:
@@ -40,6 +41,13 @@ func printUsage() {
       decode — and reports the acuity difference and the time saved. The fast path is what the
       folder scan uses; this says whether it moves the soft/unusable verdicts your thresholds
       were calibrated for. Run it on a RAW shoot before trusting either.
+
+    sky-metrics options (docs/EVALUATION.md, "Measuring a sky"):
+      --in / --in-dir  One photograph, or a folder of them. Required.
+      --limit          Stop after this many frames (default 12).
+      --perception     Hand-labelled perception JSON. Adds a per-style table and the pairwise
+                       sky-versus-frame divergence, which is what a sky lever is calibrated on.
+      --dump-dir       Write the proxy, the reference region and the sky mask as PNGs.
 
     render options:
       --in       Path to the source image (RAW, JPEG, or PNG). Required.
@@ -902,6 +910,176 @@ case "sky":
         print("Wrote sky-mask.png + sky-edit.png to \(outDir.path)")
     } catch {
         fail("\(error)")
+    }
+
+case "sky-metrics":
+    // MEASURE THE SKY, because until now nothing could. Every metric in docs/EVALUATION.md is
+    // global or skin-masked, so a style whose entire claim is what it does to a sky was judged by
+    // a whole-frame number that passes on ground movement alone — Dramatic and Soft diverge by
+    // 0.093 across the frame while their skies are nearly the same picture.
+    //
+    // Two halves. The left of the table is `SkyMetrics`' reference region: what is there. The right
+    // is what `SkyMask` sees of it, which is the mask's report card and not a measurement it
+    // grades itself on. With --perception it also renders each candidate style and reports what
+    // the style actually did to the sky, which is the instrument `skyDepth` has to be calibrated
+    // against.
+    let rest = Array(arguments.dropFirst())
+    let files: [URL]
+    if let one = value(for: "--in", in: rest) {
+        files = [URL(fileURLWithPath: one)]
+    } else if let dir = value(for: "--in-dir", in: rest) {
+        let limit = value(for: "--limit", in: rest).flatMap(Int.init) ?? 12
+        files = Array(((try? BatchApply.imageFiles(in: URL(fileURLWithPath: dir))) ?? []).prefix(limit))
+    } else {
+        fail("sky-metrics requires --in or --in-dir")
+    }
+    guard !files.isEmpty else { fail("sky-metrics: no readable images") }
+
+    var perception: Perception?
+    if let path = value(for: "--perception", in: rest) {
+        guard let loaded = try? PerceptionIO.load(from: URL(fileURLWithPath: path)) else {
+            fail("sky-metrics: could not read the perception JSON at \(path)")
+        }
+        perception = loaded
+    }
+
+    print("frame                          cover   luma  spread  ground |  mask α  orphan   spill")
+    var readings: [SkyMetrics.Reading] = []
+    var agreements: [SkyMetrics.MaskAgreement] = []
+    var noSkyRegion = 0, noMaskAtAll = 0, groundEaten = 0
+    // style id → (readings, divergence vs the unedited frame)
+    var styleReadings: [String: [SkyMetrics.Reading]] = [:]
+    var styleDivergence: [String: [SkyMetrics.Divergence]] = [:]
+    var styleLabels: [String: String] = [:]
+    var styleOrder: [String] = []
+    // Pairwise, per frame, between every pair of styles — the "are these two candidates actually
+    // different where it matters" question, asked of the sky instead of the frame.
+    var pairwise: [String: [SkyMetrics.Divergence]] = [:]
+
+    for file in files {
+        let name = file.lastPathComponent
+        let padded = name.count < 28 ? name + String(repeating: " ", count: 28 - name.count) : name
+        guard let decoded = try? ImageDecoder.decode(url: file) else {
+            print("\(padded)  (could not decode)")
+            continue
+        }
+        // The measurement proxy the app itself measures on — one size for everything, which is what
+        // `1cd6012` unified. A 160-cell grid does not need more than 768 px to sit on.
+        let image = PerceptionProxy.downsample(decoded)
+        guard let region = try? SkyMetrics.referenceRegion(in: image) else { continue }
+        let mask = SkyMask.detect(in: image)
+        // Dumped BEFORE the empty-region guard, because a frame the instrument says has no sky is
+        // exactly the frame worth looking at.
+        if let dump = value(for: "--dump-dir", in: rest) {
+            let dir = URL(fileURLWithPath: dump, isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let stem = file.deletingPathExtension().lastPathComponent
+            try? ImageWriter.write(image, to: dir.appendingPathComponent(stem + "-proxy.png"), format: .png)
+            if let r = SkyMetrics.regionImage(region) {
+                try? ImageWriter.write(r, to: dir.appendingPathComponent(stem + "-region.png"), format: .png)
+            }
+            if let mask {
+                try? ImageWriter.write(mask, to: dir.appendingPathComponent(stem + "-mask.png"), format: .png)
+            }
+        }
+        guard !region.isEmpty, let reading = (try? SkyMetrics.read(image, in: region)) ?? nil else {
+            noSkyRegion += 1
+            print("\(padded)  (no sky)" + (mask == nil ? "" : "   ← but SkyMask found one"))
+            continue
+        }
+        if mask == nil { noMaskAtAll += 1 }
+        guard let agreement = (try? SkyMetrics.agreement(of: mask, with: region)) ?? nil else { continue }
+
+        // A reference region whose ground reads as bright as its sky has swallowed the horizon —
+        // wet sand under an overcast, or fog filling the frame. Flagged and left out of the means
+        // rather than quietly averaged in.
+        let suspect = (reading.groundMeanLuma ?? 0) > reading.meanLuma - 0.10
+        if suspect { groundEaten += 1 } else {
+            readings.append(reading)
+            agreements.append(agreement)
+        }
+
+        print(String(format: "%@ %6.3f %6.3f  %6.3f  %6.3f | %7.3f %7.3f %7.3f%@",
+                     padded, reading.coverage, reading.meanLuma, reading.spread,
+                     reading.groundMeanLuma ?? 0,
+                     agreement.meanAlphaInRegion, agreement.orphanedFraction,
+                     agreement.spillFraction,
+                     suspect ? "  ‡ region includes ground" : (mask == nil ? "  ← no mask" : "")))
+
+        guard let perception else { continue }
+        // Render every candidate through the same measured mask bitmaps the app uses. Rendering
+        // WITHOUT them would compare the global half of each recipe and silently discard the local
+        // half — which is exactly where a sky lever lives.
+        guard let stats = try? ImageStatistics.compute(image) else { continue }
+        let measured = LocalMasks.measure(in: image)
+        let recipes = RecipeEngine.candidates(
+            perception: perception, statistics: stats,
+            subjectLuma: measured.subjectLuma, skyLuma: measured.skyLuma,
+            iso: ExifReader.iso(url: file),
+            perceptionHash: PerceptionIO.hash(perception),
+            generatedAt: ISO8601DateFormatter().string(from: Date()))
+
+        var rendered: [(id: String, image: CIImage)] = []
+        for recipe in recipes {
+            guard let id = recipe.id ?? recipe.label else { continue }
+            let out = Renderer.render(image, with: recipe, maskBitmaps: measured.bitmaps)
+            rendered.append((id, out))
+            if styleLabels[id] == nil { styleLabels[id] = recipe.label ?? id; styleOrder.append(id) }
+            if let r = (try? SkyMetrics.read(out, in: region)) ?? nil {
+                styleReadings[id, default: []].append(r)
+            }
+            if let d = (try? SkyMetrics.compare(image, out, in: region)) ?? nil {
+                styleDivergence[id, default: []].append(d)
+            }
+        }
+        for i in 0..<rendered.count {
+            for j in (i + 1)..<rendered.count {
+                guard let d = (try? SkyMetrics.compare(rendered[i].image, rendered[j].image,
+                                                       in: region)) ?? nil else { continue }
+                pairwise["\(rendered[i].id) vs \(rendered[j].id)", default: []].append(d)
+            }
+        }
+    }
+
+    func mean(_ xs: [Double]) -> Double { xs.isEmpty ? 0 : xs.reduce(0, +) / Double(xs.count) }
+
+    if !readings.isEmpty {
+        print(String(format: "%@ %6.3f %6.3f  %6.3f  %6.3f | %7.3f %7.3f %7.3f",
+                     "mean of \(readings.count)".padding(toLength: 28, withPad: " ", startingAt: 0),
+                     mean(readings.map(\.coverage)), mean(readings.map(\.meanLuma)),
+                     mean(readings.map(\.spread)), mean(readings.map { $0.groundMeanLuma ?? 0 }),
+                     mean(agreements.map(\.meanAlphaInRegion)),
+                     mean(agreements.map(\.orphanedFraction)),
+                     mean(agreements.map(\.spillFraction))))
+    }
+    print("")
+    print("\(files.count) frames · no sky region \(noSkyRegion) · SkyMask returned nothing \(noMaskAtAll)"
+          + " · region suspect (excluded from means) \(groundEaten)")
+    print("orphan = share of the sky the mask scores below 0.1 alpha. Every sky adjustment in a")
+    print("recipe is multiplied by mask α before it reaches a pixel.")
+
+    if perception != nil && !styleOrder.isEmpty {
+        print("")
+        print("style        sky luma  spread   Δluma    sky |Δ|  frame |Δ|")
+        for id in styleOrder {
+            let rs = styleReadings[id] ?? [], ds = styleDivergence[id] ?? []
+            guard !rs.isEmpty else { continue }
+            print(String(format: "%@ %8.3f %7.3f %+8.3f %9.3f %9.3f",
+                         (styleLabels[id] ?? id).padding(toLength: 11, withPad: " ", startingAt: 0),
+                         mean(rs.map(\.meanLuma)), mean(rs.map(\.spread)),
+                         mean(ds.map(\.skyMeanLumaDelta)),
+                         mean(ds.map(\.skyMeanAbsDelta)), mean(ds.map(\.frameMeanAbsDelta))))
+        }
+        print("")
+        print("pairwise, sky vs frame — a pair that separates only in the right-hand column is two")
+        print("candidates that differ everywhere except the sky:")
+        print("pair                        sky |Δ|  frame |Δ|   ratio")
+        for (pair, ds) in pairwise.sorted(by: { mean($0.value.map(\.skyMeanAbsDelta)) < mean($1.value.map(\.skyMeanAbsDelta)) }) {
+            let sky = mean(ds.map(\.skyMeanAbsDelta)), frame = mean(ds.map(\.frameMeanAbsDelta))
+            print(String(format: "%@ %8.3f %10.3f %7.2f",
+                         pair.padding(toLength: 26, withPad: " ", startingAt: 0),
+                         sky, frame, frame > 0 ? sky / frame : 0))
+        }
     }
 
 case "heal":

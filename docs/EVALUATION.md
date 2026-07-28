@@ -61,6 +61,7 @@ No single number is sufficient. Report all of these; do not collapse them.
 | ΔE2000 vs each reference edit | Overall color and tone distance | Report min across the references, not mean — matching *any* reference is success |
 | Histogram clipping delta | Blown highlights, crushed blacks | Regressions here are always bugs |
 | Skin-tone ΔE, masked | The failure users notice fastest | Weight this heavily |
+| Sky-region luma, spread and divergence | A style that claims to treat a sky and doesn't | `SkyMetrics`; see "Measuring a sky" below |
 | White-balance error vs reference median | Systematic color cast | |
 | No-op fidelity | Neutral recipe renders identical output | Binary. Must always pass |
 | Wall-clock per image | Performance regression | Fail the build on regression |
@@ -69,6 +70,41 @@ No single number is sufficient. Report all of these; do not collapse them.
 averaging them produces a muddy target that no human would choose and that punishes any
 confident stylistic choice. The question is "did we land near *a* defensible
 interpretation," not "did we hit the centroid."
+
+## Measuring a sky
+
+Every other metric above is global or skin-masked, and a sky is neither. That gap was not
+academic: measured on real frames, Dramatic and Soft diverge by a whole-frame mean |Δluma|
+of 0.093 — a comfortable pass on the candidate-divergence criterion below — while their
+skies are very nearly the same picture. The harness could not see the thing being argued
+about, so the only available verdict on a sky was "does it look right".
+
+```
+kelvin-cli sky-metrics --in-dir <shoot> [--limit N] [--perception <p.json>] [--dump-dir <dir>]
+```
+
+`SkyMetrics.referenceRegion` builds the region the numbers are taken over. **It is
+deliberately not `SkyMask`** — the mask is usually the thing under test, and a mask
+measured through itself reports a well-covered sky on exactly the frames where it fails.
+The region uses colour plus a per-column walk down from the top edge: no smoothness term,
+no flood fill, no fixed positional cutoff, which are the three mechanisms `SkyMask` is
+suspected on. `--dump-dir` writes the region and the mask as PNGs, because an instrument
+nobody can look at is the same unfalsifiable judgement it replaced.
+
+What it reports, per frame and as a mean:
+
+- **cover / luma / spread / ground** — how much of the frame is sky, how bright it is, its
+  tonal separation (p95−p5, which is cloud structure), and the ground for contrast. A
+  `ground` reading close to `luma` means the region has swallowed the horizon; those frames
+  are flagged and left out of the means rather than quietly averaged in.
+- **mask α / orphan / spill** — what `SkyMask` sees of that region. `α` is the multiplier
+  every sky adjustment in a recipe actually passes through; `orphan` is the share of the sky
+  the mask scores below 0.1; `spill` is the share of the mask lying outside the sky.
+- With `--perception`, each candidate style rendered **with its mask bitmaps** (rendering
+  without them compares the global half of two recipes and silently discards the local half,
+  which is where a sky lever lives), plus every pair's sky-versus-frame divergence. **A pair
+  whose sky/frame ratio is about 1.0 is two candidates that differ everywhere except the
+  sky.**
 
 ## Baselines
 
