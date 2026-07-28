@@ -106,6 +106,10 @@ if first == "bench-export" {
     // Mirrors the app's export: plan sequentially, then render N frames at once. 1 is the old
     // strictly-sequential behaviour, for measuring against.
     let lanes = max(1, flag("--lanes", in: args).flatMap(Int.init) ?? 3)
+    // Export size, so the cost of writing full-resolution frames can be measured against a
+    // delivery-sized one. 0 means full resolution.
+    let longEdge = flag("--long-edge", in: args).flatMap(Int.init) ?? 0
+    let exportSize: ImageWriter.Size = longEdge > 0 ? .longEdge(longEdge) : .fullResolution
     guard let style = CandidateStyle.all.first(where: { $0.id == styleId }) else {
         die("unknown style '\(styleId)'")
     }
@@ -118,7 +122,7 @@ if first == "bench-export" {
         try FileManager.default.createDirectory(at: outURL, withIntermediateDirectories: true)
 
         note("Export benchmark — \(images.count) frame(s), style \(style.label)")
-        note("Model \(provider.activeModelID); writing to \(outURL.path)\n")
+        note("Model \(provider.activeModelID); size \(longEdge > 0 ? "\(longEdge) px" : "full"); writing to \(outURL.path)\n")
 
         var timings: [FrameTiming] = []
         var pending: [WriteJob] = []
@@ -160,7 +164,8 @@ if first == "bench-export" {
             let out = outURL.appendingPathComponent(url.deletingPathExtension().lastPathComponent + ".jpg")
             if lanes <= 1 {
                 try clock(&t.write) {
-                    try ImageWriter.write(rendered, to: out, format: .jpeg(quality: 0.97))
+                    try ImageWriter.write(rendered, to: out, format: .jpeg(quality: 0.97),
+                                      size: exportSize)
                 }
                 note(String(format: "  %2d/%d  %-24@ %5.2fs", i + 1, images.count,
                             url.lastPathComponent as NSString, t.total))
