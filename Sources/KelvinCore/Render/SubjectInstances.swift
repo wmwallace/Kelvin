@@ -21,6 +21,73 @@ import Vision
 /// about what matters in the picture.
 public enum SubjectInstances {
 
+    // MARK: - Hit-testing a click on the photograph
+
+    /// Alpha the instance's mask must reach at the clicked point to count as a hit. Low, because a
+    /// mask edge is feathered and clicking one pixel inside a silhouette should select it.
+    public static let hitAlphaFloor = 0.35
+
+    /// The instance under a click, or nil if the click landed on nothing Vision found.
+    ///
+    /// `point` is normalised with a **top-left origin**, matching `HealSpot` and the mask shapes —
+    /// the app's convention. `boundingBox` is Vision's, bottom-left, so it is flipped here rather
+    /// than at each call site.
+    ///
+    /// **Nil is a real answer and callers must say so out loud.** Vision finds *salient* objects,
+    /// so clicking a wall, a patch of sky, or the sand legitimately hits nothing — and on a real
+    /// frame it misses plenty that a person would call an object: on `_DSC6390` it segments
+    /// Haystack Rock precisely and does not return either of the two smaller sea stacks beside it.
+    /// A UI that responds to that by creating an empty mask has produced a control that does
+    /// nothing; the honest response is to tell the user there is nothing there to select.
+    ///
+    /// When instances overlap, the **tightest** one wins — smallest coverage among those actually
+    /// hit. Clicking a person standing against a hillside should select the person, and the
+    /// person's mask is the smaller of the two.
+    public static func instance(
+        at point: CGPoint,
+        in instances: [Instance],
+        using context: CIContext = hitTestContext
+    ) -> Instance? {
+        guard !instances.isEmpty,
+              point.x >= 0, point.x <= 1, point.y >= 0, point.y <= 1 else { return nil }
+        // Vision's boxes are bottom-left origin; the click is top-left.
+        let flipped = CGPoint(x: point.x, y: 1 - point.y)
+
+        return instances
+            // Cheap reject first: no need to sample a bitmap for an instance whose box the click
+            // is nowhere near.
+            .filter { $0.boundingBox.contains(flipped) }
+            .filter { alpha(of: $0, at: point, using: context) >= hitAlphaFloor }
+            .min { $0.coverage < $1.coverage }
+    }
+
+    /// Mask coverage at one point, 0…1. Renders a single pixel — the mask is already computed, so
+    /// this is a lookup rather than a segmentation.
+    static func alpha(of instance: Instance, at point: CGPoint, using context: CIContext) -> Double {
+        let extent = instance.mask.extent
+        guard !extent.isInfinite, extent.width > 0, extent.height > 0 else { return 0 }
+        // The mask sits at the source image's extent, top row = row 0 as Vision hands it back, so
+        // the sample point flips with the same (1 - y) the renderer uses.
+        let x = extent.origin.x + point.x * extent.width
+        let y = extent.origin.y + (1 - point.y) * extent.height
+        let pixel = CGRect(x: x.rounded(.down), y: y.rounded(.down), width: 1, height: 1)
+            .intersection(extent)
+        guard !pixel.isNull, pixel.width >= 1, pixel.height >= 1 else { return 0 }
+
+        var out: [UInt8] = [0, 0, 0, 0]
+        context.render(instance.mask, toBitmap: &out, rowBytes: 4, bounds: pixel,
+                       format: .RGBA8, colorSpace: nil)
+        // Grayscale mask: white = this instance. Any channel would do; red is as good as another.
+        return Double(out[0]) / 255.0
+    }
+
+    /// Software renderer, deliberately: this reads one pixel back to the CPU, which is the case a
+    /// GPU context is worst at. `nonisolated(unsafe)` for the reason recorded on
+    /// `ImageWriter.context` — `CIContext`'s Sendable conformance differs between the SDK this
+    /// builds against locally and the one CI uses.
+    nonisolated(unsafe) public static let hitTestContext =
+        CIContext(options: [.useSoftwareRenderer: true])
+
     /// What kind of thing an instance is. Drives both the label and the ordering; the engine can
     /// also treat a person differently from a rock (skin tone protection, for one).
     public enum Kind: String, Sendable, Equatable, Codable {

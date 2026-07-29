@@ -360,6 +360,52 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Armed by "Click a subject on the photo". The next click on the canvas picks whatever is
+    /// under it instead of panning.
+    ///
+    /// A MODE rather than an always-live click, deliberately. A bare click on the photograph
+    /// already means pan-and-do-nothing, and silently turning it into "create a mask and give it a
+    /// +0.3 exposure nudge" would make the canvas unpredictable — you would stop being able to
+    /// click a picture just to look at it.
+    @Published var pickingInstance = false
+
+    /// Pick the detected subject under a click on the canvas.
+    ///
+    /// The last mile of a feature that was otherwise already built: `SubjectInstances.detect`
+    /// returns separately-masked instances, `addInstanceMask` turns one into an editable mask, and
+    /// the mask list can already highlight one on the photo. The only thing missing was pointing at
+    /// the thing itself, which is how anybody actually thinks about it — you look at the rock, not
+    /// at a row labelled "Subject 2".
+    ///
+    /// **A miss is reported, not swallowed.** Vision finds salient objects, so plenty of a real
+    /// photograph is not selectable: on `_DSC6390` it segments Haystack Rock exactly and returns
+    /// neither of the smaller sea stacks. Handing back an empty mask there would be a control that
+    /// appears to work and does nothing.
+    func pickInstance(at loc: CGPoint, container: CGSize, pad: CGFloat = 24) {
+        guard pickingInstance else { return }
+        let rect = imageRect(in: container, pad: pad)
+        guard rect.width > 0, rect.height > 0 else { return }
+        let (nx, ny) = viewToNorm(loc, in: rect)
+        guard nx >= 0, nx <= 1, ny >= 0, ny <= 1 else { return }
+
+        guard !subjectInstances.isEmpty else {
+            pickingInstance = false
+            statusMessage = "Nothing separable was found in this photograph to select."
+            return
+        }
+        guard let hit = SubjectInstances.instance(at: CGPoint(x: nx, y: ny),
+                                                  in: subjectInstances) else {
+            // Stay armed: a miss is usually an aim problem, and disarming would make the user
+            // re-arm the tool to try the same object half an inch to the left.
+            statusMessage = "Nothing detected there — Kelvin only finds subjects that stand out. "
+                + "Try the middle of the object, or use a brush mask."
+            return
+        }
+        pickingInstance = false
+        addInstanceMask(hit)
+        statusMessage = "Selected \(hit.label)."
+    }
+
     /// Add (or re-select) the mask for one detected subject.
     func addInstanceMask(_ instance: SubjectInstances.Instance) {
         // Kind-checked: a SKIN mask scoped to this person is a different tool, and its existence
@@ -1899,7 +1945,7 @@ final class AppState: ObservableObject {
         activeRecipe = nil; preview.active = nil; original = nil; preview.lastRenderedCI = nil
         candidates = []; selectedCandidateId = nil; perception = nil
         activeCraftIssues = []; lastCraftReading = nil; exhaustedFixes = []
-        userMasks = []; paintingMaskId = nil; selectedMask = nil
+        userMasks = []; paintingMaskId = nil; selectedMask = nil; pickingInstance = false
         subjectInstances = []; highlightedInstanceId = nil
         proxyMaskBitmaps = [:]; brushCache = [:]
         healSpots = []; detectedSpotCount = 0; removeDust = false
@@ -1931,7 +1977,7 @@ final class AppState: ObservableObject {
         edit = s.edit; editBaseline = s.editBaseline
         baseMasks = s.baseMasks; maskEnabled = s.maskEnabled; maskStrength = s.maskStrength
         userMasks = s.userMasks; straighten = s.straighten; hsl = s.hsl; removeDust = s.removeDust
-        brushCache = [:]; selectedMask = nil; paintingMaskId = nil
+        brushCache = [:]; selectedMask = nil; paintingMaskId = nil; pickingInstance = false
         zoom = 1; pan = .zero; showingOriginal = false
         updateActiveRecipe()
         resetHistory()
@@ -1952,7 +1998,7 @@ final class AppState: ObservableObject {
         candidates = []; selectedCandidateId = nil
         activeRecipe = nil; preview.active = nil; original = nil
         preview.lastRenderedCI = nil; activeCraftIssues = []; lastCraftReading = nil; exhaustedFixes = []
-        userMasks = []; paintingMaskId = nil; selectedMask = nil
+        userMasks = []; paintingMaskId = nil; selectedMask = nil; pickingInstance = false
         subjectInstances = []; highlightedInstanceId = nil
         brushCache = [:]
         proxyMaskBitmaps = [:]; healSpots = []; detectedSpotCount = 0
@@ -2233,7 +2279,7 @@ final class AppState: ObservableObject {
             PlaceNames.shared.resolve(here)
             PlaceMaps.shared.fetch(here)
         }
-        userMasks = []; paintingMaskId = nil; selectedMask = nil   // hand-drawn masks are per-photo
+        userMasks = []; paintingMaskId = nil; selectedMask = nil; pickingInstance = false   // hand-drawn masks are per-photo
         // The subjects belong to the photograph, so they go out with it. Left standing,
         // the list would offer the last photo's people while this one decoded.
         subjectInstances = []; highlightedInstanceId = nil
@@ -4644,18 +4690,32 @@ struct ContentView: View {
                     .overlay(alignment: .topLeading) {
                         if appState.showingOriginal { beforeBadge }
                         else if appState.paintingMaskId != nil { paintingBadge }
+                        else if appState.pickingInstance { pickingBadge }
                     }
                     .contentShape(Rectangle())
                     // One drag does the right thing: paint (brush armed), else pan (zoomed in).
                     .gesture(DragGesture(minimumDistance: 0)
                         .onChanged { v in
+                            // Picking takes the drag but does nothing with it: a click is a drag of
+                            // zero distance, and letting the pan branch run would slide the photo
+                            // under the pointer between press and release.
+                            if appState.pickingInstance { return }
                             if appState.paintingMaskId != nil { appState.paintAt(v.location, container: geo.size) }
                             else if appState.zoom > 1.01 {
                                 appState.pan = CGSize(width: panStart.width + v.translation.width,
                                                       height: panStart.height + v.translation.height)
                             }
                         }
-                        .onEnded { _ in panStart = appState.pan })
+                        .onEnded { v in
+                            // Resolved on RELEASE rather than as an `onTapGesture`, which would
+                            // otherwise wait to see whether a second click is coming (the canvas
+                            // has a double-click-to-fit) and make selecting feel laggy.
+                            if appState.pickingInstance {
+                                appState.pickInstance(at: v.location, container: geo.size)
+                                return
+                            }
+                            panStart = appState.pan
+                        })
                     // Pinch to zoom (trackpad).
                     .simultaneousGesture(MagnificationGesture()
                         .onChanged { appState.setZoom(zoomStart * $0) }
@@ -4665,6 +4725,12 @@ struct ContentView: View {
                     .overlay { subjectHighlightOverlay(in: geo.size) }
                     // Double-click to fit.
                     .onTapGesture(count: 2) { appState.resetZoom(); zoomStart = 1 }
+                    // Escape leaves an armed mode. Best-effort by nature — it needs the canvas to
+                    // hold focus — which is why the badge is tappable too.
+                    .onExitCommand {
+                        if appState.pickingInstance { appState.pickingInstance = false }
+                        else if appState.paintingMaskId != nil { appState.paintingMaskId = nil }
+                    }
                 }
                 previewFooter
                 if appState.folderPhotos.count > 1 {
@@ -4745,6 +4811,23 @@ struct ContentView: View {
             .font(Theme.mono(11, .semibold)).tracking(1).foregroundColor(Theme.base)
             .padding(.horizontal, 10).padding(.vertical, 5)
             .background(Capsule().fill(Theme.glow.opacity(0.9))).padding(30)
+    }
+
+    /// Says what to do AND how to get out. An armed mode with no visible exit is a trap, and this
+    /// one takes over the click the canvas otherwise uses for panning.
+    ///
+    /// The badge is the exit, and that is deliberate rather than decorative: `onExitCommand` below
+    /// only fires when the canvas actually holds focus, which is not guaranteed once a slider or a
+    /// text field in the panel has been touched. Escape is offered because it is what a Mac user
+    /// will try first; the tappable badge is what makes the promise keepable either way.
+    private var pickingBadge: some View {
+        Text("SELECT · click a subject · esc or tap here to cancel")
+            .font(Theme.mono(11, .semibold)).tracking(1).foregroundColor(Theme.base)
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(Capsule().fill(Theme.glow.opacity(0.9))).padding(30)
+            .contentShape(Capsule())
+            .onTapGesture { appState.pickingInstance = false }
+            .help("Cancel selecting")
     }
 
     /// Which subject the pointer is over in the mask list, outlined on the photo. "Person 2" names
@@ -5466,6 +5549,20 @@ struct ContentView: View {
                                     maskedIds: appState.maskedInstanceIds,
                                     highlighted: $appState.highlightedInstanceId,
                                     onPick: appState.addInstanceMask)
+                        // Point at the thing instead of reading its row. "Subject 2" names nothing
+                        // until you have found it on the photograph, and by then you could have
+                        // clicked it.
+                        Button {
+                            appState.pickingInstance.toggle()
+                        } label: {
+                            addMaskLabel(appState.pickingInstance
+                                         ? "Click a subject on the photo… (esc)"
+                                         : "Select a subject on the photo",
+                                         icon: "hand.point.up.left")
+                        }
+                        .buttonStyle(.plain)
+                        .help("Click something in the picture to mask it. Kelvin only finds "
+                              + "subjects that stand out from their background.")
                     }
                     // Auto-detected masks (subject / sky): toggle + strength.
                     ForEach(appState.baseMaskIds, id: \.self) { mid in
