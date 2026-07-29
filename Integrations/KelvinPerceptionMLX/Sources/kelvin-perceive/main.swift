@@ -14,6 +14,12 @@ import KelvinPerceptionMLX
 //       labelling step that feeds `kelvin-cli eval`. Resumable (skips already-labelled),
 //       and the model loads once (the provider is an actor that caches it).
 //
+//   kelvin-perceive warm --in-dir <shoot> [--limit N]
+//       Fill the perception cache for a shoot and do nothing else — decode → proxy →
+//       perceive → save, at the size and in the order `AppState` uses. Resumable: a frame
+//       already in the cache is skipped. Use it after reorganising a library, or before
+//       sitting down to edit a shoot, so the ~9s read is not paid one frame at a time.
+//
 //   kelvin-perceive bench-export --in-dir <shoot> [--out-dir <dir>] [--limit N]
 //                                 [--style natural] [--no-cache] [--lanes N]
 //       Time the ADAPTED EXPORT path — the one a shoot carrying an applied look takes —
@@ -405,6 +411,54 @@ if first == "bench-export" {
           difference at any ΔE — it is the canvas and the export disagreeing about which
           candidate the photograph is.
         """)
+    } catch {
+        die("\(error)")
+    }
+} else if first == "warm" {
+    // ---- Fill the perception cache for a shoot, and nothing else ----
+    //
+    // `bench-export` warms the cache too, but only as a side effect of rendering and writing a
+    // full-resolution JPEG per frame: 20s and ~25 MB of throwaway output each, against the ~9s the
+    // read itself costs. `label` does not warm it at all — it writes corpus JSON and never touches
+    // `PerceptionStore` (and perceives the full decode rather than the proxy the app reads).
+    //
+    // So this is the third thing: decode → proxy → perceive → save, in exactly the order and at
+    // exactly the size `AppState` uses, so that every frame it touches is one the app will find
+    // already answered.
+    guard let inDir = flag("--in-dir", in: args) else { die("warm requires --in-dir") }
+    let limit = flag("--limit", in: args).flatMap(Int.init)
+    do {
+        var images = try BatchApply.imageFiles(in: URL(fileURLWithPath: inDir, isDirectory: true))
+        guard !images.isEmpty else { die("no images in \(inDir)") }
+        if let limit { images = Array(images.prefix(limit)) }
+
+        note("Warming \(images.count) frame(s) with \(provider.activeModelID)…")
+        var read = 0, hits = 0, failed = 0
+        let start = Date()
+        for (i, url) in images.enumerated() {
+            if PerceptionStore.load(for: url, modelId: provider.activeModelID) != nil {
+                hits += 1
+                continue
+            }
+            do {
+                let full = try ImageDecoder.decode(url: url)
+                let proxy = Bench.materialise(PerceptionProxy.downsample(full))
+                let perception = try await provider.perceive(proxy)
+                PerceptionStore.save(perception, for: url, modelId: provider.activeModelID)
+                read += 1
+            } catch {
+                failed += 1
+                note("  ✗ \(url.lastPathComponent): \(error)")
+            }
+            if (read + hits) % 10 == 0 || i == images.count - 1 {
+                let each = read > 0 ? Date().timeIntervalSince(start) / Double(read) : 0
+                note(String(format: "  %d/%d — %d read, %d already cached (%.1fs per read)",
+                            read + hits + failed, images.count, read, hits, each))
+            }
+        }
+        let elapsed = Date().timeIntervalSince(start)
+        note(String(format: "Done in %.0fs: %d read, %d already cached, %d failed.",
+                    elapsed, read, hits, failed))
     } catch {
         die("\(error)")
     }
