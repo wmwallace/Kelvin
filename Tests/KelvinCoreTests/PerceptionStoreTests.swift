@@ -51,6 +51,48 @@ final class PerceptionStoreTests: XCTestCase {
                        "one photograph spelled two ways must find one entry")
     }
 
+    /// **Reorganising a library must not empty the cache**, which is the failure that made this key
+    /// what it is. The key was the full path, so renaming a shoot folder orphaned every read inside
+    /// it: measured on a real library, 19 of 23 stored reads pointed at paths that no longer
+    /// existed and a 126-frame shoot had 4 live entries. Nothing announced it — a cache that misses
+    /// is indistinguishable from a cache that is cold, so the only symptom was that reading a scene
+    /// became slow again, at roughly 8.7 seconds a frame.
+    func testMovingAPhotographKeepsItsRead() throws {
+        let original = read(.landscape, notes: "Sea stacks under a marine overcast.")
+        PerceptionStore.save(original, for: photo, modelId: "model-a")
+
+        let moved = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("kelvin-moved-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: moved, withIntermediateDirectories: true)
+        let destination = moved.appendingPathComponent(photo.lastPathComponent)
+        try FileManager.default.moveItem(at: photo, to: destination)
+        defer {
+            PerceptionStore.remove(for: destination)
+            try? FileManager.default.removeItem(at: moved)
+            // `tearDown` removes `photo`, which no longer exists; put something back so it can.
+            try? Data("original".utf8).write(to: photo)
+        }
+
+        XCTAssertEqual(PerceptionStore.load(for: destination, modelId: "model-a"), original,
+                       "a photograph filed into a different folder lost a read it had already paid for")
+    }
+
+    /// The other half of that bargain: surviving a move must not come at the price of two different
+    /// photographs sharing an entry. Same name, different bytes — the case that actually occurs,
+    /// since `_DSC0001.ARW` repeats across bodies and cards.
+    func testTwoRealFilesSharingANameDoNotShareAnEntry() throws {
+        let otherDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("kelvin-twin-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: otherDir, withIntermediateDirectories: true)
+        let twin = otherDir.appendingPathComponent(photo.lastPathComponent)
+        try Data("a different photograph entirely, of a different length".utf8).write(to: twin)
+        defer { try? FileManager.default.removeItem(at: otherDir) }
+
+        PerceptionStore.save(read(.portrait), for: photo, modelId: "model-a")
+        XCTAssertNil(PerceptionStore.load(for: twin, modelId: "model-a"),
+                     "a namesake in another folder was served the first photograph's read")
+    }
+
     // MARK: Invalidation — the part that has to be right
 
     /// **A different model is a different answer.** Without this, `KELVIN_MODEL=…` — which exists

@@ -56,8 +56,35 @@ public enum PerceptionStore {
         return base
     }()
 
+    /// The cache key: **file name + size + modification date**, and deliberately NOT the path.
+    ///
+    /// It was the full path, which meant every read was orphaned the moment its folder was renamed
+    /// or moved. That is not a hypothetical: measured on a real library on 28 July 2026, 19 of 23
+    /// stored reads pointed at paths that no longer existed, and a 126-frame shoot had 4 live
+    /// entries. The whole cache had been silently emptied by an afternoon of tidying, and the only
+    /// symptom was that reading a scene got slow again — a cache that misses looks exactly like a
+    /// cache that is merely cold. Reorganising a photography library is a thing photographers do,
+    /// so keying on where a file sits today makes the cache lossy by design.
+    ///
+    /// Name + size + mtime survives a move, a rename of any parent folder, and being reorganised
+    /// into a different shoot. It is **not** a content hash: `PerceptionStore` rejects those on
+    /// cost (SHA-256 over a folder of 60 MP RAWs is the work this cache exists to avoid), and this
+    /// adds none, because `contentHint` already pays for the same single `stat` on every lookup.
+    ///
+    /// What it trades: two photographs sharing a name, a byte size AND a modification date to the
+    /// second would collide and be served each other's read. Across bodies `_DSC6390.ARW` is a name
+    /// that genuinely repeats, so this is not zero — but it also has to be the same byte count and
+    /// the same second, and a wrong read costs one bad set of candidates that any edit overrides.
+    /// A stale-but-present cache is the ordinary failure mode of every cache; a permanently
+    /// unreachable one is not.
+    ///
+    /// A file with no readable attributes falls back to the path, which is strictly better than
+    /// refusing to cache it.
     private static func key(for photo: URL) -> String {
-        let digest = SHA256.hash(data: Data(photo.standardizedFileURL.path.utf8))
+        let name = photo.lastPathComponent
+        let identity = contentHint(for: photo).map { "\(name)-\($0)" }
+            ?? photo.standardizedFileURL.path
+        let digest = SHA256.hash(data: Data(identity.utf8))
         return digest.compactMap { String(format: "%02x", $0) }.joined()
     }
 
