@@ -724,3 +724,95 @@ national forest is the largest feature containing the point dressed up as the mo
 The consequence is that a place name is a SUGGESTION and must stay one. It pre-fills the export
 label; it never becomes a filename on its own. That the label is editable is what makes a wrong
 guess cost a second.
+
+---
+
+## D15 — Photos stay where they are; the slowness was a cache and a blocked main thread · **Decided 29 July 2026**
+
+Reported as "if I want to edit a photo on my NAS it's slow or non-responsive", with the open question
+being whether Kelvin needs an import step, a library, or file management of some kind.
+
+**It does not, and that was already decided.** `docs/LANDSCAPE.md` says "Lightroom / Capture One —
+the incumbents. Not the competition for v1. Do not try to replace a catalogue system," and CLAUDE.md
+spends the entire novelty budget on the recipe IR and the preference loop. Kelvin points at files
+where they live and never writes beside them. Building an asset manager to fix read latency would be
+a very expensive way to buy a disk cache.
+
+So the NAS problem was diagnosed as what it actually is — **a caching problem and a threading bug** —
+and fixed as those.
+
+### What was actually wrong
+
+**Blocking file I/O on the main actor.** `AppState` is `@MainActor`, and `open` did its `stat` and its
+directory listing there, `loadPhoto` did the sibling listing and the EXIF read there, and
+`signature(for:)` decoded a measurement proxy there — twice per photograph, once to look for a
+reusable scene read and once to remember the new one. On an internal SSD all of that is free. On a
+share that has gone to sleep or lost its route, a single `stat` blocks in the kernel for the mount's
+timeout, and because it is the main thread the window cannot paint and there is no way to cancel.
+**That is the beachball, and it happened before Kelvin had read a byte of the photograph.**
+
+**Nothing was cached between launches.** Thumbnails and capture info were read from the originals
+every time. Opening a 437-frame shoot was 437 thumbnail reads and 437 EXIF header reads, and the same
+874 reads again the next morning.
+
+**The content hash held up the picture.** `loadPhoto` read and SHA-256'd every byte of the file inside
+the decode, so a 60 MP RAW was a 60 MB transfer standing in front of a proxy that needs a fraction of
+it — to produce a provenance string that nothing on the way to showing a photograph reads. It is now
+computed in the background; `recordCurrentPick` waits for it, because a pick recorded against a blank
+id is a pick that can never be joined back to a photograph.
+
+### The cache: `~/Library/Caches`, keyed name + size + mtime
+
+`MediaCache` holds thumbnails, capture info and content hashes. Two decisions in it are load-bearing:
+
+**In Caches, not Application Support.** `EditStore` and `PerceptionStore` hold work that cannot be
+recomputed, or that costs fifteen seconds a frame to recompute, so they live where macOS will not
+touch them. Everything in `MediaCache` rebuilds from the original in milliseconds. Deleting it is
+always safe, and the system is allowed to reclaim it under disk pressure. Settings ▸ Cache says so and
+offers the button.
+
+**Keyed the way `PerceptionStore` is** — name + size + mtime, not the path — for the reason recorded
+there: path keying was measured orphaning 19 of 23 stored reads after an afternoon of tidying, and
+reorganising a library is a thing photographers do. It inherits that scheme's collision trade too.
+
+**Thumbnails are PNG, not JPEG,** and that is a correctness decision rather than a size one. Nothing
+measures a thumbnail today, so a lossy round trip would be invisible — which is exactly what makes it
+a trap. This codebase has already had one photograph resolve to two different candidate sets because
+two proxy sizes straddled a threshold; a cache that perturbs pixels is the same bug with a worse
+reproduction rate. What lossless does *not* buy: ImageIO returns a JPEG thumbnail as `noneSkipFirst`
+and the same image from PNG as `noneSkipLast`, so 76,623 of 76,800 bytes differ while not one pixel
+does. Anything comparing two of these must normalise first.
+
+### Measured
+
+126-frame, 7.8 GB shoot of 60 MP Sony ARWs, **local SSD with the files already in the page cache** —
+so this is the conservative floor, not the NAS case, where there is no local page cache at all:
+
+| | cold | warm |
+|---|---|---|
+| EXIF header pass, 126 frames | 820 ms | 13 ms |
+| Thumbnails, 26 frames | 637 ms | 7 ms |
+
+The cache for that shoot is **0.5 MB against 7.8 GB of originals**. Budget is 512 MB, trimmed
+oldest-first at launch and never on the path that reads an entry.
+
+### Volume awareness
+
+`StorageVolume.isNetwork` is one `statfs`, cached per volume. It does not change what Kelvin computes;
+it earns the status line the right to say "on a network volume, so the first read of each frame is
+slower". Identical messages for a local disk and a share meant the only available reading of a slow
+open was that the app was broken.
+
+**Known gap:** iCloud Drive and other file providers report *local*. A dataless file materialises on
+first read and behaves like a very slow local disk, so treating it as a network volume would be the
+more useful lie — but `volumeIsLocalKey` is not how you detect it, and guessing from
+`~/Library/Mobile Documents` breaks on the next OS. Left as a gap rather than papered over.
+
+### What was deliberately not built
+
+**An opt-in "work on this shoot locally"** — copy the originals to a local staging folder, edit there,
+export back. This is the honest version of "import": a performance affordance the user chooses, not a
+library that owns their files. Held because the three fixes above may make it unnecessary, and because
+it is the one part of this that touches the promise in CLAUDE.md §3 — edits are keyed to a
+photograph, and staging changes where the photograph is. That mapping needs deciding before any code
+gets written, and it is the owner's call, not an implementation detail.

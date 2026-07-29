@@ -939,8 +939,24 @@ final class AppState: ObservableObject {
         }
         pendingFolderDetail = nil
         loadCaptureIndex(for: folder, photos: photos)
-        editedURLs.formUnion(EditStore.edited(among: photos))
+        loadEditedMarkers(among: photos)
+        // In memory already — `FlagStore` keeps the whole map and this is a dictionary lookup per
+        // frame, no filesystem at all. Stays synchronous.
         flags = FlagStore.flags(among: photos)
+    }
+
+    /// Which frames carry a saved edit, for the strip's dots.
+    ///
+    /// One `stat` per frame, in Application Support rather than on the user's volume — so this is
+    /// never the slow one, even over a share. Off the main actor anyway: 437 stats is 437 stats, and
+    /// this class has twice put the window on the floor by doing per-file work on the main thread.
+    private func loadEditedMarkers(among photos: [URL]) {
+        Task { [weak self] in
+            let edited = await Task.detached(priority: .utility) {
+                EditStore.edited(among: photos)
+            }.value
+            self?.editedURLs.formUnion(edited)
+        }
     }
 
     /// The folder whose detail has not been read yet, held so unfolding the strip can pay the cost
@@ -952,7 +968,7 @@ final class AppState: ObservableObject {
         guard let pending = pendingFolderDetail else { return }
         pendingFolderDetail = nil
         loadCaptureIndex(for: pending.folder, photos: pending.photos)
-        editedURLs.formUnion(EditStore.edited(among: pending.photos))
+        loadEditedMarkers(among: pending.photos)
         flags = FlagStore.flags(among: pending.photos)
     }
 
@@ -985,7 +1001,11 @@ final class AppState: ObservableObject {
         triage = triage.filter { keep.contains($0.key) }
         captureIndexTask = Task { [weak self] in
             let index = await Task.detached(priority: .utility) {
-                PhotoOrder.captureIndex(for: photos)
+                // Through the cache rather than `PhotoOrder.captureIndex` directly. The ordering
+                // rules stay in `PhotoOrder` where they are tested; the difference is only that a
+                // folder opened yesterday does not re-read 437 EXIF headers to draw the same strip.
+                // Locally that saves a second; over SMB it is the dominant cost of opening a shoot.
+                MediaCache.shared.captureIndex(for: photos)
             }.value
             guard !Task.isCancelled, let self else { return }
             // Guard against a folder switch that started while this read was running — a late
@@ -1894,7 +1914,10 @@ final class AppState: ObservableObject {
     /// lost in the scale: Vision hands back a fixed-size buffer whatever resolution it is given,
     /// and `SkyMask` classifies on a 160-px grid, so a mask has always been an upscale of something
     /// small. Returns the mask untouched when it is already the right size.
-    static func scaleMask(_ mask: CIImage, to extent: CGRect) -> CIImage {
+    /// `nonisolated` because it is pure — extent arithmetic and a transform, no state. The fine
+    /// render calls it from a detached task (see `fineRender`), and the alternative to saying so is
+    /// hopping to the main actor to scale a mask, which is the opposite of the point.
+    nonisolated static func scaleMask(_ mask: CIImage, to extent: CGRect) -> CIImage {
         let from = mask.extent
         guard !from.isInfinite, from.width > 0, from.height > 0,
               !extent.isInfinite, extent.width > 0, extent.height > 0,
@@ -2032,15 +2055,34 @@ final class AppState: ObservableObject {
 
     /// The signature for `url`, from the scan if it has run, measured now if not. Cheap either way
     /// now that a RAW's embedded preview is enough to measure.
-    private func signature(for url: URL) -> PhotoTriage.Signature? {
+    /// The frame's difference-hash fingerprint, from the scan if it has already measured this one and
+    /// from the file if not.
+    ///
+    /// **The read goes off the main actor and the proxy size does not change.** This ran on the main
+    /// thread, twice per photograph opened — once to look for a reusable read and once to remember
+    /// the new one — and `measurementProxy` is a file open and a decode. On a share that was two
+    /// network decodes blocking the window per frame, which is most of what "non-responsive over my
+    /// NAS" meant.
+    ///
+    /// Still `PerceptionProxy.measurementProxy` at `PhotoTriage.proxyEdge`, deliberately, even though
+    /// `loadPhoto` has a 1200 px proxy of the same photograph sitting right there. They are not the
+    /// same picture: for RAW, `measurementProxy` takes the camera's embedded preview while the edit
+    /// proxy is Apple's real decode, and a difference hash over one does not match a difference hash
+    /// over the other. The scan populates `triage` from `measurementProxy`, and these fingerprints are
+    /// compared against each other, so switching source here would silently change which frames read
+    /// as near-duplicates. Moving the call is the fix; changing what it measures is a different
+    /// decision and not one to make by accident.
+    private func signature(for url: URL) async -> PhotoTriage.Signature? {
         if let known = triage[url]?.signature { return known }
-        guard let proxy = PerceptionProxy.measurementProxy(url, maxEdge: PhotoTriage.proxyEdge)
-        else { return nil }
-        return PhotoTriage.signature(of: proxy)
+        return await Task.detached(priority: .userInitiated) {
+            guard let proxy = PerceptionProxy.measurementProxy(url, maxEdge: PhotoTriage.proxyEdge)
+            else { return nil }
+            return PhotoTriage.signature(of: proxy)
+        }.value
     }
 
-    private func reusablePerception(for url: URL) -> Perception? {
-        guard let mine = signature(for: url), mine.isMeasurable else { return nil }
+    private func reusablePerception(for url: URL) async -> Perception? {
+        guard let mine = await signature(for: url), mine.isMeasurable else { return nil }
         // An unmeasurable fingerprint means "no signal", not "unique" — never reuse against one.
         return perceptionBySignature.first {
             $0.signature.isMeasurable
@@ -2048,8 +2090,8 @@ final class AppState: ObservableObject {
         }?.perception
     }
 
-    private func rememberPerception(_ perception: Perception, for url: URL) {
-        guard let signature = signature(for: url), signature.isMeasurable else { return }
+    private func rememberPerception(_ perception: Perception, for url: URL) async {
+        guard let signature = await signature(for: url), signature.isMeasurable else { return }
         perceptionBySignature.append((signature, perception))
         if perceptionBySignature.count > Self.maxRememberedReads {
             perceptionBySignature.removeFirst()
@@ -2097,7 +2139,12 @@ final class AppState: ObservableObject {
                   // The composed recipe, so this edit can be re-rendered without re-perceiving the
                   // photograph. See SavedEdit.recipe.
                   recipe: activeRecipe,
-                  savedAt: ISO8601DateFormatter().string(from: Date()), contentHint: imageId)
+                  savedAt: ISO8601DateFormatter().string(from: Date()),
+                  // Nil rather than "" when the background hash has not landed yet. `contentHint` is
+                  // provenance and is explicitly not used for lookup, so an edit saved in the first
+                  // moment after opening a large file simply records no hint — which is the same
+                  // thing every sidecar written before the field existed records.
+                  contentHint: imageId.isEmpty ? nil : imageId)
     }
 
     /// Write the edit for `url` if it differs from what Kelvin generated, or clear it if the user
@@ -2386,21 +2433,48 @@ final class AppState: ObservableObject {
         await loadPhoto(from: url)
     }
 
+    /// What one `stat` off the main actor found at a path, so `open` can decide what to do without
+    /// touching the filesystem itself. See the note in `open`.
+    private enum OpenTarget: Sendable {
+        case missing
+        case file
+        /// The frame to open, already sorted by filename. Nil means a folder with nothing readable.
+        case folder(first: URL?)
+    }
+
     /// The single way a photo gets into Kelvin, whatever the source — the Open panel, ⌘O, a drop,
     /// or the filmstrip. Everything funnels here so opening behaves identically in every case:
     /// a folder opens its first frame, an already-open photo's edit is stashed rather than lost,
     /// and anything unreadable says so instead of failing silently.
     func open(_ url: URL) async {
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+        // OFF THE MAIN ACTOR, ALL OF IT. `AppState` is `@MainActor`, so the `stat` and the directory
+        // listing below used to run on the main thread. On an internal SSD that is free; on a share
+        // that has gone to sleep or lost its route, a single `stat` blocks in the kernel for as long
+        // as the mount's timeout — tens of seconds — and because it is the main thread the window
+        // cannot paint and there is no way to cancel. That is the beachball people reported when
+        // opening a photograph from a NAS, and it happened before Kelvin had read a single byte of
+        // the file.
+        let probe = await Task.detached(priority: .userInitiated) { () -> OpenTarget in
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+                return .missing
+            }
+            guard isDirectory.boolValue else { return .file }
+            // The directory listing belongs in here too. One `readdir` is cheap in principle, but
+            // over SMB it is a round trip plus a stat storm for the extension filter.
+            let files = (try? BatchApply.imageFiles(in: url))
+                .map { PhotoOrder.sorted($0, by: .filename) } ?? []
+            return .folder(first: files.first)
+        }.value
+
+        switch probe {
+        case .missing:
             statusMessage = "That file isn't there any more."
             return
-        }
-        if isDirectory.boolValue {
+        case .folder(let first):
             // Dragging a shoot folder in is a natural thing to try; open the first frame and let
             // the filmstrip carry the rest.
-            guard let first = (try? BatchApply.imageFiles(in: url))
-                .map({ PhotoOrder.sorted($0, by: .filename) })?.first else {
+            guard let first else {
                 statusMessage = "No photos \(Branding.displayName) can read in \(url.lastPathComponent)."
                 return
             }
@@ -2411,6 +2485,8 @@ final class AppState: ObservableObject {
             FilmstripFold.applyOpenIntent(openedFolder: true)
             await openPhoto(first)
             return
+        case .file:
+            break       // handled below
         }
         guard BatchApply.imageExtensions.contains(url.pathExtension.lowercased()) else {
             statusMessage = "\(Branding.displayName) can't read .\(url.pathExtension) files."
@@ -2473,8 +2549,23 @@ final class AppState: ObservableObject {
     /// never becomes noise.
     var statusNote: String {
         let others = folderPhotos.count - 1
-        guard includeFolderOnOpen, others > 0 else { return "" }
-        return " · \(others) more \(others == 1 ? "photo" : "photos") in this folder"
+        guard includeFolderOnOpen, others > 0 else { return networkNote }
+        return " · \(others) more \(others == 1 ? "photo" : "photos") in this folder" + networkNote
+    }
+
+    /// Whether the open photograph lives on a share. Read from a stored flag rather than asked per
+    /// view update — `StorageVolume.isNetwork` is a syscall on first sight of a volume, and this is
+    /// on the path that draws the footer.
+    @Published private(set) var onNetworkVolume = false
+
+    /// Said once a shoot is open, and only when it is somewhere slow.
+    ///
+    /// The first read of a frame from a NAS is genuinely slower and there is nothing to be done about
+    /// the physics of it. What was wrong before was the silence: identical messages for a local disk
+    /// and a share meant the only available reading of a slow open was that the app was broken.
+    /// Everything cached is cached, so this describes the first read and says so.
+    private var networkNote: String {
+        onNetworkVolume ? " · on a network volume, so the first read of each frame is slower" : ""
     }
 
     func loadPhoto(from url: URL) async {
@@ -2498,9 +2589,21 @@ final class AppState: ObservableObject {
         // `includeFolderOnOpen` off means exactly this photograph and nothing else. The strip
         // disappears (it only draws above one photo), which also takes the arrow keys, culling and
         // Batch apply with it — that is the deal, and it is the user's to make.
-        let siblings = includeFolderOnOpen
-            ? PhotoBrowser.siblings(of: url).filter { !dismissedURLs.contains($0) || $0 == url }
-            : [url]
+        // The listing goes off the main actor for the reason `open` documents: it is a `readdir`
+        // plus a stat per entry, and on a share that is the first place the window can freeze.
+        let siblings: [URL]
+        if includeFolderOnOpen {
+            let listed = await Task.detached(priority: .userInitiated) {
+                PhotoBrowser.siblings(of: url)
+            }.value
+            siblings = listed.filter { !dismissedURLs.contains($0) || $0 == url }
+        } else {
+            siblings = [url]
+        }
+        // The photograph may have been superseded while the listing was in flight — arrowing through
+        // a shoot faster than a share can answer is exactly when that happens. Same contract as
+        // every other `imageURL == url` guard in this function.
+        guard imageURL == url else { return }
         folderPhotos = PhotoOrder.sorted(siblings, by: photoSort,
                                          reversed: photoSortReversed, captureDates: captureIndex.dates)
         // THE REST OF THE FOLDER IS NOT READ UNTIL YOU ASK TO SEE IT.
@@ -2530,7 +2633,17 @@ final class AppState: ObservableObject {
             exportLabel = ""
         }
         loadShootLook(for: folder)
-        capture = CaptureInfoReader.read(url: url)
+        // An EXIF header read, off the main actor and through the cache. It is one file open, which
+        // is nothing locally and a round trip on a share — and it sat on the main thread in front of
+        // the decode, so the window could not even paint the new filename until it came back.
+        let opened = await Task.detached(priority: .userInitiated) {
+            // Both answers come out of the same trip to the filesystem, and neither belongs on the
+            // main thread. `isNetwork` is one `statfs` and cached per volume after the first frame.
+            (capture: MediaCache.shared.captureInfo(for: url), onNetwork: StorageVolume.isNetwork(url))
+        }.value
+        guard imageURL == url else { return }
+        capture = opened.capture
+        onNetworkVolume = opened.onNetwork
         // The open frame's own place, resolved immediately. The folder-wide pass only runs when the
         // strip is unfolded, so opening a single photograph found the coordinate and never asked
         // what it was called — the one case most likely to be someone's first look at the feature.
@@ -2550,10 +2663,6 @@ final class AppState: ObservableObject {
             // the files it exists to edit.
             let decoded = try await Task.detached(priority: .userInitiated) { () throws -> DecodedPhoto in
                 let fullRes = try ImageDecoder.decode(url: url)
-
-                let fileData = try Data(contentsOf: url)
-                let hash = SHA256.hash(data: fileData)
-                let id = "sha256:" + hash.compactMap { String(format: "%02x", $0) }.joined()
 
                 // The model wants a small 768px proxy (non-negotiable #4); the EDIT proxy is a bit
                 // larger so zooming shows more detail, but not so large that live rendering slows
@@ -2576,16 +2685,31 @@ final class AppState: ObservableObject {
                 let proxy = PerceptionProxy.fromFile(url, maxEdge: 1200, matching: fullRes.extent)
                     ?? Self.materialiseShared(PerceptionProxy.downsample(fullRes, maxEdge: 1200))
                 return DecodedPhoto(fullRes: fullRes, perceptionProxy: perceptionProxy,
-                                    proxy: proxy, originalPreview: Self.ciToNSImageShared(proxy),
-                                    imageId: id)
+                                    proxy: proxy, originalPreview: Self.ciToNSImageShared(proxy))
             }.value
             guard imageURL == url else { return }
 
             // The decode has landed, so these images now belong to `url` — and `loadedURL` moves
             // with them, in the same breath, never before.
             self.fullResCI = decoded.fullRes
-            self.imageId = decoded.imageId
             self.proxyCI = decoded.proxy
+            // THE CONTENT HASH NO LONGER HOLDS UP THE PICTURE.
+            //
+            // It used to be computed inside the decode above, which meant every byte of the file was
+            // read and hashed before anything appeared on screen. For a 60 MP RAW on a share that is
+            // a 60 MB transfer standing in front of a proxy that needs a fraction of it — and it
+            // bought a provenance string that nothing on the way to showing a photograph reads.
+            //
+            // It is wanted by `currentSavedEdit` and `recordCurrentPick`, both of which are reached
+            // by someone moving a slider or choosing a candidate — long after this lands. Cleared
+            // first so a stale hash can never be stamped onto the new frame's edit in the gap.
+            self.imageId = ""
+            self.hashTask?.cancel()
+            self.hashTask = Task { [weak self] in
+                let id = await Task.detached(priority: .utility) { MediaCache.shared.imageId(for: url) }.value
+                guard let self, let id, self.imageURL == url else { return }
+                self.imageId = id
+            }
             self.loadedURL = url
             // The untouched original, for the before/after compare.
             self.original = decoded.originalPreview.map { TaggedPreview(url: url, image: $0) }
@@ -2607,9 +2731,9 @@ final class AppState: ObservableObject {
                 // ALREADY READ, IN AN EARLIER SESSION. A read is a pure function of the pixels, so
                 // this is the same answer the model would spend six seconds producing again.
                 perceptionRead = cached
-                rememberPerception(cached, for: url)
+                await rememberPerception(cached, for: url)
                 statusMessage = "Already read — reusing it"
-            } else if let shared = reusablePerception(for: url) {
+            } else if let shared = await reusablePerception(for: url) {
                 // Same picture, same answer. See `reusablePerception`.
                 perceptionRead = shared
                 statusMessage = "Same scene as a frame already read — reusing it"
@@ -2625,7 +2749,7 @@ final class AppState: ObservableObject {
                 perceiveTask = job
                 do {
                     perceptionRead = try await job.value
-                    rememberPerception(perceptionRead, for: url)
+                    await rememberPerception(perceptionRead, for: url)
                     // Kept, so no later session and no export pays for this read again.
                     PerceptionStore.save(perceptionRead, for: url,
                                          modelId: perceptionProvider.activeModelID)
@@ -2809,6 +2933,11 @@ final class AppState: ObservableObject {
             } else {
                 statusMessage = "Ready · pick a look, then apply it to the shoot\(statusNote)"
             }
+            // Offer to become the default photo app — here, and only here, because this is the first
+            // moment the question has a subject. A photograph is on screen with its candidates up, so
+            // the user has just seen what a double-click would get them. Asked at launch it would be a
+            // modal in front of an empty window. Asks once, ever; see DefaultAppPrompt.
+            DefaultAppPrompt.offerIfAppropriate()
             // The automated slider drag, when asked for. Here because it needs what a real drag
             // needs: a photo open and a candidate loaded. See Diagnostics.swift.
             if let steps = StressDrag.steps {
@@ -3690,6 +3819,20 @@ final class AppState: ObservableObject {
     /// abandoned one from spending real seconds ahead of the photo on screen.
     private var perceiveTask: Task<Perception, Error>?
 
+    /// The content hash being computed in the background, so the two things that actually want it can
+    /// wait for it rather than record a blank. See the deferred hash in `loadPhoto`.
+    private var hashTask: Task<Void, Never>?
+
+    /// The photograph's `sha256:…` identity, waiting for the background hash if it is still running.
+    ///
+    /// Only ever awaited from inside a `Task` that is already off the critical path — recording a
+    /// pick, saving an edit. Never from anything that draws.
+    private func resolvedImageId() async -> String? {
+        if !imageId.isEmpty { return imageId }
+        await hashTask?.value
+        return imageId.isEmpty ? nil : imageId
+    }
+
     /// The last rendered proxy (for the histogram + the debounced craft check). Lives on
     /// `preview` for the reason given there.
     private var craftToken = 0
@@ -3877,7 +4020,136 @@ final class AppState: ObservableObject {
                 }
                 self.renderInFlight = false
                 self.scheduleCraftCheck()
+                // DELIBERATELY NOT CALLING `scheduleFineRender()`. See the note on it: rendering the
+                // canvas at a higher resolution changes how the edit LOOKS, because two filters in
+                // the detail pass are not resolution-scaled. Off until the eval harness says the
+                // numbers hold — CLAUDE.md: whether an edit looks good is not a judgment call.
                 if self.renderDirty { self.renderDirty = false; self.updateActiveRecipe() }
+            }
+        }
+    }
+
+    // MARK: - Seeing the photograph properly
+
+    /// The long edge of the image the canvas is actually shown, once you stop touching things.
+    ///
+    /// 1200 px — the interactive proxy — is smaller than the canvas it is drawn into. On a 1432-point
+    /// window the photograph gets roughly 945 points, which on a Retina display is about 1890 real
+    /// pixels, so the proxy was being **upscaled by half again before anyone zoomed at all**. Hide the
+    /// edit panel and the canvas gets bigger, which makes it worse. Reported as "hard to see photos
+    /// true quality at times" and "not enough quality", and both were literally true.
+    ///
+    /// 2880 covers a full-screen canvas on a Retina display with headroom for a little zoom.
+    /// `docs/ARCHITECTURE.md` has said "~2048px working" since the beginning while the code used
+    /// 1200, so this direction is the documented intent rather than a departure from it.
+    static let displayMaxEdge = 2880
+
+    /// A higher-resolution copy of the photograph, **for looking at and never for measuring**.
+    ///
+    /// Built lazily, on the first fine render after a photo opens, so opening a photograph costs
+    /// exactly what it did before. Roughly 22 MB materialised; held for the open frame only and
+    /// dropped on switch.
+    private var displayCI: CIImage?
+    private var displayCIURL: URL?
+    private var fineToken = 0
+
+    /// Re-render the frame at display resolution once the user stops interacting.
+    ///
+    /// **WRITTEN, MEASURED, AND CURRENTLY NOT CALLED.** Kept because the diagnosis is worth more than
+    /// the code, and the fix it needs is specific.
+    ///
+    /// The idea is sound and standard: 1200 px while you drag a slider, real quality when you let go.
+    /// The canvas genuinely is upscaling — 1200 px into roughly 1890 real pixels on a Retina window,
+    /// and worse once the edit panel is hidden — so the softness people report is real, and this
+    /// removes it.
+    ///
+    /// **It also changes how the edit looks, which is why it is off.** `Renderer`'s detail pass is
+    /// *mostly* resolution-independent by design: `clarityRadius(for:)` scales clarity, texture and the
+    /// sharpen radius to the shorter edge, and every mask works in fractions of `minEdge`. Two things
+    /// do not scale:
+    ///
+    /// - `CINoiseReduction`'s `inputNoiseLevel`, which is an absolute figure
+    /// - the `CIMedianFilter` chroma pass, which is a fixed 3×3 neighbourhood
+    ///
+    /// At 2880 px both smooth a smaller *fraction* of the frame than they do at 1200 px, so the picture
+    /// comes back grittier. Reported immediately, on an overcast ISO 100 beach frame, as "the natural
+    /// edit no longer looks natural" — which it did not.
+    ///
+    /// This is a **pre-existing disagreement between the preview and the export**, not one this
+    /// function invented: the export renders at 9504 px and has always had proportionally weaker noise
+    /// reduction than the 1200 px preview promised. This moved the preview along that same axis and in
+    /// doing so made a long-standing discrepancy visible.
+    ///
+    /// **What it needs before switching on:** make those two filters scale with the image the way
+    /// `clarityRadius` does, then prove it against the corpus with the eval harness
+    /// (`docs/EVALUATION.md`) — preview, fine render and export must agree at three resolutions. That
+    /// is a change to how every edit looks, so it is an eval-harness question and not a judgment call
+    /// (CLAUDE.md, "What to do when stuck").
+    private func scheduleFineRender() {
+        fineToken += 1
+        let token = fineToken
+        // Long enough that a slider drag never triggers one mid-gesture; short enough to feel like
+        // the picture simply sharpens when you let go.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            self?.fineRender(token: token)
+        }
+    }
+
+    private func fineRender(token: Int) {
+        guard fineToken == token, let url = loadedURL, let recipe = activeRecipe,
+              let proxy = proxyCI, let fullRes = fullResCI else { return }
+        // NOT WHILE A MASK OVERLAY IS UP, and not while painting. The red overlay is for placing a
+        // mask, which is the one activity that wants the shape rather than the picture — and a
+        // second render arriving underneath a brush stroke is a flicker in the middle of a gesture.
+        guard !(showMaskOverlay && selectedMask != nil), paintingMaskId == nil,
+              seedingMaskId == nil, !pickingInstance else { return }
+        // Nothing to gain when the proxy already holds every pixel the file has: a small JPEG, or a
+        // frame whose long edge is under the interactive size. Never upscale to look sharper.
+        let native = max(fullRes.extent.width, fullRes.extent.height)
+        guard native > max(proxy.extent.width, proxy.extent.height) + 1 else { return }
+
+        let target = min(Self.displayMaxEdge, Int(native.rounded()))
+        let cached = displayCIURL == url ? displayCI : nil
+        // The masks scale from the interactive extent to the display extent — the SAME operation
+        // that already takes them from 768 px to 1200 px (see `scaleMask`, and the mapValues at the
+        // measure site). Deliberately NOT re-measured the way export does it: `LocalMasks.measure`
+        // and `SubjectInstances.detect` are Vision passes costing hundreds of milliseconds, which is
+        // affordable once per exported file and absurd every time somebody lets go of a slider.
+        // Nothing real is lost — a mask has always been an upscale of something small.
+        let sourceMasks = proxyMaskBitmaps
+        let renderURL = url
+
+        Task.detached(priority: .utility) { [weak self] in
+            // Build the display image if this is the first fine render for this photograph. For
+            // anything that is not RAW, ImageIO decodes straight to the size we want; RAW goes
+            // through the decode already in hand rather than reading the file twice.
+            let display: CIImage
+            if let cached {
+                display = cached
+            } else if let fast = PerceptionProxy.fromFile(url, maxEdge: target,
+                                                          matching: fullRes.extent) {
+                display = Self.materialiseShared(fast)
+            } else {
+                display = Self.materialiseShared(
+                    PerceptionProxy.downsample(fullRes, maxEdge: target))
+            }
+            let extent = display.extent
+            let bitmaps = sourceMasks.mapValues { Self.scaleMask($0, to: extent) }
+            let rendered = Renderer.render(display, with: recipe, maskBitmaps: bitmaps)
+            guard let cg = Self.sharedContext.createCGImage(rendered, from: rendered.extent) else {
+                return
+            }
+            await MainActor.run {
+                guard let self, self.fineToken == token, self.loadedURL == renderURL else { return }
+                self.displayCI = display
+                self.displayCIURL = renderURL
+                // ONLY `active`, never `lastRenderedCI`. That one feeds the histogram and the craft
+                // self-check, both of which are read off the 1200 px render — publishing a different
+                // resolution into it would change measured numbers as a side effect of the picture
+                // getting sharper, which is precisely the class of bug the note on `measureOn`
+                // exists to warn about.
+                self.preview.active = TaggedPreview(url: renderURL,
+                                                    image: NSImage(cgImage: cg, size: .zero))
             }
         }
     }
@@ -3939,13 +4211,21 @@ final class AppState: ObservableObject {
               let candidate = candidates.first(where: { $0.id == selectedId }) else { return }
         // Log the manual adjustments as the DIFF from the candidate Kelvin generated.
         let edits = manualTweaks()
-        let pick = PreferencePick(
+        var pick = PreferencePick(
             imageId: imageId,
             perceptionHash: candidate.baseRecipe.provenance?.perceptionHash,
             shown: candidates.map { $0.id },
             chosen: selectedId,
             subsequentManualEdits: edits.isEmpty ? nil : edits)
-        Task { try? await store.record(pick: pick) }
+        // WAITS FOR THE HASH, unlike the saved edit above. A pick is the training signal this whole
+        // app is built around (CLAUDE.md, the one-sentence differentiator), and a pick recorded
+        // against a blank image id is a pick that can never be joined back to a photograph. Better
+        // to log it a second late than to log it useless.
+        Task { [weak self] in
+            guard let self else { return }
+            pick.imageId = await self.resolvedImageId() ?? ""
+            try? await self.store.record(pick: pick)
+        }
     }
 
     /// The mask bitmaps for a full-resolution render — the merged subject/sky pair, plus a mask for
@@ -4515,7 +4795,6 @@ final class AppState: ObservableObject {
         let perceptionProxy: CIImage
         let proxy: CIImage
         let originalPreview: NSImage?
-        let imageId: String
     }
 
     /// What measuring the proxy yields: histogram statistics, the local mask stack, and the dust
@@ -4832,6 +5111,18 @@ struct ContentView: View {
                     .font(Theme.ui(15, .semibold))
                     .tracking(4)
                     .foregroundColor(Theme.ink)
+                // Which build you are looking at, in the window as well as on the Dock icon — the
+                // Dock is no help when the window is full-screen or the icon is hidden behind
+                // another. Absent entirely in a release; see BuildIdentity.
+                if let badge = BuildIdentity.badge {
+                    Text(badge)
+                        .font(Theme.mono(9, .semibold))
+                        .tracking(1)
+                        .foregroundColor(Theme.base)
+                        .padding(.horizontal, 5).padding(.vertical, 2)
+                        .background(Capsule().fill(Theme.warn))
+                        .help("A build from source, not the installed app")
+                }
             }
             Spacer()
             HStack(spacing: 12) {
@@ -4859,6 +5150,25 @@ struct ContentView: View {
                 // gymnastics.
                 .keyboardShortcut("/", modifiers: .command)
                 .help("Keyboard shortcuts (⌘/)")
+
+                // ⌥⌘P, and NOT the bare Tab that Lightroom and Capture One use.
+                //
+                // Tab was the first choice for exactly the right reason — it is a photographer's
+                // muscle memory and the proposed-shortcuts list does not claim it — and it does not
+                // work. AppKit takes Tab for keyboard focus traversal before a SwiftUI
+                // `keyboardShortcut` ever sees it: tested against a real window, the key moved focus
+                // and the panel stayed put. Claiming it in the tooltip while nothing happened would
+                // be worse than picking a duller key that fires.
+                Button(action: { togglePanel() }) {
+                    Image(systemName: panelCollapsed ? "sidebar.right" : "sidebar.trailing")
+                        .font(.system(size: 11))
+                        .foregroundColor(Theme.inkDim)
+                        .padding(.horizontal, 6).padding(.vertical, 4)
+                        .background(Capsule().stroke(Theme.hairline, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut("p", modifiers: [.command, .option])
+                .help(panelCollapsed ? "Show the edit panel (⌥⌘P)" : "Hide the edit panel (⌥⌘P)")
 
                 // ⌘, has always worked and the menu item has always been there, but there was no
                 // way to DISCOVER either from inside the window — and this app hides its title bar,
@@ -5124,9 +5434,49 @@ struct ContentView: View {
                 }
             )
 
-            sidebar
-                .frame(width: 360)
-                .background(Theme.surface)
+            // THE PANEL COMES OFF, and the photograph takes the room.
+            //
+            // Reported as "edit panel needs to be able to be collapsed so you have more room to see
+            // edited photo — too small now". 360 points of a 1432-point window is a quarter of it,
+            // permanently, whether or not anything in there is being used. Judging a photograph and
+            // adjusting one are different activities, and only the second needs the sliders.
+            //
+            // Removed from the tree rather than given a width of zero: `HSplitView` keeps a
+            // draggable divider for a zero-width pane, which leaves an invisible handle at the edge
+            // of the window that resizes something you cannot see.
+            if !panelCollapsed {
+                sidebar
+                    .frame(width: 360)
+                    .background(Theme.surface)
+            }
+        }
+        // The way back in, when there is no panel to put a button on. Sits over the top-right of the
+        // canvas — the corner the panel used to occupy, so the eye is already there.
+        .overlay(alignment: .topTrailing) {
+            if panelCollapsed {
+                Button(action: { togglePanel() }) {
+                    Image(systemName: "sidebar.right")
+                        .font(.system(size: 12))
+                        .foregroundColor(Theme.inkDim)
+                        .padding(8)
+                        .background(Circle().fill(Theme.surface.opacity(0.9)))
+                        .overlay(Circle().stroke(Theme.hairline, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .padding(14)
+                .help("Show the edit panel (⌥⌘P)")
+            }
+        }
+    }
+
+    /// Whether the edit panel is hidden. Remembered between launches: someone who works with it shut
+    /// is telling you how they work, and making them say it again every morning is the same mistake
+    /// the filmstrip's fold made before `FilmstripFold` existed.
+    @AppStorage("panel.collapsed") private var panelCollapsed = false
+
+    private func togglePanel() {
+        withAnimation(Motion.gated(Motion.standard, reduceMotion)) {
+            panelCollapsed.toggle()
         }
     }
 

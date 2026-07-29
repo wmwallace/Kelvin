@@ -63,6 +63,12 @@ conversation — the current behaviour is a promise the app makes on the Privacy
 Generative pixel editing (inpainting, object removal) is a *separate, later* feature
 that operates on top of a recipe. It is never part of the base edit path.
 
+There is now a **third** place Kelvin writes, and the distinction matters: `MediaCache` keeps
+thumbnails, capture info and content hashes in `~/Library/Caches`, because all of it rebuilds from
+the original in milliseconds. Anything that cannot be recomputed — edits, scene reads — stays in
+Application Support. Deleting the cache must always be safe; if you ever want to put something in
+there that isn't, it belongs in the other directory. See D15.
+
 ### 4. Proxy-first
 
 Everything interactive runs on a downsampled proxy. Full resolution touches the pipeline

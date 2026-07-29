@@ -79,8 +79,10 @@ struct KelvinApp: App {
         // death on first model load. That was wrong — it was MLX failing to locate
         // default.metallib; see scripts/package-app.sh.)
         NSApplication.shared.setActivationPolicy(.regular)
-        // Dock icon from embedded bytes (works under `swift run` too; no Bundle.module).
-        if let data = Data(base64Encoded: AppIconData.base64), let icon = NSImage(data: data) {
+        // Dock icon from embedded bytes (works under `swift run` too; no Bundle.module) — badged
+        // with an amber corner when this is a working-tree build rather than the installed app, so
+        // two Kelvins in the Dock can be told apart. See BuildIdentity.
+        if let icon = BuildIdentity.applicationIcon() {
             NSApplication.shared.applicationIconImage = icon
         }
     }
@@ -100,6 +102,10 @@ struct KelvinApp: App {
                     // fifteen seconds to whichever photograph is opened first. Background priority:
                     // this must never compete with decoding a photo somebody just dropped.
                     Task(priority: .background) { await appState.warmPerception() }
+                    // Keep the thumbnail/header cache inside its budget. At launch and nowhere else:
+                    // it walks a directory listing, so putting it on the path that READS an entry
+                    // would make a large cache slow down the thing it exists to speed up.
+                    Task.detached(priority: .background) { MediaCache.shared.trim() }
                 }
         }
         // Hidden title bar so the darkroom UI runs edge to edge — the window is the instrument.

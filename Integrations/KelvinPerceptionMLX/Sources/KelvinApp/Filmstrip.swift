@@ -31,13 +31,23 @@ enum PhotoBrowser {
         thumbnailCG(for: url, maxPixel: maxPixel).map { NSImage(cgImage: $0, size: .zero) }
     }
 
-    /// The same work, stopping at the CGImage.
+    /// The same work, stopping at the CGImage — **from the disk cache when it is there**.
     ///
     /// Thumbnails are decoded off the main actor and the result has to cross back. NSImage's
     /// Sendable conformance is available on the macOS 27 SDK and unavailable on the one CI builds
     /// against, so returning one from a detached task compiles on this Mac and fails everywhere
     /// else. CGImage is Sendable on both, and the wrapper costs nothing on the main actor.
+    ///
+    /// Cheap as an embedded-preview read is, it is still a file open per frame, and on a network
+    /// volume a folder of 437 of them is 437 round trips — paid again on every launch, because the
+    /// only cache was in memory. See `MediaCache.thumbnailCG`.
     static func thumbnailCG(for url: URL, maxPixel: Int = 160) -> CGImage? {
+        MediaCache.shared.thumbnailCG(for: url, maxPixel: maxPixel)
+    }
+
+    /// The actual read, with no cache in front of it. `MediaCache` is the only caller that should
+    /// want this; everything else goes through `thumbnailCG` and gets the cached answer.
+    static func decodeThumbnailCG(for url: URL, maxPixel: Int = 160) -> CGImage? {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageIfAbsent: true,

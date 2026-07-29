@@ -56,6 +56,37 @@ private struct GeneralSettings: View {
             }
 
             Section {
+                // The other half of shipping as LSHandlerRank=Alternate. The plist's promise is that
+                // the user can promote Kelvin if they want it; before this, "can" meant "knows about
+                // Finder's Get Info panel", which is not the same thing.
+                Text(isDefaultApp
+                     ? "Double-clicking a photo in Finder opens it in \(Branding.displayName)."
+                     : "Photos open in whatever macOS chooses — usually Preview. \(Branding.displayName) "
+                       + "is still in the Open With menu.")
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if isDefaultApp {
+                    Button("Stop opening photos with \(Branding.displayName)") {
+                        DefaultAppPrompt.relinquish()
+                        isDefaultApp = DefaultAppPrompt.isDefaultForAnything
+                    }
+                } else {
+                    Button("Open photos with \(Branding.displayName)") {
+                        DefaultAppPrompt.claim(DefaultAppPrompt.allTypes)
+                        isDefaultApp = DefaultAppPrompt.isDefaultForAnything
+                    }
+                }
+
+                Text("Covers RAW files, JPEGs, PNGs, TIFFs and HEICs. Your originals are never "
+                     + "changed either way — an edit is a recipe stored separately.")
+                    .font(.caption).foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } header: {
+                Text("Default photo app")
+            }
+
+            Section {
                 Picker("File names", selection: $appState.exportNamingId) {
                     ForEach(ExportNaming.Scheme.allCases, id: \.rawValue) {
                         Text($0.label).tag($0.rawValue)
@@ -86,7 +117,13 @@ private struct GeneralSettings: View {
             UpdateSettings(updater: updater)
         }
         .formStyle(.grouped)
+        // Read on appear rather than held in `@AppStorage`: the real answer lives in Launch Services,
+        // which the user can change from Finder at any time behind the app's back. A cached copy would
+        // drift and show the wrong button.
+        .onAppear { isDefaultApp = DefaultAppPrompt.isDefaultForAnything }
     }
+
+    @State private var isDefaultApp = false
 }
 
 /// The two update switches, and the only place the automatic default can be turned off.
@@ -202,8 +239,48 @@ private struct PerceptionSettings: View {
             } header: {
                 Text("Network")
             }
+
+            Section {
+                Text("Thumbnails and camera details are kept on this Mac so a shoot you have opened "
+                     + "before draws without reading every file again. It matters most for photos on "
+                     + "a NAS or an external drive, where each read is a round trip.")
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                LabeledContent("On disk", value: cacheSizeText)
+
+                // No toggle. There is nothing to decide: this holds no originals, no edits and
+                // nothing that leaves the machine, and turning it off would only make Kelvin slower
+                // for no benefit anyone could describe. A button to empty it is enough, and exists
+                // because "reclaim the space" and "something looks wrong, clear it" are both real.
+                Button("Empty the cache") {
+                    MediaCache.shared.removeAll()
+                    cacheBytes = 0
+                }
+                .font(.caption)
+
+                Text("Emptying it is always safe — everything in it is rebuilt from your photos the "
+                     + "next time you open them. Your edits are stored separately and are not touched.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } header: {
+                Text("Cache")
+            }
         }
         .formStyle(.grouped)
+        .task {
+            // Measured when the pane appears rather than on every redraw: it is a directory walk,
+            // and a settings pane that stats a few thousand files per keystroke would be its own bug.
+            cacheBytes = await Task.detached(priority: .utility) { MediaCache.shared.totalBytes() }.value
+        }
+    }
+
+    @State private var cacheBytes: Int64 = 0
+
+    private var cacheSizeText: String {
+        guard cacheBytes > 0 else { return "Empty" }
+        return ByteCountFormatter.string(fromByteCount: cacheBytes, countStyle: .file)
     }
 }
 
