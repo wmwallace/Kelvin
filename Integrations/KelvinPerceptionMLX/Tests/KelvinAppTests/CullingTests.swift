@@ -111,13 +111,39 @@ final class CullingTests: XCTestCase {
         XCTAssertEqual(s.visiblePhotos, [b], "and now it actually filters — b is the sharper")
     }
 
-    /// The notice is about `Best`, not about the scan in general — every other filter works fine
-    /// unscanned and must not sprout an explanation it does not need.
+    /// The NOTICE is about `Best` alone. `Focus` and `Flagged` also need the scan, but they show
+    /// nothing rather than everything without it, which reads as "no soft frames" rather than as a
+    /// broken control — so they get the measurement (below) and not the sentence.
     func testOtherFiltersDoNotAskForAScan() {
         let s = state(with: [url("a.ARW")])
         for f in [AppState.StripFilter.all, .keepers, .undecided, .edited, .soft, .flagged] {
             s.stripFilter = f
             XCTAssertFalse(s.bestFilterNeedsScan, "\(f.rawValue) asked for a scan it does not need")
+        }
+    }
+
+    /// **The reason `Best` was reported broken twice.** The filter was correct; nothing ever ran the
+    /// measurement it reads. Only the `Similar` grouping lens started a scan, so a photographer who
+    /// picked `Best` from the filter chips got the whole shoot back and got it back forever — waiting
+    /// changed nothing, which is why it looked broken both before and after "a scan" that had never
+    /// begun. Selecting the filter has to be what asks for the numbers.
+    func testSelectingBestStartsTheScanItDependsOn() {
+        let s = state(with: [url("a.ARW"), url("b.ARW")])
+        XCTAssertNil(s.focusScanProgress, "nothing should be measuring before anything is asked for")
+        s.stripFilter = .best
+        XCTAssertNotNil(s.focusScanProgress,
+                        "Best read fingerprints without ever asking for them to be measured")
+    }
+
+    /// The same for the other two readings the scan produces, and NOT for the four filters that read
+    /// decisions the photographer made by hand — those are correct the instant a folder opens, and
+    /// spending eight minutes of decoding to answer `Keepers` would be pure waste.
+    func testOnlyTheMeasuredFiltersAskForTheScan() {
+        for f in AppState.StripFilter.allCases {
+            let s = state(with: [url("a.ARW"), url("b.ARW")])
+            s.stripFilter = f
+            XCTAssertEqual(s.focusScanProgress != nil, f.needsScan,
+                           "\(f.rawValue) disagrees with its own needsScan")
         }
     }
 

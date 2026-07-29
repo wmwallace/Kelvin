@@ -980,8 +980,42 @@ final class AppState: ObservableObject {
         case all = "All", keepers = "Keepers", undecided = "Undecided"
         case edited = "Edited", soft = "Focus", flagged = "Flagged"
         case best = "Best"
+
+        /// Whether this filter can only be answered by the triage scan.
+        ///
+        /// `Keepers`, `Undecided` and `Edited` read decisions the photographer made by hand, so they
+        /// are correct the instant a folder opens. These three read MEASUREMENTS: `Best` needs the
+        /// near-duplicate fingerprints, `Focus` the acuity reading, `Flagged` the concerns. On an
+        /// unmeasured folder none of them has anything to filter on.
+        var needsScan: Bool {
+            switch self {
+            case .best, .soft, .flagged: return true
+            case .all, .keepers, .undecided, .edited: return false
+            }
+        }
     }
-    @Published var stripFilter: StripFilter = .all
+    @Published var stripFilter: StripFilter = .all {
+        didSet {
+            // ASKING FOR THE ANSWER IS ASKING FOR THE MEASUREMENT — the same rule `stripGrouping`
+            // already applies to the `Similar` lens, and the reasoning recorded there applies here
+            // word for word: a control that appears to do nothing on any folder nobody happens to
+            // have scanned yet is indistinguishable from a broken control.
+            //
+            // `Best` was shipped without it and was reported as broken within the hour, twice. It
+            // was not broken. On a folder with no fingerprints every frame is its own run of one,
+            // every frame is the sharpest of its run, and the filter honestly returns the whole
+            // shoot — and nothing anywhere was ever going to start the scan that would change that
+            // answer, because only the `Similar` lens started one. Waiting did not help, which is
+            // why it looked broken both before AND after "a scan" that had never actually run.
+            //
+            // Measured on the owner's 437-frame shoot: 148 groups, 109 of them holding more than
+            // one frame. `Best` has two thirds of that shoot to hide and could not see any of it.
+            //
+            // Idempotent — `scanFocus` guards on a scan already running and returns immediately
+            // once every frame in the folder has a verdict.
+            if stripFilter.needsScan { scanFocus() }
+        }
+    }
 
     /// Photos the strip should actually display, after the filter. The frame you are editing is
     /// always included — filtering the open photo out from under yourself is disorienting.
