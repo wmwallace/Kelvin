@@ -185,6 +185,8 @@ struct FilmstripView: View {
     /// silently declines to filter is indistinguishable from a broken one — which is how this
     /// shipped and how it was reported.
     var bestNeedsScan: Bool = false
+    /// The sentence to show, so the strip can say WHICH unmeasured state it is in.
+    var bestNote: String = ""
     /// What else the scan noticed — a frame with no readable detail left at either end of the tone
     /// range. Focus is excluded; the soft badge already covers it.
     var exposureConcerns: (URL) -> [PhotoTriage.Concern] = { _ in [] }
@@ -515,7 +517,7 @@ struct FilmstripView: View {
         HStack(spacing: 8) {
             Image(systemName: "scope")
                 .font(.system(size: 10, weight: .bold)).foregroundColor(Theme.inkFaint)
-            Text("Nothing measured yet — Best needs the scan to know which frames are alike.")
+            Text(bestNote)
                 .font(Theme.mono(10)).foregroundColor(Theme.inkDim)
             Button(action: onScanFocus) {
                 Text("Scan shoot").font(Theme.mono(10, .semibold)).foregroundColor(Theme.glow)

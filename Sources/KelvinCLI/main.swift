@@ -338,6 +338,42 @@ case "cast":
                      s.chromaA, s.chromaB, mag, mag > 22 ? "  FLAGGED" : ""))
     } catch { fail("\(error)") }
 
+case "similar-map":
+    // What the strip's `Similar` grouping and the `Best` filter are both built on: which frames
+    // `PhotoTriage` thinks are near-duplicates of each other. Reported as group sizes, because
+    // "Best does not filter anything" and "this shoot has no near-duplicates in it" look identical
+    // from the outside and are completely different problems.
+    do {
+        let rest = Array(arguments.dropFirst())
+        guard let inDir = value(for: "--in-dir", in: rest) else { fail("similar-map requires --in-dir") }
+        let limit = value(for: "--limit", in: rest).flatMap(Int.init) ?? 40
+        var images = try BatchApply.imageFiles(in: URL(fileURLWithPath: inDir, isDirectory: true))
+        guard !images.isEmpty else { fail("no images in \(inDir)") }
+        images = Array(images.prefix(limit))
+
+        var frames: [PhotoTriage.Frame] = []
+        var unreadable = 0, unmeasurable = 0
+        for url in images {
+            guard let verdict = PhotoTriage.read(url: url) else { unreadable += 1; continue }
+            if !verdict.signature.isMeasurable { unmeasurable += 1 }
+            frames.append(PhotoTriage.Frame(url: url, signature: verdict.signature,
+                                            captured: CaptureInfoReader.read(url: url).captured))
+        }
+        let groups = PhotoTriage.groups(frames)
+        let multi = groups.filter { $0.count > 1 }
+        print("\(images.count) frame(s): \(frames.count) read, \(unreadable) unreadable, "
+              + "\(unmeasurable) with no signal in the fingerprint")
+        print("near-duplicate distance \(PhotoTriage.nearDuplicateDistance), "
+              + "burst distance \(PhotoTriage.burstDistance)")
+        print("\(groups.count) group(s), \(multi.count) with more than one frame")
+        for g in groups where g.count > 1 {
+            print("  \(g.count): " + g.map { $0.lastPathComponent }.joined(separator: " "))
+        }
+        if multi.isEmpty {
+            print("→ every frame is its own group, so `Best` can only return all of them.")
+        }
+    } catch { fail("\(error)") }
+
 case "dust-map":
     // Does this shoot have sensor dust, and where? Per-frame detection cannot answer that — it
     // reports whatever small dark compact thing sits on a smooth field, which on a beach is kelp

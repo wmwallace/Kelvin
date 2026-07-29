@@ -98,8 +98,17 @@ final class CullingTests: XCTestCase {
         XCTAssertTrue(s.bestFilterNeedsScan, "Best silently showed everything with nothing measured")
         XCTAssertEqual(s.visiblePhotos.count, 2, "and it does still show everything, deliberately")
 
+        // A PARTLY scanned shoot still says so, and says how much is left. This is the state that
+        // made the first version of the notice look like it had not worked: unmeasured frames are
+        // included by design, so until the scan finishes the answer barely changes.
         s.triage = [a: frame(acuity: 3, bits: 0)]
-        XCTAssertFalse(s.bestFilterNeedsScan, "one fingerprint is enough to be working from")
+        XCTAssertTrue(s.bestFilterNeedsScan, "a half-measured shoot said nothing")
+        XCTAssertEqual(s.bestFilterNote, "1 of 2 still to measure — "
+                       + "Best shows unmeasured frames until the scan reaches them.")
+
+        s.triage[b] = frame(acuity: 9, bits: 0)
+        XCTAssertNil(s.bestFilterNote, "a fully measured shoot has nothing to explain")
+        XCTAssertEqual(s.visiblePhotos, [b], "and now it actually filters — b is the sharper")
     }
 
     /// The notice is about `Best`, not about the scan in general — every other filter works fine

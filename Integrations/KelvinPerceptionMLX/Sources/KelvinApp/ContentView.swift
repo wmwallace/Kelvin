@@ -1047,8 +1047,31 @@ final class AppState: ObservableObject {
     /// The fix is a notice rather than a different rule. Including unfingerprinted frames is still
     /// correct *during* a scan — a half-measured shoot should not hide the half it has not reached —
     /// so the rule stays and the empty case explains itself.
-    var bestFilterNeedsScan: Bool {
-        stripFilter == .best && !folderPhotos.contains { triage[$0]?.signature != nil }
+    var bestFilterNeedsScan: Bool { bestFilterNote != nil }
+
+    /// Why `Best` is showing more than it should, or nil when it is showing exactly what it means.
+    ///
+    /// Two states produce the same useless-looking result and they need different sentences:
+    ///
+    ///   • **Nothing scanned.** Every frame is its own run of one, so `Best` returns the shoot.
+    ///   • **Partly scanned.** Unmeasured frames are deliberately included, so `Best` returns the
+    ///     measured picks PLUS everything the scan has not reached — which on a 126-frame shoot
+    ///     a few seconds in is essentially the whole thing. This is the state that made the fix
+    ///     for the first one look like it had not worked, because the answer barely changes until
+    ///     the scan finishes.
+    ///
+    /// Saying the count is the point. "Best needs the scan" on a shoot that is 90% measured is a
+    /// lie; "112 of 126 still to measure" tells you to wait, and "14 still to measure" tells you
+    /// the answer you are looking at is nearly right.
+    var bestFilterNote: String? {
+        guard stripFilter == .best else { return nil }
+        let pending = folderPhotos.filter { triage[$0] == nil }.count
+        guard pending > 0 else { return nil }
+        if pending == folderPhotos.count {
+            return "Nothing measured yet — Best needs the scan to know which frames are alike."
+        }
+        return "\(pending) of \(folderPhotos.count) still to measure — "
+            + "Best shows unmeasured frames until the scan reaches them."
     }
 
     var sharpestOfSimilarRuns: Set<URL> {
@@ -4841,6 +4864,7 @@ struct ContentView: View {
                                   onScanFocus: appState.scanFocus,
                                   sharpest: appState.sharpestInRun,
                                   bestNeedsScan: appState.bestFilterNeedsScan,
+                                  bestNote: appState.bestFilterNote ?? "",
                                   exposureConcerns: appState.exposureConcerns(for:),
                                   scanNote: appState.scanNote(for:),
                                   spokenDescription: appState.spokenDescription(for:),
