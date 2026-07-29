@@ -180,6 +180,49 @@ final class RegionGrowTests: XCTestCase {
         XCTAssertEqual(readback(a), readback(b), "the flood fill is not deterministic")
     }
 
+    // MARK: As a mask in a recipe — the export path
+
+    /// **The reason this is a seed and not a bitmap.** Export builds its mask bitmaps from
+    /// `LocalMasks.measure` and never carries the app's preview bitmaps, and the renderer silently
+    /// skips a mask it is handed no bitmap for. So a wand mask has to be able to regrow itself from
+    /// numbers alone — if this fails, the wand works on screen and vanishes from the exported file.
+    func testAWandMaskRendersWithNoBitmapsSupplied() {
+        let image = field([(x: 150..<350, y: 150..<350, c: dark)])
+        var recipe = Recipe.neutral
+        recipe.masks = [Mask(id: "wand", type: "wand", source: "region-grow", invert: false,
+                             feather: 0, opacity: 1, adjustments: ["exposure_ev": 2.0],
+                             region: RegionSeed(x: 0.5, y: 0.5, tolerance: 0.10))]
+
+        let plain = Renderer.render(image, with: Recipe.neutral, maskBitmaps: [:])
+        let masked = Renderer.render(image, with: recipe, maskBitmaps: [:])
+
+        // Inside the shape the exposure lift must land; outside it must not.
+        let before = readback(plain), after = readback(masked)
+        XCTAssertGreaterThan(alpha(after, 0.5, 0.5) - alpha(before, 0.5, 0.5), 0.1,
+                             "the wand mask did not reach the renderer without a supplied bitmap")
+        XCTAssertEqual(alpha(after, 0.06, 0.06), alpha(before, 0.06, 0.06), accuracy: 0.02,
+                       "the lift leaked outside the grown region")
+    }
+
+    /// A recipe written before the wand existed decodes exactly as it did — the field is absent and
+    /// absent means "this is not a wand mask".
+    func testARecipeWithoutARegionDecodesUnchanged() throws {
+        let json = #"{"id":"m","type":"subject","invert":false,"feather":10,"opacity":1,"adjustments":{}}"#
+        let m = try JSONDecoder().decode(Mask.self, from: Data(json.utf8))
+        XCTAssertNil(m.region, "a mask with no region key must not invent one")
+    }
+
+    func testASeedSurvivesAFullRecipeRoundTrip() throws {
+        var recipe = Recipe.neutral
+        recipe.masks = [Mask(id: "wand", type: "wand", source: "region-grow", invert: false,
+                             feather: 6, opacity: 1, adjustments: ["exposure_ev": -0.5],
+                             region: RegionSeed(x: 0.33, y: 0.66, tolerance: 0.14, softness: 0.4))]
+        let back = try JSONDecoder().decode(Recipe.self, from: JSONEncoder().encode(recipe))
+        XCTAssertEqual(back.masks?.first?.region,
+                       RegionSeed(x: 0.33, y: 0.66, tolerance: 0.14, softness: 0.4),
+                       "the seed was lost in the recipe encoder")
+    }
+
     // MARK: The distance metric
 
     /// Normalised by √3, so a tolerance reads as a fraction of the largest possible difference and

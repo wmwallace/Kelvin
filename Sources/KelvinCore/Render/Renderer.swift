@@ -253,6 +253,19 @@ public enum Renderer {
                 bitmap = maskBitmaps[mask.id] ?? brushMask(stamps, extent: img.extent)
             } else if let shape = mask.shape {
                 bitmap = gradientMask(shape, extent: img.extent)
+            } else if let seed = mask.region {
+                // THE WAND, REGROWN AT THIS RESOLUTION rather than resampled from the proxy the
+                // photographer clicked on. That is the whole point of storing a seed instead of
+                // pixels — and it is also why this branch has to exist here rather than the app
+                // baking a bitmap and handing it over: the export path supplies only the bitmaps
+                // `LocalMasks.measure` produces, so a bitmap-backed wand would render on screen
+                // and be silently missing from the exported file.
+                //
+                // A caller-supplied bitmap still wins, so the app can hand over the region it
+                // already grew for the preview instead of paying for the fill on every slider drag.
+                bitmap = maskBitmaps[mask.id]
+                    ?? RegionGrow.mask(in: img, seed: CGPoint(x: seed.x, y: seed.y),
+                                       tolerance: seed.tolerance, softness: seed.softness)
             } else {
                 bitmap = maskBitmaps[mask.id] ?? maskBitmaps[mask.type]
             }
@@ -602,13 +615,25 @@ public enum Renderer {
         return gradient?.cropped(to: extent)
     }
 
-    /// Composite brush stamps into a grayscale mask — the union of soft circles the user painted.
-    /// Coordinates normalised, top-left origin (y flipped for Core Image).
-    public static func brushMask(_ stamps: [BrushStamp], extent: CGRect) -> CIImage? {
+    /// Composite brush stamps into a grayscale mask — the soft circles the user painted, added to
+    /// or taken away from `base`. Coordinates normalised, top-left origin (y flipped for Core Image).
+    ///
+    /// **Stamps are applied IN ORDER**, which they did not have to be while every dab only ever
+    /// added: a union is commutative and the loop was really a set. It is not any more. "Paint over
+    /// the rock, then take the spill back off the sky" and the reverse are different pictures, so
+    /// the sequence is the meaning and `erase` is per stamp.
+    ///
+    /// `base` exists for the app's incremental bake. Compositing a long stroke is O(stamps) and runs
+    /// on the main actor, so the app flattens what it has and hands only the new dabs back — which
+    /// only stays correct if the new dabs can be laid over the flattened bitmap in order. Passing
+    /// the previous bake as `base` is that; the alternative, compositing the new dabs separately and
+    /// unioning the two halves, silently loses every erase in them.
+    public static func brushMask(_ stamps: [BrushStamp], extent: CGRect,
+                                 over base: CIImage? = nil) -> CIImage? {
         guard !extent.isInfinite, extent.width > 0, extent.height > 0, !stamps.isEmpty else { return nil }
         let w = extent.width, h = extent.height, minEdge = min(w, h)
         let white = CIColor(red: 1, green: 1, blue: 1), black = CIColor(red: 0, green: 0, blue: 0)
-        var acc = CIImage(color: black).cropped(to: extent)
+        var acc = base?.cropped(to: extent) ?? CIImage(color: black).cropped(to: extent)
         for s in stamps {
             let cx = extent.origin.x + s.x * w
             let cy = extent.origin.y + (1 - s.y) * h
@@ -618,8 +643,18 @@ public enum Renderer {
                 "inputCenter": CIVector(x: cx, y: cy), "inputRadius0": r0, "inputRadius1": r1,
                 "inputColor0": white, "inputColor1": black
             ])?.outputImage?.cropped(to: extent) else { continue }
-            // Lighten (max) unions overlapping dabs into one smooth region.
-            acc = dab.applyingFilter("CILightenBlendMode", parameters: [kCIInputBackgroundImageKey: acc])
+            if s.erase {
+                // Multiply by the dab's inverse: the centre (dab 1 → inverse 0) is scrubbed to
+                // nothing, outside the dab (0 → 1) is left exactly as it was, and the soft edge
+                // scales what is there rather than cutting it. Subtracting instead would clip to
+                // black and turn a soft brush into a hard-edged hole.
+                acc = dab.applyingFilter("CIColorInvert")
+                    .applyingFilter("CIMultiplyBlendMode", parameters: [kCIInputBackgroundImageKey: acc])
+                    .cropped(to: extent)
+            } else {
+                // Lighten (max) unions overlapping dabs into one smooth region.
+                acc = dab.applyingFilter("CILightenBlendMode", parameters: [kCIInputBackgroundImageKey: acc])
+            }
         }
         return acc.cropped(to: extent)
     }
