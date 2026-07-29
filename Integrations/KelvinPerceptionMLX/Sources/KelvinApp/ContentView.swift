@@ -1641,6 +1641,24 @@ final class AppState: ObservableObject {
     var exportSize: ImageWriter.Size {
         exportLongEdge > 0 ? .longEdge(exportLongEdge) : .fullResolution
     }
+
+    /// What the single-photo export button says it will do.
+    ///
+    /// **It used to be the hard-coded string "Export full-res" while the run honoured
+    /// `exportLongEdge`, which is persisted** — so a photographer who once chose 2048 px got a
+    /// 2048 px file, every time afterwards, from a button that promised full resolution, with
+    /// nothing on screen to say otherwise. The button's name was a lie and the setting that made it
+    /// one was invisible until the panel was already open. Now the label reads the setting.
+    var exportOneButtonLabel: String {
+        exportLongEdge > 0 ? "Export \(exportLongEdge) px" : "Export full-res"
+    }
+
+    var exportOneButtonHelp: String {
+        exportLongEdge > 0
+            ? "Render this photo with its long edge at \(exportLongEdge) px — the size you chose "
+                + "last time. Change it under Size in the export panel."
+            : "Render this photo at its full resolution."
+    }
     var exportColorSpace: ImageWriter.ColorSpace {
         ImageWriter.ColorSpace(rawValue: exportColorSpaceId) ?? .sRGB
     }
@@ -1659,12 +1677,26 @@ final class AppState: ObservableObject {
 
     /// A word pinned to the FRONT of every exported name, and one pinned to the END.
     ///
-    /// Not persisted, for the same reason `exportLabel` is not: a prefix is a statement about the
-    /// job in hand — a client, a shoot number — and a remembered one delivers next month's wedding
-    /// under last month's client name. The scheme above IS remembered, because "how I like files
-    /// named" is a habit; "who this is for" is not.
-    @Published var exportPrefix = ""
-    @Published var exportSuffix = ""
+    /// **Remembered.** These were deliberately not persisted, on the same reasoning as
+    /// `exportLabel` — a remembered affix delivers next month's wedding under last month's client
+    /// name. The owner reported the loss as a bug, and on reflection the reasoning was right about
+    /// the label and wrong about these: `v2`, `-edited`, a studio's standing prefix are *habits*,
+    /// which is exactly the test the scheme above is already remembered by. Retyping a habit before
+    /// every export is a tax paid every time to prevent a mistake that is rare.
+    ///
+    /// The dangerous case is handled better by SHOWING than by forgetting. Both fields are built
+    /// pre-filled from these values and sit directly above a live example of the resulting filename
+    /// (`refreshNamingExample`), so a stale prefix is on screen, spelled out, before anything is
+    /// written. Forgetting hid the setting; remembering it and printing it does not.
+    ///
+    /// `exportLabel` stays per-shoot. It is the one that is a statement about *this* job by
+    /// definition, and it is already cleared when the shoot changes.
+    @Published var exportPrefix = UserDefaults.standard.string(forKey: "export.prefix") ?? "" {
+        didSet { UserDefaults.standard.set(exportPrefix, forKey: "export.prefix") }
+    }
+    @Published var exportSuffix = UserDefaults.standard.string(forKey: "export.suffix") ?? "" {
+        didSet { UserDefaults.standard.set(exportSuffix, forKey: "export.suffix") }
+    }
 
     /// What the label will actually look like in a filename, or nil when there is nothing to show.
     /// The panel prints this, because the sanitiser lowercases and hyphenates and nobody should
@@ -1718,11 +1750,43 @@ final class AppState: ObservableObject {
     /// the button's label so it says what it will do.
     var exportableCount: Int { exportTargets(keepersOnly: false).count }
 
+    /// What the group export will actually write, in filmstrip order.
+    ///
+    /// **A selection is the scope**, exactly as it already is for `Apply to shoot` (`applyScope`) —
+    /// export was the one action in the app that ignored the selection entirely, so "export these
+    /// four" meant selecting four frames, watching the button carry on saying 126, and having no
+    /// way to say it. Note the deliberate difference from `exportTargets`: a selected frame is
+    /// exported whether or not it carries an edit, because pointing at a frame and asking for it IS
+    /// the request. Requiring an edit as well would silently drop frames the photographer had just
+    /// picked by hand, which is the failure that is impossible to see in a folder of results.
+    func exportScope() -> [URL] {
+        guard selectedPhotos.isEmpty else {
+            return folderPhotos.filter { selectedPhotos.contains($0) }
+        }
+        return exportTargets(keepersOnly: exportKeepersOnly)
+    }
+
+    /// What the group export button says it will do — a SCOPE and a count, not a bare number.
+    ///
+    /// It used to read "Export 40", which names neither what those 40 are nor the fact that the
+    /// panel's Kept-only checkbox could narrow them: the count came from `exportableCount`, which
+    /// ignores `exportKeepersOnly`, so the button could promise 40 and write 12. Now the number is
+    /// the scope's own count and the word beside it says which scope produced it.
+    var exportButtonLabel: String {
+        if !selectedPhotos.isEmpty { return "Export \(selectedPhotos.count) selected" }
+        return "Export \(exportScope().count) edited"
+    }
+
     /// What the export button promises. It splits the count because the two halves cost wildly
     /// different amounts of time: a hand-made edit renders from a stored recipe in a moment, while a
     /// frame carried by the shoot's look has to be read and measured first. Someone about to export
     /// four hundred adapted frames should know that before they press it, not while they wait.
     var exportEditedHelp: String {
+        if !selectedPhotos.isEmpty {
+            let n = selectedPhotos.count
+            return "Render the \(n) frame\(n == 1 ? "" : "s") you have selected, edited or not. "
+                + "Clear the selection to export everything this shoot's look claims."
+        }
         let targets = exportTargets(keepersOnly: exportKeepersOnly)
         let byHand = targets.filter { editedURLs.contains($0) }.count
         let byLook = targets.count - byHand
@@ -3589,21 +3653,18 @@ final class AppState: ObservableObject {
             // that feels fine for two seconds and then drags.
             //
             // Only the new stamps need compositing, over the bitmap already baked.
+            //
+            // The new dabs are laid OVER the previous bake by `brushMask` itself rather than
+            // composited beside it and unioned afterwards. That union was correct only while every
+            // dab added: it takes the max of the two halves, so an erase in the new dabs would be
+            // a dark patch in a lighten blend and vanish without trace — the stroke would look
+            // right while painting and wrong on the next render, which is the worst way for it to
+            // be wrong.
             let baked = brushCache[m.id]
-            let fresh = (baked.map { m.stamps.count > $0.count } ?? false)
-                ? Array(m.stamps.suffix(m.stamps.count - (baked?.count ?? 0)))
-                : m.stamps
-            guard let addition = Renderer.brushMask(fresh, extent: extent) else { continue }
-            let composited: CIImage
-            if let baked, m.stamps.count > baked.count {
-                // Lighten, not source-over: a mask is coverage, and two overlapping dabs must not
-                // read as more opaque than one.
-                composited = addition.applyingFilter("CILightenBlendMode", parameters: [
-                    kCIInputBackgroundImageKey: baked.image
-                ]).cropped(to: extent)
-            } else {
-                composited = addition
-            }
+            let grew = baked.map { m.stamps.count > $0.count } ?? false
+            let fresh = grew ? Array(m.stamps.suffix(m.stamps.count - (baked?.count ?? 0))) : m.stamps
+            guard let composited = Renderer.brushMask(fresh, extent: extent,
+                                                      over: grew ? baked?.image : nil) else { continue }
             guard let cg = context.createCGImage(composited, from: extent) else { continue }
             let flat = CIImage(cgImage: cg)          // concrete — breaks the O(N) filter chain
             brushCache[m.id] = (m.stamps.count, flat)
@@ -3917,7 +3978,10 @@ final class AppState: ObservableObject {
     /// Masks are re-measured per photograph, exactly as batch does: a subject mask is measured on
     /// the proxy and must be re-found at full resolution, and the frames differ.
     func exportEdited(to directory: URL) async {
-        let targets = exportTargets(keepersOnly: exportKeepersOnly)
+        // `exportScope`, not `exportTargets`: a selection is the scope, the same rule Apply already
+        // follows. The button's label is computed from the same call, so what it says and what this
+        // writes cannot drift apart.
+        let targets = exportScope()
         guard !targets.isEmpty else {
             statusMessage = exportKeepersOnly
                 ? "Nothing to export is flagged Keep — press P on the ones you want, or untick Kept only"
@@ -5232,9 +5296,9 @@ struct ContentView: View {
                     .help("Close this photo — your edit is saved")
                 // Only when there is something to export. A button that reports "nothing edited yet"
                 // is a button that exists to disappoint.
-                if appState.exportableCount > 0 {
+                if !appState.exportScope().isEmpty {
                     Button(action: openExportEditedPanel) {
-                        toolbarLabel("Export \(appState.exportableCount)", filled: false)
+                        toolbarLabel(appState.exportButtonLabel, filled: false)
                     }
                     .buttonStyle(.plain)
                     .help(appState.exportEditedHelp)
@@ -5295,8 +5359,11 @@ struct ContentView: View {
                         .onChanged { _ in if !appState.showingOriginal { appState.showingOriginal = true } }
                         .onEnded { _ in appState.showingOriginal = false })
                 Spacer()
-                Button(action: openExportPanel) { toolbarLabel("Export full-res", filled: true) }
+                Button(action: openExportPanel) {
+                    toolbarLabel(appState.exportOneButtonLabel, filled: true)
+                }
                     .buttonStyle(.plain)
+                    .help(appState.exportOneButtonHelp)
             }
         }
         .padding(20)

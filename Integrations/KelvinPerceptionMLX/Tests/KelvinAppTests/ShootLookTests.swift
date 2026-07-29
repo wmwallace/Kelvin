@@ -332,6 +332,64 @@ final class ShootLookTests: XCTestCase {
         XCTAssertEqual(s.exportTargets(keepersOnly: true), [b])
     }
 
+    // MARK: Export scope — a selection is the scope, exactly as it is for Apply
+
+    /// **Export was the one action that ignored the selection.** Selecting four frames and pressing
+    /// export wrote the whole shoot, and the button carried on saying 126 while you did it.
+    func testASelectionIsTheExportScope() {
+        let a = url("a.ARW"), b = url("b.ARW"), c = url("c.ARW")
+        let s = state(with: [a, b, c])
+        s.shootLook = ShootLook(style: "vivid")           // the look claims all three
+        XCTAssertEqual(s.exportScope(), [a, b, c])
+        s.selectedPhotos = [c, a]
+        XCTAssertEqual(s.exportScope(), [a, c], "the selection must be the scope, in strip order")
+    }
+
+    /// A selected frame exports whether or not it is edited. Pointing at a frame and asking for it
+    /// IS the request — requiring an edit as well would silently drop frames just picked by hand,
+    /// which is impossible to notice in a folder of results.
+    func testASelectedFrameExportsEvenWithNoEditOnIt() {
+        let a = url("a.ARW"), b = url("b.ARW")
+        let s = state(with: [a, b])
+        XCTAssertTrue(s.exportScope().isEmpty, "nothing edited, nothing claimed, nothing to export")
+        s.selectedPhotos = [b]
+        XCTAssertEqual(s.exportScope(), [b])
+    }
+
+    /// The label names the scope AND counts it. It used to read "Export 40" from `exportableCount`,
+    /// which ignores the Kept-only narrowing — so the button could promise 40 and write 12.
+    func testTheExportButtonLabelMatchesWhatWillActuallyBeWritten() {
+        let a = url("a.ARW"), b = url("b.ARW")
+        let s = state(with: [a, b])
+        s.shootLook = ShootLook(style: "vivid")
+        s.flags = [b: .keep]
+        XCTAssertEqual(s.exportButtonLabel, "Export 2 edited")
+
+        s.exportKeepersOnly = true
+        XCTAssertEqual(s.exportScope(), [b])
+        XCTAssertEqual(s.exportButtonLabel, "Export 1 edited",
+                       "the button promised more than Kept-only would write")
+
+        s.selectedPhotos = [a, b]
+        XCTAssertEqual(s.exportButtonLabel, "Export 2 selected",
+                       "a selection outranks the keep flag, as it does for Apply")
+    }
+
+    /// **The button's name must stop being a lie.** `exportLongEdge` is persisted, so someone who
+    /// once picked 2048 px got 2048 px files from a button reading "Export full-res", every time
+    /// after, with nothing on screen to say so.
+    func testTheSinglePhotoButtonNamesTheSizeItWillActuallyWrite() {
+        let s = state(with: [url("a.ARW")])
+        let restore = s.exportLongEdge
+        defer { s.exportLongEdge = restore }
+
+        s.exportLongEdge = 0
+        XCTAssertEqual(s.exportOneButtonLabel, "Export full-res")
+        s.exportLongEdge = 2048
+        XCTAssertEqual(s.exportOneButtonLabel, "Export 2048 px",
+                       "the button still promised full resolution while set to downscale")
+    }
+
     // MARK: The record itself
 
     /// A shoot look must survive quitting, which is the only reason it is a file. Written and read
