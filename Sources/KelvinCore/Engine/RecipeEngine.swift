@@ -26,6 +26,31 @@ public enum RecipeEngine {
     /// Rationale: docs/RECIPE-SCHEMA.md — a low-confidence read should not commit to a look.
     public static let confidenceFloor = 0.5
 
+    /// Everything overridable from the environment that changes what the engine emits, as one
+    /// string, so a cache of engine output can be keyed on it.
+    ///
+    /// **This exists because a sweep and a cache are natural enemies.** The overrides below are
+    /// there so the sky lever can be re-measured without a rebuild; a cache of resolved recipes
+    /// that did not notice them would serve the previous arm's answers and report that the
+    /// parameter has no effect. That is not hypothetical — the identical *reading* was produced
+    /// once already by a stale binary (docs/EVALUATION.md), and it cost a wrong answer before
+    /// anyone checked the instrument. A sweep whose arms come back identical is the single most
+    /// misleading result this project produces, so anything that could cause it belongs here.
+    ///
+    /// `SkyMask`'s constants are included because they move the mask, which moves `skyLuma`, which
+    /// moves the recipe. Add to this whenever a new override is added; the cost of a stale entry is
+    /// silent and the cost of an over-broad signature is one recomputation.
+    public static var tuningSignature: String {
+        [
+            "skyEV:\(SkyLever.evPerDepth)",
+            "skyClamp:\(SkyLever.evClampLow)…\(SkyLever.evClampHigh)",
+            "skyBite:\(SkyLever.contrastBite)/\(SkyLever.contrastBiteOpening)",
+            "skyFeather:\(SkyLever.feather)",
+            "maskFloor:\(SkyMask.brightFloor)",
+            "maskRamp:\(SkyMask.brightRamp)"
+        ].joined(separator: ";")
+    }
+
     /// The style's graduated-ND lever over a sky, and the one part of the engine whose numbers
     /// are a **taste** call rather than a measurement.
     ///

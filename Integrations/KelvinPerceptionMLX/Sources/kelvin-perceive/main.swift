@@ -134,54 +134,70 @@ if first == "bench-export" {
         var timings: [FrameTiming] = []
         var pending: [WriteJob] = []
         var cacheHits = 0
+        var recipeHits = 0
         let wallStart = Date()
         for (i, url) in images.enumerated() {
             var t = FrameTiming()
             let full = try clock(&t.decode) { try ImageDecoder.decode(url: url) }
-            let proxy = clock(&t.proxy) { Bench.materialise(PerceptionProxy.downsample(full)) }
 
-            // The same cache the app uses, hit in the same order — so this measures shipped
-            // behaviour rather than a benchmark's idea of it. Run twice on one shoot to see the
-            // difference the cache makes; `--no-cache` measures the cold path deliberately.
-            let perceiveStart = Date()
-            let perception: Perception
-            if !noCache, let cached = PerceptionStore.load(for: url, modelId: provider.activeModelID) {
-                perception = cached
-                cacheHits += 1
+            // THE RESOLVED-RECIPE CACHE, checked first and in the same place the app checks it
+            // (`AppState.adaptedRecipe`), because a benchmark that measures a path nobody ships is
+            // worse than no benchmark. On a hit everything between here and the full-resolution
+            // masks is skipped — proxy, perception, statistics, proxy masks, engine and curate —
+            // since none of it is needed to render a recipe that is already known.
+            let recipe: Recipe
+            if !noCache, let cachedRecipe = ResolvedRecipeStore.load(
+                for: url, styleId: style.id, modelId: provider.activeModelID) {
+                recipe = cachedRecipe
+                recipeHits += 1
             } else {
-                perception = try await provider.perceive(proxy)
-                PerceptionStore.save(perception, for: url, modelId: provider.activeModelID)
-            }
-            t.perceive = Date().timeIntervalSince(perceiveStart)
+                let proxy = clock(&t.proxy) { Bench.materialise(PerceptionProxy.downsample(full)) }
 
-            let stats = try clock(&t.statistics) { try ImageStatistics.compute(proxy) }
-            let measured = clock(&t.proxyMasks) { LocalMasks.measure(in: proxy) }
-            // THE WHOLE CANDIDATE SET, then curate — because that is what the app's export does.
-            //
-            // This used to build the requested style alone, which is exactly the divergence that
-            // made the app's export disagree with its own canvas: the curator drops styles that are
-            // wrong for a frame, and a benchmark that skips the curator measures a path nobody
-            // ships. `curate` is timed separately so the cost of getting it right is visible rather
-            // than buried in `engine`.
-            let iso = ExifReader.iso(url: url)
-            let generated = clock(&t.engine) {
-                RecipeEngine.candidates(perception: perception, statistics: stats,
-                                        subjectLuma: measured.subjectLuma,
-                                        skyLuma: measured.skyLuma, iso: iso)
-            }
-            let recipe = clock(&t.curate) { () -> Recipe in
-                var scored: [CandidateCurator.Scored] = []
-                for candidate in generated {
-                    let preview = Renderer.render(proxy, with: candidate, maskBitmaps: measured.bitmaps)
-                    guard let score = AestheticEvaluator.score(rendered: preview) else { continue }
-                    scored.append(.init(recipe: candidate, score: score))
+                // The same cache the app uses, hit in the same order — so this measures shipped
+                // behaviour rather than a benchmark's idea of it. Run twice on one shoot to see the
+                // difference the cache makes; `--no-cache` measures the cold path deliberately.
+                let perceiveStart = Date()
+                let perception: Perception
+                if !noCache, let cached = PerceptionStore.load(for: url, modelId: provider.activeModelID) {
+                    perception = cached
+                    cacheHits += 1
+                } else {
+                    perception = try await provider.perceive(proxy)
+                    PerceptionStore.save(perception, for: url, modelId: provider.activeModelID)
                 }
-                if let chosen = CandidateCurator.resolve(from: scored, requested: style.id).chosen {
-                    return chosen.recipe
+                t.perceive = Date().timeIntervalSince(perceiveStart)
+
+                let stats = try clock(&t.statistics) { try ImageStatistics.compute(proxy) }
+                let measured = clock(&t.proxyMasks) { LocalMasks.measure(in: proxy) }
+                // THE WHOLE CANDIDATE SET, then curate — because that is what the app's export does.
+                //
+                // This used to build the requested style alone, which is exactly the divergence that
+                // made the app's export disagree with its own canvas: the curator drops styles that are
+                // wrong for a frame, and a benchmark that skips the curator measures a path nobody
+                // ships. `curate` is timed separately so the cost of getting it right is visible rather
+                // than buried in `engine`.
+                let iso = ExifReader.iso(url: url)
+                let generated = clock(&t.engine) {
+                    RecipeEngine.candidates(perception: perception, statistics: stats,
+                                            subjectLuma: measured.subjectLuma,
+                                            skyLuma: measured.skyLuma, iso: iso)
                 }
-                return RecipeEngine.candidate(perception: perception, statistics: stats, style: style,
-                                              subjectLuma: measured.subjectLuma,
-                                              skyLuma: measured.skyLuma, iso: iso)
+                recipe = clock(&t.curate) { () -> Recipe in
+                    var scored: [CandidateCurator.Scored] = []
+                    for candidate in generated {
+                        let preview = Renderer.render(proxy, with: candidate, maskBitmaps: measured.bitmaps)
+                        guard let score = AestheticEvaluator.score(rendered: preview) else { continue }
+                        scored.append(.init(recipe: candidate, score: score))
+                    }
+                    if let chosen = CandidateCurator.resolve(from: scored, requested: style.id).chosen {
+                        return chosen.recipe
+                    }
+                    return RecipeEngine.candidate(perception: perception, statistics: stats, style: style,
+                                                  subjectLuma: measured.subjectLuma,
+                                                  skyLuma: measured.skyLuma, iso: iso)
+                }
+                ResolvedRecipeStore.save(recipe, for: url, styleId: style.id,
+                                         modelId: provider.activeModelID)
             }
             // Full-resolution masks only when the recipe actually carries masks — same condition
             // the export loop uses, and it is a large part of the cost when it fires.
@@ -242,7 +258,11 @@ if first == "bench-export" {
         print(String(format: "  %-18@ %6.2fs", "TOTAL" as NSString, mean))
         print(String(format: "\n  min %.2fs · median %.2fs · max %.2fs · wall %.1fs for %d frames",
                      totals.first ?? 0, totals[totals.count / 2], totals.last ?? 0, wall, timings.count))
-        print("  perception: \(cacheHits) served from cache, \(timings.count - cacheHits) read fresh")
+        // Both caches, separately: a recipe hit skips the perception lookup entirely, so folding
+        // them into one number would make a fully warm run look like a perception miss.
+        print("  recipes: \(recipeHits) served from cache, \(timings.count - recipeHits) resolved fresh")
+        print("  perception: \(cacheHits) served from cache, "
+              + "\(max(0, timings.count - recipeHits - cacheHits)) read fresh")
 
         print("\n── at shoot scale (sequential, as the app runs it today) ──")
         for n in [100, 400, 1000] {

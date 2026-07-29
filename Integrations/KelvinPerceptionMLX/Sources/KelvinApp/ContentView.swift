@@ -3931,6 +3931,22 @@ final class AppState: ObservableObject {
     /// Expensive on purpose — a decode, a perception pass and two Vision passes per photograph — so
     /// it runs at export, once, and never while someone is browsing.
     private func adaptedRecipe(for url: URL, style: CandidateStyle) async throws -> Recipe {
+        // PHOTO + STYLE → RECIPE IS DETERMINISTIC, so the answer is worth keeping. On a hit the
+        // whole of this function is skipped, decode included — the caller decodes separately for
+        // the render, so nothing below is needed to produce the file.
+        //
+        // Measured on 6 real 60 MP ARWs with `bench-export`: proxy 1.15s + statistics 0.01s +
+        // proxy masks 0.21s + engine 0.00s + curate 0.50s, so 1.87s of a 20.03s frame. `curate` is
+        // the expensive half, because resolving a style means rendering and scoring the whole
+        // candidate set rather than the one asked for.
+        //
+        // Everything that changes the answer is in the KEY, not merely checked after loading —
+        // including `RecipeEngine.tuningSignature`, so that sweeping `KELVIN_SKY_EV` cannot be
+        // served the previous arm's recipes. See `ResolvedRecipeStore`.
+        let modelIdForCache = perceptionProvider.activeModelID
+        if let cached = ResolvedRecipeStore.load(for: url, styleId: style.id, modelId: modelIdForCache) {
+            return cached
+        }
         // Decode and proxy off the main actor. `AppState` is `@MainActor`, and doing this here
         // would block the thread drawing the window for every frame in the shoot.
         let decoded = try await Task.detached(priority: .userInitiated) { () -> DecodedForExport in
@@ -3960,7 +3976,7 @@ final class AppState: ObservableObject {
             PerceptionStore.save(perception, for: url, modelId: modelId)
         }
         let work = DecodedForExport(image: decoded.image, proxy: decoded.proxy)
-        return try await Task.detached(priority: .userInitiated) { () throws -> Recipe in
+        let resolved = try await Task.detached(priority: .userInitiated) { () throws -> Recipe in
             let stats = try ImageStatistics.compute(work.proxy)
             // Per-photo subject + sky masks — each frame gets its own local decisions, measured on
             // its own proxy rather than inherited from whatever was open when the look was chosen.
@@ -3989,6 +4005,8 @@ final class AppState: ObservableObject {
             return RecipeEngine.candidate(perception: perception, statistics: stats, style: style,
                                           subjectLuma: m.subjectLuma, skyLuma: m.skyLuma, iso: iso)
         }.value
+        ResolvedRecipeStore.save(resolved, for: url, styleId: style.id, modelId: modelIdForCache)
+        return resolved
     }
 
     /// A decoded photograph and its proxy, boxed to cross the actor boundary. `CIImage` is safe to
