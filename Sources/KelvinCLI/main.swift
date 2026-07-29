@@ -32,6 +32,20 @@ func printUsage() {
       \(tool) triage-compare --in-dir <dir> [--limit <n>]
       \(tool) sky-metrics --in-dir <dir> [--limit <n>] [--perception <p.json>] [--dump-dir <dir>]
       \(tool) instances --in <image>
+      \(tool) grow --in <image> --at <x,y> [--tolerance <t>] [--softness <s>] [--out-dir <dir>]
+
+    grow options (the magic wand — RegionGrow, on a real photograph):
+      --in         One photograph. Required.
+      --at         Seed point, normalised 0…1, TOP-LEFT origin. Required. e.g. --at 0.18,0.62
+      --tolerance  One tolerance instead of the default sweep.
+      --softness   Fraction of the tolerance the edge fades over (default 0.25).
+      --out-dir    Write grow-mask.png and grow-preview.png (the region pulled down 1.5 EV, so the
+                   selection can be seen on the picture rather than inferred from a number).
+
+      The sweep is the point: coverage per tolerance shows a flat run while the fill is still
+      inside one object and a jump once it bursts out into the sky. Ship a number from the flat
+      part. LOOK at the preview before believing the table — the same warning `sky-metrics
+      --dump-dir` carries, and for the same reason.
 
     triage-compare options:
       --in-dir   Directory of photographs to measure. Required.
@@ -446,6 +460,87 @@ case "instances":
             print(String(format: "  %@  label=%@ (%@)  kind=%@  coverage=%.3f",
                          i.id, i.label, sure, String(describing: i.kind), i.coverage))
         }
+    } catch { fail("\(error)") }
+
+case "grow":
+    // The magic wand, on a real photograph, before any of it reaches the UI.
+    //
+    // `SubjectInstances` returns the MOST salient thing and stops: on `_DSC6390` it hands back
+    // Haystack Rock with its silhouette intact and neither of the two smaller sea stacks beside it.
+    // Those stacks are the case `RegionGrow` exists for, and the only question that matters about it
+    // is what tolerance picks one out — a number nobody can guess from the code and which is
+    // different for a rock against sky than for a mountain shading into a hillside.
+    //
+    // So the default is a SWEEP rather than a single answer. Coverage per tolerance is the reading:
+    // a stack against sky shows a long flat run (the object, insensitive to the exact number) and
+    // then a jump to most of the frame (the fill has burst into the sky). The tolerance to ship is
+    // in the flat part, and where the jump lands is the whole risk of this approach.
+    do {
+        let rest = Array(arguments.dropFirst())
+        guard let inPath = value(for: "--in", in: rest) else { fail("grow requires --in") }
+        guard let at = value(for: "--at", in: rest) else {
+            fail("grow requires --at <x,y> — normalised 0…1, TOP-LEFT origin, e.g. --at 0.18,0.62")
+        }
+        let parts = at.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+        guard parts.count == 2 else { fail("--at must be two numbers, e.g. --at 0.18,0.62") }
+        let seed = CGPoint(x: parts[0], y: parts[1])
+        let softness = value(for: "--softness", in: rest).flatMap(Double.init) ?? 0.25
+        let single = value(for: "--tolerance", in: rest).flatMap(Double.init)
+
+        let image = try ImageDecoder.decode(url: URL(fileURLWithPath: inPath))
+        print(String(format: "%@  %.0f×%.0f  seed %.3f,%.3f (top-left origin)",
+                     URL(fileURLWithPath: inPath).lastPathComponent as NSString,
+                     image.extent.width, image.extent.height, seed.x, seed.y))
+
+        /// What fraction of the frame a mask actually selects. Sampled small — the same sanity
+        /// check `SubjectMask` makes, reimplemented here because that one is not public.
+        func coverage(of mask: CIImage) -> Double {
+            guard let data = try? ImageWriter.rgba8Sampled(mask, width: 128, height: 128) else { return 0 }
+            var sum = 0.0, n = 0.0
+            data.withUnsafeBytes { raw in
+                let p = raw.bindMemory(to: UInt8.self)
+                for i in stride(from: 0, to: data.count, by: 4) { sum += Double(p[i]) / 255; n += 1 }
+            }
+            return n > 0 ? sum / n : 0
+        }
+
+        let outDir = value(for: "--out-dir", in: rest).map { URL(fileURLWithPath: $0, isDirectory: true) }
+        if let outDir { try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true) }
+
+        let tolerances = single.map { [$0] } ?? [0.04, 0.06, 0.08, 0.10, 0.12, 0.15, 0.20, 0.25, 0.30, 0.40]
+        print("tolerance  coverage  verdict")
+        for t in tolerances {
+            guard let mask = RegionGrow.mask(in: image, seed: seed, tolerance: t, softness: softness) else {
+                print(String(format: "  %.2f       —       below minimum coverage (%.4f) — a miss",
+                             t, RegionGrow.minimumCoverage))
+                continue
+            }
+            let c = coverage(of: mask)
+            // Past about half the frame the fill has plainly escaped whatever was clicked. Said in
+            // words because a coverage column alone reads as a measurement rather than a warning.
+            let verdict = c > 0.5 ? "ESCAPED — this is most of the picture"
+                        : c > 0.25 ? "large — check it is still one object"
+                        : "plausible"
+            print(String(format: "  %.2f     %6.3f    %@", t, c, verdict as NSString))
+
+            guard let outDir else { continue }
+            // ONE PAIR PER TOLERANCE, deliberately — an earlier version picked a single tolerance to
+            // write and there is no non-arbitrary way to choose one. The coverage column cannot tell
+            // a region that grew into the next object from one that grew to fit the object it is in:
+            // on `_DSC6390`'s left sea stack the fill escapes along the surf line into Haystack Rock
+            // at EVERY tolerance that looks flat and plausible in the table. Only the picture says so.
+            let tag = String(format: "%.2f", t)
+            try ImageWriter.write(mask, to: outDir.appendingPathComponent("grow-\(tag)-mask.png"),
+                                  format: .png)
+            var recipe = Recipe.neutral
+            recipe.masks = [Mask(id: "grow", type: "subject", source: "region-grow",
+                                 invert: false, feather: 8, opacity: 1.0,
+                                 adjustments: ["exposure_ev": -1.5])]
+            let preview = Renderer.render(image, with: recipe, maskBitmaps: ["grow": mask])
+            try ImageWriter.write(preview, to: outDir.appendingPathComponent("grow-\(tag)-preview.png"),
+                                  format: .png)
+        }
+        if let outDir { print("wrote a mask and a preview per tolerance to \(outDir.path)") }
     } catch { fail("\(error)") }
 
 case "mask":
