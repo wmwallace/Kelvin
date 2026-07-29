@@ -406,6 +406,15 @@ final class AppState: ObservableObject {
         statusMessage = "Selected \(hit.label)."
     }
 
+    /// Whether the brush takes coverage away instead of adding it.
+    ///
+    /// A mode on the tool rather than a property of the mask, because it is the same brush either
+    /// way — you paint, you hold the other mode, you paint back. It sits on `AppState` beside
+    /// `brushRadius` for that reason, and it deliberately does NOT reset between strokes: erasing
+    /// the spill off a mask takes several passes, and a mode that snapped back to Add after each
+    /// one would make the second pass silently undo the first.
+    @Published var brushErases = false
+
     /// Which wand mask is waiting for its seed click, if any.
     ///
     /// Carries the mask's id rather than a bare flag, unlike `pickingInstance`: a wand click sets
@@ -3568,7 +3577,8 @@ final class AppState: ObservableObject {
         func r4(_ v: Double) -> Double { (v * 10_000).rounded() / 10_000 }
         func stamp(_ x: Double, _ y: Double) {
             userMasks[idx].stamps.append(
-                BrushStamp(x: r4(x), y: r4(y), radius: r4(brushRadius), hardness: 0.6))
+                BrushStamp(x: r4(x), y: r4(y), radius: r4(brushRadius), hardness: 0.6,
+                           erase: brushErases))
         }
 
         guard let last = userMasks[idx].stamps.last else {
@@ -5965,6 +5975,8 @@ struct ContentView: View {
                             clearStrokes: { appState.clearStrokes(m.id) },
                             brushRadius: Binding(get: { appState.brushRadius },
                                                  set: { appState.brushRadius = $0 }),
+                            brushMode: Binding(get: { appState.brushErases },
+                                               set: { appState.brushErases = $0 }),
                             isSeeding: appState.seedingMaskId == m.id,
                             toggleSeeding: {
                                 appState.seedingMaskId = (appState.seedingMaskId == m.id) ? nil : m.id
@@ -7301,6 +7313,10 @@ struct UserMaskEditor: View {
     var togglePaint: () -> Void = {}
     var clearStrokes: () -> Void = {}
     var brushRadius: Binding<Double> = .constant(0.09)
+    /// Whether the brush takes coverage away rather than adding it. Bound rather than a flag on the
+    /// mask: it is a mode on the tool, and it persists across strokes because erasing a spill off a
+    /// mask takes several passes.
+    var brushMode: Binding<Bool> = .constant(false)
     /// The wand's equivalent of `isPainting`/`togglePaint`: whether the canvas is waiting for this
     /// mask's seed click. A mode rather than an always-live click, for the same reason the subject
     /// pick is one — the canvas is also how you pan and zoom.
@@ -7423,6 +7439,16 @@ struct UserMaskEditor: View {
                                 .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.hairline, lineWidth: 1)))
                     }.buttonStyle(.plain)
                 }
+                // ADD / ERASE. Until `BrushStamp.erase` existed a mask could only grow, so a mask
+                // that grabbed too much had to be deleted and redrawn. This is also the hand
+                // correction for a wand that leaked: paint on the rock, switch to Erase, take the
+                // spill back off the sky.
+                Picker("", selection: brushMode) {
+                    Text("Add").tag(false)
+                    Text("Erase").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
                 ToneSlider(label: "Brush size", value: brushRadius, range: 0.02...0.35, step: 0.01, unit: "", onChange: {}, neutral: 0.09)
             case .wand:
                 Text("Click the thing you want. The selection spreads from there until the "

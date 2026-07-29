@@ -1,4 +1,5 @@
 import XCTest
+import CoreImage
 import KelvinCore
 @testable import KelvinApp
 
@@ -73,6 +74,35 @@ final class UserMaskTests: XCTestCase {
     /// app and forgotten here was not a failing test — it was a kind with no coverage at all, which
     /// is the quieter and worse outcome. `.wand` was added under exactly this list.
     private var allKinds: [UserMaskVM.Kind] { UserMaskVM.Kind.allCases }
+
+    /// **The brush can take coverage back.** Until `BrushStamp.erase` existed a mask could only
+    /// grow, so one that grabbed too much had to be deleted and redrawn — and it is the hand
+    /// correction for a wand that leaked into the next object. The mode is on the tool, not the
+    /// mask, and it must reach the stamps that painting lays down.
+    @MainActor
+    func testPaintingInEraseModeLaysDownEraseStamps() {
+        let s = AppState()
+        // `paintAt` maps through the real canvas geometry, which needs a loaded frame — without one
+        // `imageRect` is `.zero` and every dab is silently discarded. A plain square stands in.
+        s.proxyCI = CIImage(color: .gray).cropped(to: CGRect(x: 0, y: 0, width: 800, height: 800))
+        s.addUserMask(.brush)
+        guard let id = s.userMasks.last?.id else { return XCTFail("no brush mask") }
+        s.paintingMaskId = id
+        let container = CGSize(width: 400, height: 400)
+
+        s.paintAt(CGPoint(x: 200, y: 200), container: container)
+        XCTAssertEqual(s.userMasks.last?.stamps.last?.erase, false, "the default brush must add")
+
+        s.brushErases = true
+        s.paintAt(CGPoint(x: 120, y: 120), container: container)
+        XCTAssertEqual(s.userMasks.last?.stamps.last?.erase, true,
+                       "Erase mode painted an add stamp — the mask would grow instead of shrink")
+
+        // The mode persists: erasing a spill takes several passes, and snapping back to Add after
+        // each one would make the second pass silently undo the first.
+        s.paintAt(CGPoint(x: 90, y: 90), container: container)
+        XCTAssertEqual(s.userMasks.last?.stamps.last?.erase, true, "the mode reset between strokes")
+    }
 
     /// `.sky` hands the photographer the same region the engine's own sky treatment uses — the
     /// segmentation bitmap under the type key the renderer already speaks.
