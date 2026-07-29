@@ -338,6 +338,63 @@ case "cast":
                      s.chromaA, s.chromaB, mag, mag > 22 ? "  FLAGGED" : ""))
     } catch { fail("\(error)") }
 
+case "dust-map":
+    // Does this shoot have sensor dust, and where? Per-frame detection cannot answer that — it
+    // reports whatever small dark compact thing sits on a smooth field, which on a beach is kelp
+    // and on a street is a distant window. Dust is the thing that does not move between frames.
+    //
+    // Frames are grouped by ORIENTATION before the recurrence test: the same sensor position maps
+    // to different normalised image coordinates in a portrait frame than a landscape one, so
+    // mixing them would hide real dust. Aperture is reported alongside because dust is a
+    // depth-of-field effect — at f/2.8 a mote is too far out of focus to render at all, so a shoot
+    // full of wide-open frames can be perfectly clean AND perfectly dusty at the same time.
+    do {
+        let rest = Array(arguments.dropFirst())
+        guard let inDir = value(for: "--in-dir", in: rest) else { fail("dust-map requires --in-dir") }
+        let limit = value(for: "--limit", in: rest).flatMap(Int.init) ?? 40
+        let minFrames = value(for: "--min-frames", in: rest).flatMap(Int.init) ?? 3
+        var images = try BatchApply.imageFiles(in: URL(fileURLWithPath: inDir, isDirectory: true))
+        guard !images.isEmpty else { fail("no images in \(inDir)") }
+        images = Array(images.prefix(limit))
+
+        // orientation → (per-frame spot lists, apertures seen)
+        var byOrientation: [String: [[HealSpot]]] = [:]
+        var apertures: [String: [Double]] = [:]
+        var perFrame: [(String, Int, Double?)] = []
+        for url in images {
+            guard let image = try? ImageDecoder.decode(url: url) else { continue }
+            let landscape = image.extent.width >= image.extent.height
+            let key = landscape ? "landscape" : "portrait"
+            let spots = DustDetector.detect(in: image)
+            byOrientation[key, default: []].append(spots)
+            let f = ExifReader.fNumber(url: url)
+            if let f { apertures[key, default: []].append(f) }
+            perFrame.append((url.lastPathComponent, spots.count, f))
+        }
+
+        print("per-frame candidates (what the detector reports today):")
+        for (name, count, f) in perFrame {
+            print(String(format: "  %-22@ %3d  %@", name as NSString, count,
+                         (f.map { String(format: "f/%.1f", $0) } ?? "f/?") as NSString))
+        }
+
+        for (orientation, frames) in byOrientation.sorted(by: { $0.key < $1.key }) {
+            let total = frames.reduce(0) { $0 + $1.count }
+            let recurring = DustDetector.recurring(in: frames, minimumFrames: minFrames)
+            let aps = apertures[orientation] ?? []
+            let stopped = aps.filter { $0 >= 8 }.count
+            print("\n\(orientation): \(frames.count) frame(s), \(total) candidate(s), "
+                  + "\(stopped) at f/8 or smaller")
+            print("  recurring in ≥\(minFrames) frames: \(recurring.count)")
+            for s in recurring {
+                print(String(format: "    x=%.4f y=%.4f r=%.4f", s.x, s.y, s.radius))
+            }
+            if recurring.isEmpty && total > 0 {
+                print("  → every candidate was scene content: nothing held still between frames.")
+            }
+        }
+    } catch { fail("\(error)") }
+
 case "instances":
     // Debug/inspection: what SubjectInstances finds, and what it decided to call each one.
     // The naming is Vision's classifier over a crop, gated on precision and confidence, so when a

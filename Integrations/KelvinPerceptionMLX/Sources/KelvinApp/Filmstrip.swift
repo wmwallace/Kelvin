@@ -501,11 +501,29 @@ struct FilmstripView: View {
                         proxy.scrollTo(url, anchor: .center)
                     }
                 }
-                .onChange(of: photos) { 
+                .onChange(of: photos) {
                     // The list itself changed under you — re-sorted, or the capture times landed
                     // and moved everything. Put the frame you are actually editing back under the
                     // pointer, without animating: the content has already moved, and sliding it
                     // afterwards would read as the strip drifting on its own.
+                    guard let url = current else { return }
+                    proxy.scrollTo(url, anchor: .center)
+                }
+                .onChange(of: rowCount) {
+                    // THE STRIP REFLOWS WHEN THE ROW COUNT CHANGES, and a horizontal scroll offset
+                    // does not survive that. `columns` packs top-to-bottom then rightwards, so
+                    // going from three rows to four moves every photograph to a different column:
+                    // the offset stays the same number of points from the left and now points at
+                    // an entirely different part of the shoot.
+                    //
+                    // `maxHeight` is a fraction of the window's pane, so this fires on WINDOW
+                    // resize as well as on dragging the strip's own edge — which is the report
+                    // that prompted it ("the gallery jumps around when I resize it"). The photos
+                    // handler above already does exactly this for the case where the list changes;
+                    // reflow is the same problem arriving by a different route.
+                    //
+                    // Unanimated, for the reason recorded above: the content has already moved,
+                    // and sliding it afterwards reads as the strip drifting on its own.
                     guard let url = current else { return }
                     proxy.scrollTo(url, anchor: .center)
                 }

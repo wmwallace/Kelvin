@@ -181,6 +181,108 @@ public enum DustDetector {
         return accepted.prefix(max(0, maxSpots)).map { $0.spot }
     }
 
+    // MARK: - Recurrence across a shoot
+
+    /// How close two spots must be, in normalised coordinates, to be the same speck of dust.
+    /// 0.01 is ~95 px on a 9504 px frame and ~5 grid pixels at the 512 working grid, which is
+    /// wider than the detector's own centroid wobble and far tighter than the spacing between
+    /// unrelated scene features.
+    public static let recurrenceTolerance = 0.01
+
+    /// Keep only the spots that appear in the same place across several frames.
+    ///
+    /// **This is the cue the per-frame detector cannot use, and it is the strongest one available.**
+    /// Sensor dust does not move: it sits on the sensor stack at a fixed position, so it lands at
+    /// the same normalised coordinates in every frame the camera takes until the sensor is cleaned.
+    /// Scene features do not do this. A speck of kelp on wet sand, a distant bird, a window in a
+    /// house on the headland — each appears in one frame and never again at that exact spot.
+    ///
+    /// The docstring above has always claimed this property ("dust sits at a fixed sensor
+    /// position, so one detection applies across a whole shoot") and nothing ever checked it.
+    /// Measured on `2026-04-26 Cannon Beach`, the per-frame detector returned 0, 0, 1 and 40 spots
+    /// on four frames shot at f/11 on one body minutes apart. Real dust would have produced nearly
+    /// the same list four times. That spread is proof the output was scene content — and the 40 was
+    /// the `maxSpots` cap, on a portrait of a man on a beach.
+    ///
+    /// **Two things the caller must get right**, because this function cannot see them:
+    ///
+    ///   • **Group by orientation.** A portrait frame maps the same sensor position to different
+    ///     normalised image coordinates than a landscape one, so mixing them hides real dust in the
+    ///     noise. Pass one orientation at a time.
+    ///   • **Dust needs a small aperture to be visible at all.** It is a depth-of-field effect: at
+    ///     f/2.8 a mote is so far out of focus it disappears, and only stops down to f/8–f/22 does
+    ///     it render as a distinct spot. So a shoot may legitimately show dust in a handful of
+    ///     frames and none of the rest, which is why `minimumFrames` is an absolute count and not a
+    ///     fraction of the shoot.
+    ///
+    /// Returns one spot per surviving cluster, at the cluster's median position and radius — the
+    /// median rather than the mean because a single bad member should not drag the centre.
+    public static func recurring(
+        in perFrameSpots: [[HealSpot]],
+        minimumFrames: Int = 3,
+        tolerance: Double = recurrenceTolerance
+    ) -> [HealSpot] {
+        guard minimumFrames > 0, perFrameSpots.count >= minimumFrames else { return [] }
+
+        /// A candidate cluster: spots from distinct frames that share a position.
+        struct Cluster {
+            var spots: [HealSpot] = []
+            var frames: Set<Int> = []
+            var cx = 0.0
+            var cy = 0.0
+        }
+        var clusters: [Cluster] = []
+
+        for (frame, spots) in perFrameSpots.enumerated() {
+            for spot in spots {
+                // Nearest existing cluster within tolerance, so a spot joins the best match rather
+                // than the first one that happens to be close enough.
+                var bestIndex: Int? = nil
+                var bestDistance = Double.infinity
+                for (i, c) in clusters.enumerated() {
+                    let dx = c.cx - spot.x, dy = c.cy - spot.y
+                    let d = (dx * dx + dy * dy).squareRoot()
+                    if d <= tolerance && d < bestDistance { bestDistance = d; bestIndex = i }
+                }
+                if let i = bestIndex {
+                    clusters[i].spots.append(spot)
+                    clusters[i].frames.insert(frame)
+                    // Recentre on the running mean so the cluster tracks the true position rather
+                    // than anchoring on whichever spot happened to arrive first.
+                    let n = Double(clusters[i].spots.count)
+                    clusters[i].cx += (spot.x - clusters[i].cx) / n
+                    clusters[i].cy += (spot.y - clusters[i].cy) / n
+                } else {
+                    clusters.append(Cluster(spots: [spot], frames: [frame], cx: spot.x, cy: spot.y))
+                }
+            }
+        }
+
+        func median(_ values: [Double]) -> Double {
+            guard !values.isEmpty else { return 0 }
+            let s = values.sorted()
+            return s.count % 2 == 1 ? s[s.count / 2]
+                                    : (s[s.count / 2 - 1] + s[s.count / 2]) / 2
+        }
+
+        // A cluster counts once per FRAME, not once per spot: two detections in one frame that land
+        // on the same place are one piece of evidence, not two.
+        return clusters
+            .filter { $0.frames.count >= minimumFrames }
+            .sorted { $0.frames.count > $1.frames.count }
+            .map { c in
+                HealSpot(x: median(c.spots.map(\.x)),
+                         y: median(c.spots.map(\.y)),
+                         radius: median(c.spots.map(\.radius)),
+                         // The source offset is where a clean patch was found, which is scene
+                         // dependent — the median is a reasonable direction for a smooth
+                         // background and is what a per-frame re-search would refine.
+                         dx: median(c.spots.map(\.dx)),
+                         dy: median(c.spots.map(\.dy)),
+                         feather: median(c.spots.map(\.feather)))
+            }
+    }
+
     // MARK: - Blob measurement
 
     private struct Blob {
