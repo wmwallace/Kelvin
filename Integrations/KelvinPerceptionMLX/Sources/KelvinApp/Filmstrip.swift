@@ -605,8 +605,22 @@ struct FilmstripView: View {
         }
     }
 
+    /// **Columns are identified by their CONTENTS, not their index**, and that is the difference
+    /// between a strip that reflows and a strip that visibly shuffles.
+    ///
+    /// `columns` packs top-to-bottom then rightwards, so changing the row count changes which
+    /// photographs are in column *n* for essentially every *n*. Keyed by `offset`, column 0 keeps
+    /// its identity across that repack while its contents are replaced wholesale — so SwiftUI
+    /// diffs the inner `ForEach` and animates individual thumbnails migrating from one column to
+    /// another, all the way down the strip. Dragging the strip's edge, or resizing the window far
+    /// enough that `maxHeight` clamps the row count, therefore made the whole shoot appear to
+    /// scramble rather than simply re-lay-out.
+    ///
+    /// Keyed by contents, a repacked column is a *different* column: it is torn down and rebuilt
+    /// in place, which is what a reflow actually is. Two columns can never collide on this id
+    /// because a photograph appears in the strip exactly once.
     private func columnStack(_ cols: [(offset: Int, element: [URL])]) -> some View {
-        ForEach(cols, id: \.offset) { _, column in
+        ForEach(cols, id: \.element) { _, column in
             VStack(alignment: .leading, spacing: Self.rowSpacing) {
                 ForEach(column, id: \.self) { url in
                     cell(url).id(url)
@@ -626,7 +640,23 @@ struct FilmstripView: View {
                 if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
             }
             .gesture(
-                DragGesture(minimumDistance: 1)
+                // GLOBAL, and this is the whole bug rather than a detail. `DragGesture` defaults to
+                // `.local` — the coordinate space of the view it is attached to — and this handle
+                // sits on the strip's top edge, which is the edge the drag is moving. The strip's
+                // height is pinned to `rowsHeight`, quantised to whole rows, so every time the row
+                // count ticks over, the handle jumps by up to a whole row pitch. That shifts the
+                // gesture's own coordinate space, so `translation` changes with the mouse
+                // stationary, which flips the row count back, which moves the handle again.
+                //
+                // Traced with KELVIN_TRACE_STRIP while dragging: maxHeight and stripHeight held
+                // steady at 528.3 and 312.0 while the row count thrashed
+                // 5→4→5→3→5→3→4→3→4→2→4→2→3→2→3→2→4→5→4, with content width moving inversely in
+                // lockstep (5 rows = 2256pt, 2 rows = 5438pt). The A→B→A signature is what
+                // separates a feedback loop from a user changing their mind.
+                //
+                // A global coordinate space does not move when the handle does, so `translation`
+                // means what it says: how far the pointer has travelled.
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
                     .onChanged { value in
                         // Dragging up from a closed strip starts at zero, so the same gesture that
                         // closes it opens it again.
