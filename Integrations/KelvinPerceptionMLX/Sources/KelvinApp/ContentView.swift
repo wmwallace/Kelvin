@@ -979,13 +979,19 @@ final class AppState: ObservableObject {
     enum StripFilter: String, CaseIterable {
         case all = "All", keepers = "Keepers", undecided = "Undecided"
         case edited = "Edited", soft = "Focus", flagged = "Flagged"
+        case best = "Best"
     }
     @Published var stripFilter: StripFilter = .all
 
     /// Photos the strip should actually display, after the filter. The frame you are editing is
     /// always included — filtering the open photo out from under yourself is disorienting.
     var visiblePhotos: [URL] {
-        folderPhotos.filter { url in
+        // Hoisted, and ONLY for the filter that needs it. `sharpestOfSimilarRuns` sorts and
+        // re-groups the whole folder; evaluating it inside the closure would do that once per
+        // photograph, which on a 438-frame shoot is the same shape as the bug that made the strip
+        // nine tenths of the cost of a slider drag before `LazyHStack` (see `grid`).
+        let best = stripFilter == .best ? sharpestOfSimilarRuns : []
+        return folderPhotos.filter { url in
             if url == imageURL { return true }
             switch stripFilter {
             case .all:       return flags[url] != .reject
@@ -1004,8 +1010,71 @@ final class AppState: ObservableObject {
             // gathered up, so the one action those flags exist to enable (look at them together,
             // decide, move on) meant scrolling the whole shoot hunting for triangles.
             case .flagged:   return isFlaggedByScan(url)
+            // ONE FRAME PER GROUP OF ALIKE — the sharpest of each. This is the marker on the
+            // thumbnail (`sharpestInRun`, the scope icon) turned into something you can act on:
+            // the mark answered "which of these six" and then left you scrolling past the other
+            // five anyway.
+            case .best:      return best.contains(url)
             }
         }
+    }
+
+    /// The sharpest frame of every near-duplicate run in the folder, plus every frame the scan has
+    /// not fingerprinted yet.
+    ///
+    /// **Computed from `folderPhotos`, not `visiblePhotos`, and that is structural rather than a
+    /// preference**: `visiblePhotos` consumes this to answer `.best`, so deriving it from the
+    /// filtered list would recurse. It also happens to be the right answer — which frames are alike
+    /// is a fact about the shoot, not about what the strip is currently showing.
+    ///
+    /// Unfingerprinted frames are INCLUDED. "No signature yet" is not the same claim as "this is a
+    /// duplicate", and the cost of the two mistakes is not symmetric: showing a frame that later
+    /// turns out to be a near-duplicate wastes a glance, while hiding one because the scan has not
+    /// reached it yet loses a photograph from the view with nothing to tell you it happened. The set
+    /// tightens on its own as the scan lands.
+    ///
+    /// A run of one contributes its single frame, so this reads as "the shoot with the duplicates
+    /// collapsed" rather than "only frames that carry the marker" — the latter would empty the strip
+    /// for any shoot without bursts in it, which is most of them.
+    var sharpestOfSimilarRuns: Set<URL> {
+        let chronological = PhotoOrder.sorted(folderPhotos, by: .captureTime,
+                                              captureDates: captureIndex.dates)
+        let frames = chronological.compactMap { url -> PhotoTriage.Frame? in
+            guard let signature = triage[url]?.signature else { return nil }
+            return PhotoTriage.Frame(url: url, signature: signature, captured: captureIndex.dates[url])
+        }
+        var picks = Set(chronological.filter { triage[$0] == nil })
+        for run in PhotoTriage.groups(frames) {
+            if let best = sharpestFrame(in: run) { picks.insert(best) }
+        }
+        return picks
+    }
+
+    /// A frame's focus reading from wherever it exists.
+    ///
+    /// There are two sources and they are not redundant: `focus` is filled for the photograph being
+    /// opened (which may never have been scanned), and the shoot scan fills it from each verdict —
+    /// but the verdict is the durable record and `focus` is a cache of one field of it. Reading
+    /// through both means a sharpness question can never be answered "unmeasured" for a frame the
+    /// scan has plainly measured, which is the shape of bug that comes from two dictionaries that
+    /// are supposed to agree.
+    func focusReading(_ url: URL) -> FocusMeasure.Reading? {
+        focus[url] ?? triage[url]?.focus
+    }
+
+    /// The sharpest of a run, or its first frame when nothing in it could be measured.
+    ///
+    /// Ties go to the EARLIER frame: two frames of one pose can measure identically to the last
+    /// decimal, and `max(by:)` would otherwise pick whichever the array order happens to put last —
+    /// so the mark, and now the filter, would move about between renders for no reason the
+    /// photographer can see.
+    private func sharpestFrame(in urls: [URL]) -> URL? {
+        let measured = urls.compactMap { url -> (URL, Double)? in
+            guard let reading = focusReading(url), reading.measurable else { return nil }
+            return (url, reading.acuity)
+        }
+        guard let best = measured.max(by: { $0.1 < $1.1 }) else { return urls.first }
+        return measured.first(where: { $0.1 == best.1 })?.0 ?? best.0
     }
 
     // MARK: Grouping — how the strip is partitioned
@@ -1341,15 +1410,12 @@ final class AppState: ObservableObject {
               let groups = stripGroups else { return [] }
         var picks: Set<URL> = []
         for group in groups where group.urls.count > 1 {
-            let measured = group.urls.compactMap { url -> (URL, Double)? in
-                guard let reading = focus[url], reading.measurable else { return nil }
-                return (url, reading.acuity)
-            }
-            // Two frames of one pose can measure identically to the last decimal; `max(by:)` would
-            // pick whichever the array order happens to put last. Ties go to the earlier frame, so
-            // the mark does not move about between renders.
-            guard let best = measured.max(by: { $0.1 < $1.1 }), measured.count > 1 else { continue }
-            picks.insert(measured.first(where: { $0.1 == best.1 })?.0 ?? best.0)
+            // At least two of the run must have been measurable, or "sharpest" is a claim about one
+            // reading and a shrug. Shared tie-break with the `Best` filter — see `sharpestFrame` —
+            // so the frame the marker points at is always the frame the filter keeps.
+            let measurable = group.urls.filter { focusReading($0)?.measurable == true }
+            guard measurable.count > 1, let best = sharpestFrame(in: group.urls) else { continue }
+            picks.insert(best)
         }
         return picks
     }

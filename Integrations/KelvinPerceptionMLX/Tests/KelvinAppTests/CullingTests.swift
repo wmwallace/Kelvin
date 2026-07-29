@@ -30,6 +30,73 @@ final class CullingTests: XCTestCase {
             signature: PhotoTriage.Signature(bits: 0, contrast: 10))
     }
 
+    // MARK: Best — one frame per group of alike
+
+    /// A verdict with a chosen acuity and signature, so runs and sharpness can both be arranged.
+    private func frame(acuity: Double, bits: UInt64, measurable: Bool = true) -> PhotoTriage.Verdict {
+        PhotoTriage.Verdict(
+            concerns: [],
+            focus: FocusMeasure.Reading(acuity: acuity, measurable: measurable),
+            statistics: ImageStatistics(
+                meanLuma: 0.4, medianLuma: 0.4, blackPoint: 0, shadowLevel: 0.1,
+                highlightLevel: 0.9, whitePoint: 1, highlightClip: 0, shadowClip: 0,
+                chromaA: 0, chromaB: 0),
+            signature: PhotoTriage.Signature(bits: bits, contrast: 10))
+    }
+
+    /// The point of the filter: six near-identical frames collapse to the one worth looking at.
+    func testBestKeepsOnlyTheSharpestOfARunOfAlikeFrames() {
+        let a = url("a.ARW"), b = url("b.ARW"), c = url("c.ARW")
+        let s = state(with: [a, b, c])
+        // Identical signatures — one run of three. b is sharpest.
+        s.triage = [a: frame(acuity: 3, bits: 0), b: frame(acuity: 9, bits: 0), c: frame(acuity: 5, bits: 0)]
+        s.stripFilter = .best
+        XCTAssertEqual(s.visiblePhotos, [b], "the run should collapse to its sharpest frame")
+    }
+
+    /// A photograph that resembles nothing else is the best of its own run of one. Dropping it would
+    /// empty the strip for any shoot without bursts in it, which is most of them.
+    func testBestKeepsAFrameThatIsAlikeNothing() {
+        let alone = url("alone.ARW"), a = url("a.ARW"), b = url("b.ARW")
+        let s = state(with: [alone, a, b])
+        s.triage = [alone: frame(acuity: 2, bits: 0xFFFF_FFFF_FFFF_FFFF),
+                    a: frame(acuity: 3, bits: 0), b: frame(acuity: 9, bits: 0)]
+        s.stripFilter = .best
+        XCTAssertTrue(s.visiblePhotos.contains(alone), "a unique frame was hidden as though duplicated")
+        XCTAssertTrue(s.visiblePhotos.contains(b))
+        XCTAssertFalse(s.visiblePhotos.contains(a))
+    }
+
+    /// **An unscanned frame is not a duplicate.** Hiding one because the scan has not reached it
+    /// loses a photograph from the view with nothing to say so; showing it costs a glance.
+    func testBestShowsFramesTheScanHasNotFingerprintedYet() {
+        let scanned = url("scanned.ARW"), pending = url("pending.ARW")
+        let s = state(with: [scanned, pending])
+        s.triage = [scanned: frame(acuity: 4, bits: 0)]
+        s.stripFilter = .best
+        XCTAssertTrue(s.visiblePhotos.contains(pending), "an unmeasured frame was treated as a duplicate")
+    }
+
+    /// Ties go to the earlier frame, or the filter would reshuffle between renders for no reason
+    /// the photographer can see.
+    func testBestBreaksTiesTowardsTheEarlierFrame() {
+        let first = url("1.ARW"), second = url("2.ARW")
+        let s = state(with: [first, second])
+        s.triage = [first: frame(acuity: 7, bits: 0), second: frame(acuity: 7, bits: 0)]
+        s.stripFilter = .best
+        XCTAssertEqual(s.visiblePhotos, [first])
+    }
+
+    /// The open photograph is never filtered out from under you — the rule every other filter obeys.
+    func testBestNeverHidesThePhotographBeingEdited() {
+        let a = url("a.ARW"), b = url("b.ARW")
+        let s = state(with: [a, b])
+        s.triage = [a: frame(acuity: 3, bits: 0), b: frame(acuity: 9, bits: 0)]
+        s.imageURL = a
+        s.stripFilter = .best
+        XCTAssertTrue(s.visiblePhotos.contains(a), "the frame under edit was filtered away")
+    }
+
     // MARK: Gathering what the scan found
 
     /// The gap this closes: a frame flagged `veryDark` drew a badge and could not be filtered on, so

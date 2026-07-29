@@ -371,17 +371,41 @@ struct FilmstripView: View {
 
             // Three states, not a menu of them: everything, what you kept, what you have not
             // decided about yet. The third is the one that makes a long shoot finishable.
-            Picker("", selection: $filter) {
-                ForEach(AppState.StripFilter.allCases, id: \.self) { f in
-                    Text(f.rawValue).tag(f)
+            // ALL SEVEN CHIPS WHEN THERE IS ROOM, A MENU WHEN THERE IS NOT.
+            //
+            // This was a hardcoded `.frame(width: 268)`, sized by hand and then widened by hand for
+            // the sixth chip. A segmented control does not clip to its frame — it draws over
+            // whatever is beside it — so 268 had been narrower than the control's real width for a
+            // while and nobody could see it. Adding the seventh made it visible by putting "Best"
+            // on top of the Group control.
+            //
+            // Measured, the seven chips want ~472 pt. The strip's pane is ~580 pt at the window's
+            // minimum width of 940, and the rest of this row (the count, "Scan shoot", Group, Time)
+            // needs most of what is left — so there is no single number that is right at both
+            // window sizes, which is why the hand-tuned one kept going stale.
+            //
+            // `ViewThatFits` takes the first child that fits: the segmented control when the window
+            // is wide enough to show every filter at one click, and a menu when it is not. The menu
+            // costs a click and keeps every label readable, which beats "Undecid…" beside "Flagg…".
+            ViewThatFits(in: .horizontal) {
+                Picker("", selection: $filter) {
+                    ForEach(AppState.StripFilter.allCases, id: \.self) { f in
+                        Text(f.rawValue).tag(f)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .fixedSize()
+                .controlSize(.small)
+
+                Picker("", selection: $filter) {
+                    ForEach(AppState.StripFilter.allCases, id: \.self) { f in
+                        Text(f.rawValue).tag(f)
+                    }
+                }
+                .pickerStyle(.menu)
+                .fixedSize()
+                .controlSize(.small)
             }
-            .pickerStyle(.segmented)
-            // Widened for the sixth chip. A segmented control given less room than its labels need
-            // truncates them rather than wrapping, and "Undecid…" beside "Flagg…" is a row of
-            // guesses.
-            .frame(width: 268)
-            .controlSize(.small)
 
             groupControl
             sortControl
