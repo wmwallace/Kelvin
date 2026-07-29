@@ -87,6 +87,31 @@ final class CullingTests: XCTestCase {
         XCTAssertEqual(s.visiblePhotos, [first])
     }
 
+    /// **The defect this whole notice exists for.** With no fingerprints every frame is its own run
+    /// of one, so every frame is the sharpest of its run and `Best` returns the entire shoot. That
+    /// is honest and useless, and it is indistinguishable from a filter that does not work — which
+    /// is how it was reported.
+    func testBestAnnouncesItselfWhenNothingHasBeenScanned() {
+        let a = url("a.ARW"), b = url("b.ARW")
+        let s = state(with: [a, b])
+        s.stripFilter = .best
+        XCTAssertTrue(s.bestFilterNeedsScan, "Best silently showed everything with nothing measured")
+        XCTAssertEqual(s.visiblePhotos.count, 2, "and it does still show everything, deliberately")
+
+        s.triage = [a: frame(acuity: 3, bits: 0)]
+        XCTAssertFalse(s.bestFilterNeedsScan, "one fingerprint is enough to be working from")
+    }
+
+    /// The notice is about `Best`, not about the scan in general — every other filter works fine
+    /// unscanned and must not sprout an explanation it does not need.
+    func testOtherFiltersDoNotAskForAScan() {
+        let s = state(with: [url("a.ARW")])
+        for f in [AppState.StripFilter.all, .keepers, .undecided, .edited, .soft, .flagged] {
+            s.stripFilter = f
+            XCTAssertFalse(s.bestFilterNeedsScan, "\(f.rawValue) asked for a scan it does not need")
+        }
+    }
+
     /// The open photograph is never filtered out from under you — the rule every other filter obeys.
     func testBestNeverHidesThePhotographBeingEdited() {
         let a = url("a.ARW"), b = url("b.ARW")

@@ -181,6 +181,10 @@ struct FilmstripView: View {
     /// The sharpest frame of each run of more than one, when the strip is grouped into bursts or
     /// near-duplicates. Advisory: it marks, it never decides.
     var sharpest: Set<URL> = []
+    /// `Best` is showing everything because nothing has been fingerprinted yet. A filter that
+    /// silently declines to filter is indistinguishable from a broken one — which is how this
+    /// shipped and how it was reported.
+    var bestNeedsScan: Bool = false
     /// What else the scan noticed — a frame with no readable detail left at either end of the tone
     /// range. Focus is excluded; the soft badge already covers it.
     var exposureConcerns: (URL) -> [PhotoTriage.Concern] = { _ in [] }
@@ -501,8 +505,31 @@ struct FilmstripView: View {
               : "Grouped by \(grouping.longLabel.lowercased()) — click to change")
     }
 
+    /// Why `Best` is showing you everything, said where the frames would be.
+    ///
+    /// Which frames are alike comes from the scan's fingerprints, and without them every frame is
+    /// its own group of one — so the filter is honest but useless, and looks exactly like a filter
+    /// that does not work. Offering the scan here rather than only in the header means the answer
+    /// is where the question was asked.
+    private var bestNeedsScanNotice: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "scope")
+                .font(.system(size: 10, weight: .bold)).foregroundColor(Theme.inkFaint)
+            Text("Nothing measured yet — Best needs the scan to know which frames are alike.")
+                .font(Theme.mono(10)).foregroundColor(Theme.inkDim)
+            Button(action: onScanFocus) {
+                Text("Scan shoot").font(Theme.mono(10, .semibold)).foregroundColor(Theme.glow)
+            }
+            .buttonStyle(.plain)
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+    }
+
     private var strip: some View {
         Group {
+            if bestNeedsScan { bestNeedsScanNotice }
             ScrollViewReader { proxy in
                 ScrollView(.horizontal, showsIndicators: false) {
                     Group {

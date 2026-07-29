@@ -1036,6 +1036,21 @@ final class AppState: ObservableObject {
     /// A run of one contributes its single frame, so this reads as "the shoot with the duplicates
     /// collapsed" rather than "only frames that carry the marker" — the latter would empty the strip
     /// for any shoot without bursts in it, which is most of them.
+    /// `Best` is selected and there is nothing for it to work from.
+    ///
+    /// Which frames are alike comes from the scan's fingerprints. With none, every frame is its own
+    /// run of one, every frame is the sharpest of its run, and the filter returns the whole shoot —
+    /// honest, useless, and indistinguishable from a filter that does not work. It shipped that way
+    /// and was reported within the hour as "the best filtering of the sharpest not working", which
+    /// is exactly right.
+    ///
+    /// The fix is a notice rather than a different rule. Including unfingerprinted frames is still
+    /// correct *during* a scan — a half-measured shoot should not hide the half it has not reached —
+    /// so the rule stays and the empty case explains itself.
+    var bestFilterNeedsScan: Bool {
+        stripFilter == .best && !folderPhotos.contains { triage[$0]?.signature != nil }
+    }
+
     var sharpestOfSimilarRuns: Set<URL> {
         let chronological = PhotoOrder.sorted(folderPhotos, by: .captureTime,
                                               captureDates: captureIndex.dates)
@@ -4825,6 +4840,7 @@ struct ContentView: View {
                                   scanProgress: appState.focusScanProgress,
                                   onScanFocus: appState.scanFocus,
                                   sharpest: appState.sharpestInRun,
+                                  bestNeedsScan: appState.bestFilterNeedsScan,
                                   exposureConcerns: appState.exposureConcerns(for:),
                                   scanNote: appState.scanNote(for:),
                                   spokenDescription: appState.spokenDescription(for:),
