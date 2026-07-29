@@ -147,6 +147,74 @@ final class CullingTests: XCTestCase {
         }
     }
 
+    /// **The same defect through the other door.** Selecting `Best` asks for the scan, but opening a
+    /// DIFFERENT shoot does not change the filter, so its `didSet` cannot fire — and opening a
+    /// folder drops the previous shoot's `triage`. Without this, a photographer with `Best` already
+    /// selected who opens a second folder is back to a filter reading an empty dictionary and
+    /// showing everything, with nothing anywhere about to measure it.
+    func testOpeningAnotherFolderScansItWhenTheFilterAlreadyNeedsIt() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kelvin-culling-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // REAL, DECODABLE frames. Written as bytes first, this test passed for the wrong reason and
+        // then failed for another: `PhotoTriage.read` rejects an unreadable file in microseconds, so
+        // the scan started, finished and cleared its own progress flag before the assertion ran.
+        // Measuring something real means the assertion can be about the OUTCOME — the shoot got
+        // measured — rather than about catching a transient flag mid-flight.
+        var photos: [URL] = []
+        for (i, n) in ["_DSC0001.jpg", "_DSC0002.jpg"].enumerated() {
+            let u = dir.appendingPathComponent(n)
+            try writeJPEG(to: u, seed: UInt8(40 + i * 90))
+            photos.append(u)
+        }
+
+        let defaults = UserDefaults.standard
+        let wasExpanded = defaults.bool(forKey: FilmstripFold.expandedKey)
+        defaults.set(true, forKey: FilmstripFold.expandedKey)
+        defer { defaults.set(wasExpanded, forKey: FilmstripFold.expandedKey) }
+
+        let s = AppState()
+        // Selected while there is NO folder open, so `scanFocus` returns without arming anything —
+        // otherwise this test would pass on the filter's own `didSet` and never exercise the
+        // folder path at all.
+        s.stripFilter = .best
+        XCTAssertNil(s.focusScanProgress, "the filter armed a scan with no folder to scan")
+
+        s.folderPhotos = photos
+        s.loadFolderDetailIfVisible(for: dir, photos: photos)
+        for _ in 0..<300 where s.triage.count < photos.count {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(s.triage.count, photos.count,
+                       "opening a shoot with Best already selected measured nothing — "
+                       + "the filter reads an empty triage and shows everything, and no scan is coming")
+    }
+
+    /// A small real JPEG, so the triage scan has something it can actually decode and record.
+    private func writeJPEG(to url: URL, seed: UInt8) throws {
+        let w = 64, h = 64, bpr = w * 4
+        var bytes = [UInt8](repeating: 0, count: bpr * h)
+        for y in 0..<h {
+            for x in 0..<w {
+                let i = y * bpr + x * 4
+                // Some structure, or the fingerprint has no signal in it and the verdict is
+                // `unmeasurable` — which is still a verdict, but a duller test.
+                let v = UInt8(clamping: Int(seed) + ((x / 8 + y / 8) % 2) * 60)
+                bytes[i] = v; bytes[i + 1] = v; bytes[i + 2] = v; bytes[i + 3] = 255
+            }
+        }
+        let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let ctx = CGContext(data: &bytes, width: w, height: h, bitsPerComponent: 8,
+                                  bytesPerRow: bpr, space: cs,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let image = ctx.makeImage(),
+              let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil)
+        else { throw CocoaError(.fileWriteUnknown) }
+        CGImageDestinationAddImage(dest, image, nil)
+        guard CGImageDestinationFinalize(dest) else { throw CocoaError(.fileWriteUnknown) }
+    }
+
     /// The open photograph is never filtered out from under you — the rule every other filter obeys.
     func testBestNeverHidesThePhotographBeingEdited() {
         let a = url("a.ARW"), b = url("b.ARW")

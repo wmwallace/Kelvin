@@ -957,6 +957,18 @@ final class AppState: ObservableObject {
             if self.stripGrouping == .place, !index.hasAnyLocation {
                 self.stripGrouping = .none
             }
+            // A NEW SHOOT NEEDS ITS OWN MEASUREMENTS, and the filter cannot ask for them because it
+            // did not change. `stripFilter`'s `didSet` starts the scan when you SELECT `Best`, but
+            // selecting a folder is the other half of the same question: this method has just
+            // dropped the previous shoot's `triage`, so a filter that was filtering a moment ago is
+            // now reading an empty dictionary and showing everything. Nothing would ever have
+            // started a scan for the new folder — the identical defect the filter's `didSet` fixes,
+            // reached through the other door.
+            //
+            // Here rather than at the top of `loadCaptureIndex` because `scanFocus` measures
+            // `folderPhotos`, and this is the point at which that is known to be the new shoot —
+            // `reorderFolderPhotos` above has just sorted it.
+            if self.stripFilter.needsScan { self.scanFocus() }
             // Ask for the place names now the positions are known. One lookup per distinct rounded
             // coordinate, so a shoot in one valley costs a single request rather than four hundred —
             // and nothing happens at all when the setting is off.
