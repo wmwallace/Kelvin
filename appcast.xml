@@ -15,6 +15,164 @@
     <link>https://usekelvin.app</link>
     <description>Updates for Kelvin, the local-AI photo editor for macOS.</description>
     <item>
+      <title>Kelvin 0.3.0 — point at the thing you want to edit</title>
+      <pubDate>Tue, 28 Jul 2026 22:04:00 -0700</pubDate>
+      <sparkle:version>247</sparkle:version>
+      <sparkle:shortVersionString>0.3.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <link>https://github.com/wmwallace/Kelvin/releases/tag/v0.3.0</link>
+      <!-- The first release whose notes reach the updater. Sparkle renders this HTML in its own
+           panel, so it is self-contained: no external fonts, images or scripts, and it reads in
+           both light and dark. Every earlier item shipped without a description, which meant an
+           in-app update offered 1.4 GB and said nothing about what was in it. -->
+      <description><![CDATA[
+        <style>
+          /* Kelvin update notes. Self-contained: no external fonts, images or scripts — Sparkle
+             renders this offline, mid-install, in a narrow pane. */
+          :root {
+            color-scheme: light dark;
+            --ink: #1c1a17;
+            --dim: #6b6660;
+            --faint: #928c84;
+            --bg: #faf8f5;
+            --rule: rgba(0,0,0,0.10);
+            --glow: #b4661a;
+          }
+          @media (prefers-color-scheme: dark) {
+            :root {
+              --ink: #e8e3dc;
+              --dim: #9a938a;
+              --faint: #6f6862;
+              --bg: #131211;
+              --rule: rgba(255,255,255,0.11);
+              --glow: #e9a44c;
+            }
+          }
+          body {
+            margin: 0;
+            padding: 18px 20px 26px;
+            background: var(--bg);
+            color: var(--ink);
+            font: 13px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+            -webkit-font-smoothing: antialiased;
+          }
+          /* The blackbody rail: amber through daylight to blue, which is what the app is named after
+             and the one piece of decoration here that means something. It separates sections the way
+             the temperature rail runs under the canvas in the app itself. */
+          .rail {
+            height: 2px;
+            border: 0;
+            margin: 20px 0 16px;
+            background: linear-gradient(90deg, #e9a44c 0%, #f2ead9 42%, #cfd8e6 68%, #7fa2cc 100%);
+            opacity: 0.85;
+          }
+          .lede {
+            margin: 0;
+            font-size: 15px;
+            line-height: 1.45;
+            letter-spacing: -0.005em;
+          }
+          .version {
+            font: 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--faint);
+            margin: 0 0 9px;
+          }
+          /* Mono, tracked, uppercase — the same label treatment the app uses over its own panel
+             sections, so the notes read in the app's voice rather than a changelog's. */
+          h2 {
+            font: 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+            color: var(--glow);
+            margin: 22px 0 7px;
+          }
+          h2:first-of-type { margin-top: 0; }
+          p { margin: 0 0 9px; }
+          p.note { color: var(--dim); }
+          ul { margin: 0 0 9px; padding-left: 17px; }
+          li { margin-bottom: 4px; }
+          strong { font-weight: 600; }
+          .limit {
+            border-left: 2px solid var(--rule);
+            padding-left: 11px;
+            margin: 12px 0 0;
+            color: var(--dim);
+          }
+          .closing {
+            margin-top: 22px;
+            padding-top: 14px;
+            border-top: 1px solid var(--rule);
+            color: var(--faint);
+            font-size: 12px;
+          }
+        </style>
+
+        <p class="version">Kelvin 0.3.0</p>
+        <p class="lede">Point at the thing you want to edit — and take it back off again.</p>
+
+        <hr class="rail">
+
+        <h2>Select anything, not just what Kelvin recognises</h2>
+        <p>Subject detection finds whatever stands out most and stops. On a coastal frame that means it
+        hands back the big sea stack and neither of the two smaller ones beside it. Those had nothing to
+        click.</p>
+        <p><strong>The wand</strong> fills that gap. Click the thing you want and the selection spreads
+        from there until the picture stops matching, staying inside whatever you pointed at. It is stored
+        as the point you clicked plus a tolerance — never as pixels — so the region is regrown at whatever
+        size is being rendered. The selection you approve on screen is the one that reaches a full-resolution
+        export.</p>
+        <p class="limit">It will not do everything. Where the thing you clicked touches something else the
+        same colour, the fill walks straight into it. No tolerance fixes that, because the path between them
+        really is the same colour. Kelvin says so when it happens, and the brush below is how you fix it.</p>
+
+        <h2>The brush can subtract</h2>
+        <p>Every mask was built by adding, so one that grabbed too much had to be deleted and drawn again.
+        The brush now has <strong>Add</strong> and <strong>Erase</strong>. Paint over the rock, switch to
+        Erase, take the spill back off the sky.</p>
+        <p>A soft brush erases softly — the edge is scaled rather than cut, so taking part of a feathered
+        mask away does not leave a hard-edged hole in it.</p>
+
+        <h2>Best actually filters now</h2>
+        <p>Best shows one frame per group of alike ones, the sharpest of each. It was reading measurements
+        that nothing ever started, so on a shoot you had not separately scanned it returned everything, and
+        waiting did not help. Choosing it now asks for the measurement it needs — as do Focus and Flagged —
+        and opening a different shoot measures that one too.</p>
+        <p class="note">On a 437-frame shoot that is 148 groups: two thirds of it collapses.</p>
+
+        <h2>Export says what it will do</h2>
+        <ul>
+          <li><strong>The size button no longer lies.</strong> It read “Export full-res” while honouring a
+          size you chose once and forgot. It now names the size it will write.</li>
+          <li><strong>The group button names a scope</strong>, not a bare number, and counts what will
+          really be written.</li>
+          <li><strong>A selection is the scope.</strong> Export was the one action that ignored selected
+          frames. Select four and it exports four.</li>
+          <li><strong>Filename prefix and suffix are remembered</strong>, alongside the naming scheme — and
+          the panel no longer disagrees with itself about the name it is about to use.</li>
+        </ul>
+
+        <p class="closing">Everything runs on your Mac. No account, no upload, and nothing leaves the
+        machine except this update check — which you can switch off in Settings.</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/wmwallace/Kelvin/releases/download/v0.3.0/Kelvin-0.3.0.dmg"
+        sparkle:edSignature="MS6NRh6TQ8WLvTGxmWWUu10+vLc5DFtAQhZPsaMQfRGkvjYuWfbIe4dWSwpx8YWB5kGy5yQKiHBTib2TUzdXDQ=="
+        length="1515794423"
+        type="application/octet-stream"/>
+      <!-- Built from the 0.2.0 disk image that actually shipped. Anyone on build 202 downloads
+           2.3 MB instead of 1.4 GB; anyone else falls back to the enclosure above. -->
+      <sparkle:deltas>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.3.0/Kelvin-0.3.0-from-202.delta"
+          sparkle:deltaFrom="202"
+          sparkle:edSignature="VhQJApohgm2CcZ8WFFEhSLzkt0M1ldH9hJLzWkIs+MM5zGzMTxqajdO2S/We5DhRV/MBXhSgy/f83sr7b4ExAw=="
+          length="2360598"
+          type="application/octet-stream"/>
+      </sparkle:deltas>
+    </item>
+    <item>
       <title>Kelvin 0.2.0 — updates are 1.4 MB, and the panel keeps up</title>
       <pubDate>Mon, 27 Jul 2026 21:51:45 -0700</pubDate>
       <sparkle:version>202</sparkle:version>

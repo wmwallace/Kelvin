@@ -213,7 +213,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
        as the default with "Change All". Without this the app is unreachable from a photograph —
        the only ways in are the Open panel and a drop on the window.
 
-       LSHandlerRank is Alternate, DELIBERATELY, for both entries. `Default` would tell Launch
+       LSHandlerRank is Alternate, DELIBERATELY, for both entries. \`Default\` would tell Launch
        Services that Kelvin should take over JPEG and RAW the moment it is installed, and silently
        reassigning a photographer's double-click is not a decision an app gets to make on their
        behalf — least of all one that opens a 1.6 GB model to show a picture. Alternate puts Kelvin
