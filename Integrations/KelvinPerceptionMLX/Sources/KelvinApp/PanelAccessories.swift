@@ -89,6 +89,35 @@ enum PanelAccessories {
         target.savePanel = savePanel
         target.suggestedName = savePanel?.nameFieldStringValue
 
+        // AppKit RESTORES THE PANEL'S REMEMBERED FILENAME AFTER WE SET OURS, and that broke the
+        // naming controls outright.
+        //
+        // The caller sets `nameFieldStringValue` to the name the current scheme produces, and the
+        // line above records it so `syncSavePanelName` can tell "still our suggestion" from "the
+        // photographer typed something" — it must never overwrite a name somebody wrote by hand.
+        // Then `runModal` runs, AppKit puts its own remembered name back into the field, and from
+        // that moment the field no longer matches what we recorded. So the guard reads a name the
+        // user never typed as one they did, and REFUSES EVERY UPDATE for the rest of the session:
+        // change the scheme, type a prefix, switch format, and the filename sits there unchanged.
+        // The example line below it updates, which is what makes the panel disagree with itself —
+        // it was showing `_DSC6390-Edit` under a scheme that spells `_DSC6390_landscape_overcast_natural`.
+        //
+        // Re-applied once the panel is actually on screen, which is after the restore. Scheduled in
+        // `.modalPanel` as well as `.common` because a save panel runs its own modal run loop and a
+        // plain `DispatchQueue.main.async` is not drained in that mode — it would land after the
+        // panel closed, which is worse than not scheduling it at all.
+        if let savePanel {
+            let intended = savePanel.nameFieldStringValue
+            RunLoop.main.perform(inModes: [.common, .modalPanel]) { [weak savePanel] in
+                guard let savePanel else { return }
+                // Only if AppKit changed it. If the photographer got there first, that is a real
+                // edit and it stands.
+                guard savePanel.nameFieldStringValue != intended else { return }
+                savePanel.nameFieldStringValue = intended
+                target.suggestedName = intended
+            }
+        }
+
         let format = NSPopUpButton()
         format.addItems(withTitles: ["JPEG", "HEIC", "PNG", "TIFF 16-bit"])
         format.selectItem(at: ["jpeg", "heic", "png", "tiff16"].firstIndex(of: state.exportFormatId) ?? 0)
