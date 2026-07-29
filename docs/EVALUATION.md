@@ -106,6 +106,39 @@ What it reports, per frame and as a mean:
   whose sky/frame ratio is about 1.0 is two candidates that differ everywhere except the
   sky.**
 
+### Sweeping the lever without a rebuild
+
+`RecipeEngine.SkyLever` and `SkyMask` both read their constants from the environment, so a
+sweep is a shell loop rather than a branch. The sky lever is the one place in the engine
+whose numbers are a **taste** call, and they were set from a sweep over a single overcast
+coastal shoot — so being able to re-run that sweep cheaply, including all the way back to
+the pre-`b0bd667` behaviour, is the point.
+
+| variable | shipped | before `b0bd667` |
+|---|---|---|
+| `KELVIN_SKY_EV` | 1.4 | 0.45 |
+| `KELVIN_SKY_EV_MIN` / `KELVIN_SKY_EV_MAX` | −1.8 / 1.2 | −0.6 / 0.4 |
+| `KELVIN_SKY_FEATHER` | 16 | 45 |
+| `KELVIN_SKY_BITE` / `KELVIN_SKY_BITE_OPEN` | 16 / 8 | 16 / 8 |
+| `KELVIN_SKY_BRIGHT` / `KELVIN_SKY_RAMP` | 0.50 / 0.20 | 0.60 / 0.30 |
+
+They reach the app too, so a look can be auditioned on a real photograph and not only in a
+table:
+
+```
+KELVIN_SKY_EV=0.45 KELVIN_SKY_EV_MIN=-0.6 KELVIN_SKY_EV_MAX=0.4 KELVIN_SKY_FEATHER=45 \
+  make open PHOTO=<file>
+```
+
+⚠️ **Build through the Makefile before sweeping.** `make bin` and `make open` use
+`--scratch-path`, which is **not** where a bare `swift build` writes. Editing a constant,
+running `swift build`, then sweeping through `$(make bin)` runs the *previous* binary and
+prints two identical arms — which reads exactly like "the parameter has no effect". This
+already happened once. If an arm's numbers do not move, check the binary's timestamp before
+believing the result; the known-good cross-check is that `KELVIN_SKY_EV=0.45` puts
+Dramatic's `← mask` column at −0.040 and its sky spread at 0.112, the values recorded in
+`b0bd667`.
+
 ## Baselines
 
 Every report compares against these. If the engine cannot beat them, it is not ready.

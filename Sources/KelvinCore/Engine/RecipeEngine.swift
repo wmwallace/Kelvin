@@ -26,6 +26,54 @@ public enum RecipeEngine {
     /// Rationale: docs/RECIPE-SCHEMA.md — a low-confidence read should not commit to a look.
     public static let confidenceFloor = 0.5
 
+    /// The style's graduated-ND lever over a sky, and the one part of the engine whose numbers
+    /// are a **taste** call rather than a measurement.
+    ///
+    /// Every value here is overridable from the environment for the same reason
+    /// `SkyMask.brightFloor` and `SkyMask.brightRamp` are: they were set from a sweep over ONE
+    /// overcast coastal shoot, which is a thin evidence base for retuning every style's sky, and
+    /// the next corpus should be able to re-measure them without a rebuild. The shipped defaults
+    /// are the values chosen from that sweep; the comments at each use site record what they were
+    /// before it and why they moved.
+    ///
+    /// Set them together to audition the pre-calibration behaviour on a real photograph:
+    ///
+    ///     KELVIN_SKY_EV=0.45 KELVIN_SKY_EV_MIN=-0.6 KELVIN_SKY_EV_MAX=0.4 \
+    ///     KELVIN_SKY_FEATHER=45 make open PHOTO=<file>
+    ///
+    /// Bounds on each override are generous but real — they exist so a typo cannot produce a
+    /// recipe the renderer will not clamp anyway, not to express an opinion about the value.
+    public enum SkyLever {
+
+        /// EV pulled out of the sky at `skyDepth: 1.0`. **1.4 shipped; 0.45 before `b0bd667`.**
+        /// Remember that this is a parameter, not an effect: measured through the mask, the blend
+        /// and the mask's own contrast, 1.4 here is 0.41 of a stop in the picture.
+        public static let evPerDepth = ProcessInfo.processInfo.environment["KELVIN_SKY_EV"]
+            .flatMap(Double.init).map { min(4.0, max(0.0, $0)) } ?? 1.4
+
+        /// Clamp on the resulting masked exposure. **−1.8…1.2 shipped; −0.6…0.4 before.** At the
+        /// old ceiling Dramatic saturated before it could express `skyDepth: 1.0` at all, so this
+        /// moved with `evPerDepth` and should be moved back with it.
+        public static let evClampLow = ProcessInfo.processInfo.environment["KELVIN_SKY_EV_MIN"]
+            .flatMap(Double.init).map { min(0.0, max(-4.0, $0)) } ?? -1.8
+        public static let evClampHigh = ProcessInfo.processInfo.environment["KELVIN_SKY_EV_MAX"]
+            .flatMap(Double.init).map { min(4.0, max(0.0, $0)) } ?? 1.2
+
+        /// Contrast added per unit `skyDepth`. Asymmetric on purpose: a style that OPENS a sky
+        /// (negative depth) softens cloud structure rather than inverting it, so the opening side
+        /// is gentler. 16 and 8 respectively.
+        public static let contrastBite = ProcessInfo.processInfo.environment["KELVIN_SKY_BITE"]
+            .flatMap(Double.init).map { min(40.0, max(0.0, $0)) } ?? 16
+        public static let contrastBiteOpening = ProcessInfo.processInfo
+            .environment["KELVIN_SKY_BITE_OPEN"]
+            .flatMap(Double.init).map { min(40.0, max(0.0, $0)) } ?? 8
+
+        /// Sky-mask feather. **16 shipped; 45 before `b0bd667`.** One `SkyMask` grid cell. See the
+        /// note at the use site — this is a fraction of the FRAME, not of the mask's resolution.
+        public static let feather = ProcessInfo.processInfo.environment["KELVIN_SKY_FEATHER"]
+            .flatMap(Double.init).map { min(100.0, max(0.0, $0)) } ?? 16
+    }
+
     public static func recipe(
         perception p: Perception,
         statistics s: ImageStatistics,
@@ -242,12 +290,18 @@ public enum RecipeEngine {
         // thin evidence base for retuning every style's sky, and it is the reason the numbers above
         // are written down: re-run the sweep on a clear-sky and a golden-hour shoot before
         // defending them.
+        // All four numbers below are `SkyLever` members rather than literals, so the sweep that
+        // set them can be re-run — including all the way back to the pre-calibration values — with
+        // an environment variable instead of a rebuild. See `SkyLever` for the incantation.
         if style.skyDepth != 0 {
-            adj["exposure_ev"] = roundedClamp((adj["exposure_ev"] ?? 0) - style.skyDepth * 1.4,
-                                              to: -1.8...1.2, step: 0.01)
+            adj["exposure_ev"] = roundedClamp(
+                (adj["exposure_ev"] ?? 0) - style.skyDepth * SkyLever.evPerDepth,
+                to: SkyLever.evClampLow...SkyLever.evClampHigh, step: 0.01)
             // Contrast in a sky is cloud structure. A style that OPENS a sky (negative depth)
             // softens that structure rather than inverting it, so the negative side is gentler.
-            let bite = style.skyDepth > 0 ? style.skyDepth * 16 : style.skyDepth * 8
+            let bite = style.skyDepth > 0
+                ? style.skyDepth * SkyLever.contrastBite
+                : style.skyDepth * SkyLever.contrastBiteOpening
             adj["contrast"] = roundedClamp((adj["contrast"] ?? 0) + bite, to: -12...28, step: 1)
         }
         if style.skySaturationBias != 0 {
@@ -276,7 +330,7 @@ public enum RecipeEngine {
         // grid show through as visible mottling across a smooth overcast.
         return Mask(
             id: "sky", type: "sky", source: "segmentation", invert: false,
-            feather: 16, opacity: (veiled && !blown) ? 0.85 : 1.0, adjustments: adj
+            feather: SkyLever.feather, opacity: (veiled && !blown) ? 0.85 : 1.0, adjustments: adj
         )
     }
 
