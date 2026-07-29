@@ -60,10 +60,17 @@ struct MaskPreset: Codable, Identifiable, Equatable {
             refineCenter: m.refineCenter, refineRange: m.refineRange, refineSoftness: m.refineSoftness)
     }
 
-    /// The kinds a preset can be captured from. Brush needs its strokes and a per-person mask
-    /// needs its person; neither survives the trip to a different photograph.
+    /// The kinds a preset can be captured from. Brush needs its strokes, a per-person mask needs its
+    /// person, and a wand needs the point it was seeded from — none of the three survives the trip
+    /// to a different photograph.
+    ///
+    /// The wand is the least obvious of the three and the most tempting, because its settings look
+    /// portable: a tolerance is just a number. But the seed is a coordinate on THIS frame, and the
+    /// same coordinate on the next one lands on whatever happens to be there — so a "Darken the sea
+    /// stack" preset would apply itself to a patch of sky and report success. A preset that is
+    /// silently wrong is worse than one that is unavailable.
     static func isCapturable(_ kind: UserMaskVM.Kind) -> Bool {
-        kind != .brush && kind != .instance
+        kind != .brush && kind != .instance && kind != .wand
     }
 
     // MARK: Built-ins

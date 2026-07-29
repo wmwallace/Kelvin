@@ -265,8 +265,7 @@ final class AppStateTests: XCTestCase {
     /// A new mask arrives with a visible adjustment already dialled in. A mask that changes nothing
     /// looks broken the moment it appears — you have added a thing and the photograph is identical.
     func testANewMaskArrivesDoingSomethingVisible() {
-        for kind in [UserMaskVM.Kind.radial, .linear, .brush, .colorRange, .luminance,
-                     .skin, .background, .subject] {
+        for kind in UserMaskVM.Kind.allCases {
             let s = AppState()
             s.addUserMask(kind)
             let mask = s.userMasks.last?.toMask()

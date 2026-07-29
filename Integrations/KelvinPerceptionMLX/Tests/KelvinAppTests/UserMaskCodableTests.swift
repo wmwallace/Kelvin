@@ -36,6 +36,35 @@ final class UserMaskCodableTests: XCTestCase {
                        "a mask came back from disk different from the one that was saved")
     }
 
+    /// The wand's own two fields, stated separately for the same reason the three below are: they
+    /// are new, `CodingKeys` and `init(from:)` are both hand-written, and getting one of the two
+    /// halves right loses the value silently — the file grows the field and nothing reads it back,
+    /// or nothing writes it and the defaults come back looking untouched. A wand that reopened at
+    /// tolerance 0.10 having been saved at 0.04 would select something else entirely.
+    func testAWandsSeedAndToleranceSurviveASaveAndReopen() throws {
+        var vm = UserMaskVM(kind: .wand)
+        vm.cx = 0.766; vm.cy = 0.635          // the right-hand sea stack on _DSC6390
+        vm.wandTolerance = 0.04; vm.wandSoftness = 0.6
+        let back = try roundTrip(vm)
+        XCTAssertEqual(back.wandTolerance, 0.04, accuracy: 1e-9)
+        XCTAssertEqual(back.wandSoftness, 0.6, accuracy: 1e-9)
+        XCTAssertEqual(back.cx, 0.766, accuracy: 1e-9, "the seed moved")
+        XCTAssertEqual(back, vm)
+
+        // And it must reach the renderer's own vocabulary, not just survive on the way to disk.
+        XCTAssertEqual(back.toMask().region,
+                       RegionSeed(x: 0.766, y: 0.635, tolerance: 0.04, softness: 0.6))
+    }
+
+    /// A mask saved before the wand existed still opens, and does not come back claiming to be one.
+    func testAMaskSavedBeforeTheWandExistedStillOpens() throws {
+        let json = #"{"kind":"radial","cx":0.3,"cy":0.4}"#
+        let vm = try JSONDecoder().decode(UserMaskVM.self, from: Data(json.utf8))
+        XCTAssertEqual(vm.kind, .radial)
+        XCTAssertNil(vm.toMask().region, "a radial mask must not carry a region seed")
+        XCTAssertEqual(vm.wandTolerance, 0.10, accuracy: 1e-9, "defaults changed under old files")
+    }
+
     /// Stated separately from the round trip above, because this is the specific loss that matters:
     /// `shadows`, `highlights` and `vibrance` are the three adjustments that were unreachable on
     /// hand-drawn masks until recently. Making them reachable and then not persisting them would

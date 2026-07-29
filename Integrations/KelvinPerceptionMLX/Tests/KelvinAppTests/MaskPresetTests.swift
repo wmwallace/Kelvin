@@ -35,9 +35,13 @@ final class MaskPresetTests: XCTestCase {
     /// Strokes belong to one photograph's geometry and a person to one photograph's people —
     /// a preset that silently dropped either would apply as something other than what was saved.
     func testBrushAndPerPersonMasksAreNotCapturable() {
-        XCTAssertFalse(MaskPreset.isCapturable(.brush))
-        XCTAssertFalse(MaskPreset.isCapturable(.instance))
-        for kind: UserMaskVM.Kind in [.radial, .linear, .colorRange, .luminance, .skin, .background, .subject, .sky] {
+        // The three photo-bound kinds: a brush needs its strokes, a per-person mask needs its
+        // person, and a wand needs the point it was seeded from. A wand preset is the tempting one
+        // — a tolerance looks portable — but the seed is a coordinate on one frame, so it would
+        // land on whatever happens to sit there in the next photograph and report success.
+        let photoBound: Set<UserMaskVM.Kind> = [.brush, .instance, .wand]
+        for kind in photoBound { XCTAssertFalse(MaskPreset.isCapturable(kind)) }
+        for kind in UserMaskVM.Kind.allCases where !photoBound.contains(kind) {
             XCTAssertTrue(MaskPreset.isCapturable(kind), "\(kind) has nothing photo-bound in it")
         }
     }

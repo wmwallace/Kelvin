@@ -69,10 +69,10 @@ final class UserMaskTests: XCTestCase {
         }
     }
 
-    private let allKinds: [UserMaskVM.Kind] = [
-        .radial, .linear, .brush, .colorRange, .luminance, .skin, .background, .subject, .instance,
-        .sky
-    ]
+    /// EVERY kind, from the enum itself rather than a list kept here by hand. A kind added to the
+    /// app and forgotten here was not a failing test — it was a kind with no coverage at all, which
+    /// is the quieter and worse outcome. `.wand` was added under exactly this list.
+    private var allKinds: [UserMaskVM.Kind] { UserMaskVM.Kind.allCases }
 
     /// `.sky` hands the photographer the same region the engine's own sky treatment uses — the
     /// segmentation bitmap under the type key the renderer already speaks.

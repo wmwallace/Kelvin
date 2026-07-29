@@ -406,6 +406,42 @@ final class AppState: ObservableObject {
         statusMessage = "Selected \(hit.label)."
     }
 
+    /// Which wand mask is waiting for its seed click, if any.
+    ///
+    /// Carries the mask's id rather than a bare flag, unlike `pickingInstance`: a wand click sets
+    /// the seed of a PARTICULAR mask, and with two wands in the list a bare flag would drop the
+    /// second one's seed onto the first.
+    @Published var seedingMaskId: UUID?
+
+    /// Put a wand mask's seed where the photographer clicked.
+    ///
+    /// The counterpart to `pickInstance`, and the reason both exist: Vision returns the most salient
+    /// thing and stops, so on `_DSC6390` it hands back Haystack Rock and neither of the smaller sea
+    /// stacks. Those stacks have nothing to click — until this. Measured on that frame, the right-hand
+    /// stack comes out cleanly and holds steady across a four-times range of tolerance.
+    func seedWand(at loc: CGPoint, container: CGSize, pad: CGFloat = 24) {
+        guard let mid = seedingMaskId,
+              let idx = userMasks.firstIndex(where: { $0.id == mid }) else { return }
+        let rect = imageRect(in: container, pad: pad)
+        guard rect.width > 0, rect.height > 0 else { return }
+        let (nx, ny) = viewToNorm(loc, in: rect)
+        guard nx >= 0, nx <= 1, ny >= 0, ny <= 1 else { return }
+
+        userMasks[idx].cx = nx
+        userMasks[idx].cy = ny
+        seedingMaskId = nil
+        showMaskOverlay = true
+        onEdit()
+        // NAME THE RISK RATHER THAN HIDE IT. The fill is contiguous, so where the thing you clicked
+        // touches something else of the same colour it will walk straight into it — measured on
+        // `_DSC6390`, seeding the left sea stack leaks along the surf line into Haystack Rock at
+        // every tolerance that looks reasonable. The photographer cannot know that from the slider,
+        // and the coverage number cannot tell the two apart either. Only the picture can, so this
+        // says where to look.
+        statusMessage = "Seed set. Drag Tolerance to fit the object — if the selection jumps to "
+            + "the rest of the picture, it has run into something the same colour."
+    }
+
     /// Add (or re-select) the mask for one detected subject.
     func addInstanceMask(_ instance: SubjectInstances.Instance) {
         // Kind-checked: a SKIN mask scoped to this person is a different tool, and its existence
@@ -2860,7 +2896,9 @@ final class AppState: ObservableObject {
         let photo = imageURL
         let input = RenderInput(
             recipe: recipe, proxy: proxy,
-            bitmaps: proxyMaskBitmaps.merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked })
+            bitmaps: proxyMaskBitmaps
+                .merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked }
+                .merging(wandBitmaps(extent: proxy.extent, source: proxy)) { _, grown in grown })
         Task.detached(priority: .userInitiated) {
             // Vision's face-rectangle detector fires on animals — it reports a face on a cat — so
             // every skin rule would otherwise be applied to fur. The semantic person segmentation
@@ -2906,7 +2944,9 @@ final class AppState: ObservableObject {
         let photo = imageURL            // see `applyFix`: this run belongs to one photograph
         let input = RenderInput(
             recipe: recipe, proxy: proxy,
-            bitmaps: proxyMaskBitmaps.merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked })
+            bitmaps: proxyMaskBitmaps
+                .merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked }
+                .merging(wandBitmaps(extent: proxy.extent, source: proxy)) { _, grown in grown })
         Task.detached(priority: .userInitiated) {
             let isPerson = SubjectMask.person(in: input.proxy) != nil
             let run = try? CraftFix.fixAll(from: start, subjectIsPerson: isPerson) { g in
@@ -3001,7 +3041,9 @@ final class AppState: ObservableObject {
         let photo = imageURL
         let input = RenderInput(
             recipe: recipe, proxy: proxy,
-            bitmaps: proxyMaskBitmaps.merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked })
+            bitmaps: proxyMaskBitmaps
+                .merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked }
+                .merging(wandBitmaps(extent: proxy.extent, source: proxy)) { _, grown in grown })
         Task.detached(priority: .userInitiated) {
             let settled = try? CraftFix.convergeSubject(issue: issue, from: start) { state in
                 var trial = input.recipe
@@ -3468,6 +3510,10 @@ final class AppState: ObservableObject {
         // another mask.
         showMaskOverlay = true
         if kind == .brush { paintingMaskId = m.id }    // brush: start painting right away
+        // Same idea for the wand, and it matters more: an unseeded wand defaults to the middle of
+        // the frame, so it would appear having already grabbed whatever happens to be at dead
+        // centre. Arming it means the first thing that happens is the photographer pointing.
+        if kind == .wand { seedingMaskId = m.id }
         onEdit()
     }
 
@@ -3574,7 +3620,10 @@ final class AppState: ObservableObject {
     }
 
     private func activeSelectedMaskBitmap(extent: CGRect) -> (bitmap: CIImage, invert: Bool, feather: Double, tightness: Double)? {
-        let bitmaps = proxyMaskBitmaps.merging(brushBitmaps(extent: extent)) { _, baked in baked }
+        var bitmaps = proxyMaskBitmaps.merging(brushBitmaps(extent: extent)) { _, baked in baked }
+        if let proxy = proxyCI {
+            bitmaps.merge(wandBitmaps(extent: extent, source: proxy)) { _, grown in grown }
+        }
         if let mid = selectedUserMaskId, let userMask = userMasks.first(where: { $0.id == mid }) {
             let maskStruct = userMask.toMask()
             var bitmap: CIImage? = nil
@@ -3588,6 +3637,11 @@ final class AppState: ObservableObject {
                     "inputCubeData": cube,
                     "inputColorSpace": ImageWriter.outputColorSpace
                 ]).cropped(to: extent)
+            } else if let seed = maskStruct.region {
+                bitmap = bitmaps[maskStruct.id]
+                    ?? RegionGrow.mask(in: proxyCI ?? CIImage(),
+                                       seed: CGPoint(x: seed.x, y: seed.y),
+                                       tolerance: seed.tolerance, softness: seed.softness)
             } else {
                 bitmap = bitmaps[maskStruct.id] ?? bitmaps[maskStruct.type]
             }
@@ -3636,6 +3690,49 @@ final class AppState: ObservableObject {
     private var brushCache: [UUID: (count: Int, image: CIImage)] = [:]
 
     /// Pre-baked preview bitmaps for the user's brush masks, to hand the renderer.
+    /// Grown wand regions, keyed by mask id, with the seed they were grown from.
+    ///
+    /// The renderer can regrow a wand from its seed alone — it has to, or the mask would be missing
+    /// from every export — but doing that on every render means a flood fill per frame of a slider
+    /// drag, which is the shape of the problem the brush already had (18 ms per render at 1200
+    /// stamps, worse than the whole rest of the pipeline). `Renderer` prefers a supplied bitmap over
+    /// regrowing, so the preview hands one over and pays for the fill only when the seed or the
+    /// tolerance actually changes.
+    ///
+    /// Keyed on the SEED, not a counter: the two things that change it are a click and a tolerance
+    /// drag, and both must invalidate. Note this is by analogy with the brush's measured cost rather
+    /// than a fresh measurement of the fill — if the wand ever feels slow, measure before tuning.
+    private var wandCache: [UUID: (seed: RegionSeed, image: CIImage)] = [:]
+
+    /// Pre-grown regions for the user's wand masks, to hand the renderer.
+    private func wandBitmaps(extent: CGRect, source: CIImage) -> [String: CIImage] {
+        var out: [String: CIImage] = [:]
+        var live = Set<UUID>()
+        for m in userMasks where m.kind == .wand {
+            live.insert(m.id)
+            let seed = RegionSeed(x: m.cx, y: m.cy, tolerance: m.wandTolerance,
+                                  softness: m.wandSoftness)
+            if let hit = wandCache[m.id], hit.seed == seed {
+                out[m.id.uuidString] = hit.image
+                continue
+            }
+            // A miss is left OUT of the dictionary rather than cached as an empty image: the
+            // renderer then falls through to growing it itself, which on a different extent may
+            // well succeed. Caching "nothing" here would make a wand that missed at preview size
+            // stay missing at export size.
+            guard let grown = RegionGrow.mask(in: source, seed: CGPoint(x: m.cx, y: m.cy),
+                                              tolerance: m.wandTolerance,
+                                              softness: m.wandSoftness) else { continue }
+            let placed = grown.transformed(by: CGAffineTransform(
+                scaleX: extent.width / grown.extent.width,
+                y: extent.height / grown.extent.height))
+            wandCache[m.id] = (seed, placed)
+            out[m.id.uuidString] = placed
+        }
+        wandCache = wandCache.filter { live.contains($0.key) }
+        return out
+    }
+
     private func brushBitmaps(extent: CGRect) -> [String: CIImage] {
         var out: [String: CIImage] = [:]
         var live = Set<UUID>()
@@ -3719,7 +3816,9 @@ final class AppState: ObservableObject {
         if renderInFlight { renderDirty = true; return }
         renderInFlight = true
         // Segmentation bitmaps + any pre-baked brush strokes (so a long stroke stays O(1)/frame).
-        let bitmaps = proxyMaskBitmaps.merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked }
+        let bitmaps = proxyMaskBitmaps
+                .merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked }
+                .merging(wandBitmaps(extent: proxy.extent, source: proxy)) { _, grown in grown }
         let input = RenderInput(recipe: finalRecipe, proxy: proxy, bitmaps: bitmaps)
         // Which photo these pixels are of. A render started before a photo switch can still land
         // after it; tagged, that frame is ignored instead of being shown under the new photo's name.
@@ -4905,6 +5004,7 @@ struct ContentView: View {
                         if appState.showingOriginal { beforeBadge }
                         else if appState.paintingMaskId != nil { paintingBadge }
                         else if appState.pickingInstance { pickingBadge }
+                        else if appState.seedingMaskId != nil { seedingBadge }
                     }
                     .contentShape(Rectangle())
                     // One drag does the right thing: paint (brush armed), else pan (zoomed in).
@@ -4913,7 +5013,7 @@ struct ContentView: View {
                             // Picking takes the drag but does nothing with it: a click is a drag of
                             // zero distance, and letting the pan branch run would slide the photo
                             // under the pointer between press and release.
-                            if appState.pickingInstance { return }
+                            if appState.pickingInstance || appState.seedingMaskId != nil { return }
                             if appState.paintingMaskId != nil { appState.paintAt(v.location, container: geo.size) }
                             else if appState.zoom > 1.01 {
                                 appState.pan = CGSize(width: panStart.width + v.translation.width,
@@ -4926,6 +5026,10 @@ struct ContentView: View {
                             // has a double-click-to-fit) and make selecting feel laggy.
                             if appState.pickingInstance {
                                 appState.pickInstance(at: v.location, container: geo.size)
+                                return
+                            }
+                            if appState.seedingMaskId != nil {
+                                appState.seedWand(at: v.location, container: geo.size)
                                 return
                             }
                             panStart = appState.pan
@@ -4943,6 +5047,7 @@ struct ContentView: View {
                     // hold focus — which is why the badge is tappable too.
                     .onExitCommand {
                         if appState.pickingInstance { appState.pickingInstance = false }
+                        else if appState.seedingMaskId != nil { appState.seedingMaskId = nil }
                         else if appState.paintingMaskId != nil { appState.paintingMaskId = nil }
                     }
                 }
@@ -5046,6 +5151,16 @@ struct ContentView: View {
             .help("Cancel selecting")
     }
 
+    private var seedingBadge: some View {
+        Text("WAND · click the thing you want · esc or tap here to cancel")
+            .font(Theme.mono(11, .semibold)).tracking(1).foregroundColor(Theme.base)
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(Capsule().fill(Theme.glow.opacity(0.9))).padding(30)
+            .contentShape(Capsule())
+            .onTapGesture { appState.seedingMaskId = nil }
+            .help("Cancel picking a point")
+    }
+
     /// Which subject the pointer is over in the mask list, outlined on the photo. "Person 2" names
     /// nobody until you can see which one it is, and picking the wrong row means an edit landing on
     /// the wrong face.
@@ -5140,6 +5255,22 @@ struct ContentView: View {
                    let instance = appState.subjectInstances.first(where: { $0.id == m.instanceId }) {
                     SubjectHighlight(instance: instance, imageFrame: rect,
                                      normToView: { appState.normToView($0, $1, in: rect) })
+                }
+            case .wand:
+                // A crosshair on the seed. There is nothing to drag — the region is grown, not
+                // shaped — but WHERE YOU CLICKED is the one input a wand has, and a tolerance that
+                // suddenly takes half the frame reads as a broken slider until you can see that the
+                // seed landed on the sand rather than the rock. Gated on the overlay toggle because
+                // it is an annotation and not a handle, the same rule the instance highlight follows.
+                if appState.showMaskOverlay {
+                    Path { p in
+                        p.move(to: CGPoint(x: center.x - 7, y: center.y))
+                        p.addLine(to: CGPoint(x: center.x + 7, y: center.y))
+                        p.move(to: CGPoint(x: center.x, y: center.y - 7))
+                        p.addLine(to: CGPoint(x: center.x, y: center.y + 7))
+                    }
+                    .stroke(Color.white, lineWidth: 1)
+                    .shadow(color: .black.opacity(0.8), radius: 1)
                 }
             case .brush, .colorRange, .luminance, .background, .subject, .sky:
                 EmptyView()
@@ -5834,6 +5965,10 @@ struct ContentView: View {
                             clearStrokes: { appState.clearStrokes(m.id) },
                             brushRadius: Binding(get: { appState.brushRadius },
                                                  set: { appState.brushRadius = $0 }),
+                            isSeeding: appState.seedingMaskId == m.id,
+                            toggleSeeding: {
+                                appState.seedingMaskId = (appState.seedingMaskId == m.id) ? nil : m.id
+                            },
                             hasPerson: appState.hasPerson,
                             hasSky: appState.hasSky,
                             people: appState.subjectInstances.filter { $0.kind == .person },
@@ -5865,6 +6000,15 @@ struct ContentView: View {
                             Button(action: { appState.addUserMask(.subject) }) { addMaskLabel("Subject", icon: "person.fill") }.buttonStyle(.plain)
                             Button(action: { appState.addUserMask(.background) }) { addMaskLabel("Background", icon: "photo") }.buttonStyle(.plain)
                             Button(action: { appState.addUserMask(.sky) }) { addMaskLabel("Sky", icon: "cloud.sun") }.buttonStyle(.plain)
+                        }
+                        // The wand sits beside Colour rather than with the automatic masks, because
+                        // that is what it is the other half of: Colour takes every matching pixel in
+                        // the frame, the wand takes the one connected thing you point at. It is the
+                        // answer for everything Vision will not segment — a sea stack, a headland,
+                        // a wall — which is most of a landscape.
+                        HStack(spacing: 6) {
+                            Button(action: { appState.addUserMask(.wand) }) { addMaskLabel("Wand", icon: "wand.and.stars") }.buttonStyle(.plain)
+                            Spacer(minLength: 0)
                         }
                         // Presets: the same masks with the settings already in them. Built-ins
                         // ship a few honest starting points; the star of the show is "save as
@@ -6849,14 +6993,29 @@ struct EditSnapshot: Equatable {
 }
 
 struct UserMaskVM: Identifiable, Equatable, Codable {
-    enum Kind: String, Codable {
+    /// `CaseIterable` so the contract tests can enumerate every kind instead of keeping their own
+    /// hand-written list of them. There were three such lists — `UserMaskTests.allKinds`,
+    /// `AppStateTests`' new-mask sweep, `MaskPresetTests`' capturable sweep — and a kind added
+    /// without being pasted into all three is not a failing test, it is a kind that silently has no
+    /// coverage. Same rule as `Mask.adjustmentKeys`: two hand-written lists cannot disagree if there
+    /// is only one list.
+    enum Kind: String, Codable, CaseIterable {
         case radial, linear, brush, colorRange, luminance, skin, background, subject, instance, sky
+        /// The magic wand — a region grown outward from one clicked point. The contiguous
+        /// counterpart to `colorRange`: that takes every matching pixel in the frame, this takes
+        /// the one connected thing you pointed at.
+        case wand
     }
     var id = UUID()
     var kind: Kind
     var cx = 0.5, cy = 0.5, radius = 0.35, angle = 0.0, softness = 0.35
     var stamps: [BrushStamp] = []                       // brush only
     var selCenter = 0.0, selRange = 0.1, selSoftness = 0.1   // colour / luminance / skin selection
+    /// Wand only: how far the fill may spread from the seed, and how softly it stops. The seed
+    /// itself is `cx`/`cy` — it is a point on the picture, which is exactly what those already mean
+    /// for a radial mask, and inventing a second pair of coordinates for the same idea is how two
+    /// fields that must agree end up disagreeing.
+    var wandTolerance = 0.10, wandSoftness = 0.25
     /// The local adjustments this mask carries. Keys and ranges live in
     /// `AppState.maskAdjustmentSpecs`, and the editor builds its sliders from that list, so a
     /// hand-drawn mask and an auto mask can never again offer different controls.
@@ -6931,6 +7090,7 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
         // relaunch.
         case shadows, highlights, vibrance, name
         case refinement, refineCenter, refineRange, refineSoftness
+        case wandTolerance, wandSoftness
     }
 
     init(id: UUID = UUID(), kind: Kind, cx: Double = 0.5, cy: Double = 0.5, radius: Double = 0.35, angle: Double = 0.0, softness: Double = 0.35, stamps: [BrushStamp] = [], selCenter: Double = 0.0, selRange: Double = 0.1, selSoftness: Double = 0.1, exposure: Double = 0.0, contrast: Double = 0.0, saturation: Double = 0.0, instanceId: String? = nil, instanceLabel: String? = nil, instanceBox: CGRect? = nil, instanceKind: SubjectInstances.Kind? = nil, tightness: Double = 0.0, feather: Double = 0.0, invert: Bool = false) {
@@ -6975,13 +7135,15 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
         refineCenter = try c.decodeIfPresent(Double.self, forKey: .refineCenter) ?? 0.06
         refineRange = try c.decodeIfPresent(Double.self, forKey: .refineRange) ?? 0.12
         refineSoftness = try c.decodeIfPresent(Double.self, forKey: .refineSoftness) ?? 0.06
+        wandTolerance = try c.decodeIfPresent(Double.self, forKey: .wandTolerance) ?? 0.10
+        wandSoftness = try c.decodeIfPresent(Double.self, forKey: .wandSoftness) ?? 0.25
     }
 
     var label: String {
         switch kind {
         case .radial: return "Radial"; case .linear: return "Graduated"; case .brush: return "Brush"
         case .colorRange: return "Colour range"; case .luminance: return "Luminance"; case .skin: return "Skin"
-        case .background: return "Background"; case .sky: return "Sky"
+        case .background: return "Background"; case .sky: return "Sky"; case .wand: return "Wand"
         case .subject: return "Subject"
         case .instance: return instanceLabel ?? "Subject"
         }
@@ -7109,6 +7271,18 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
             return Mask(id: id.uuidString, type: "sky", source: "segmentation", invert: inv,
                         feather: f != 0 ? f : 20, opacity: 1, adjustments: adj, tightness: t,
                         refine: ref)
+        case .wand:
+            // A SEED, and the renderer regrows the pixels at whatever size it is working at. The
+            // click lives in `cx`/`cy`, the same fields a radial mask uses for the same idea.
+            //
+            // A modest default feather: the fill already ramps its own edge across the tolerance,
+            // so this is the ordinary mask softening on top of it rather than the fix for a hard
+            // boundary. Too much here and a wand traced tightly round a rock reads as a glow.
+            return Mask(id: id.uuidString, type: "wand", source: "region-grow", invert: inv,
+                        feather: f != 0 ? f : 8, opacity: 1, adjustments: adj, tightness: t,
+                        refine: ref,
+                        region: RegionSeed(x: cx, y: cy,
+                                           tolerance: wandTolerance, softness: wandSoftness))
         }
     }
 }
@@ -7127,6 +7301,11 @@ struct UserMaskEditor: View {
     var togglePaint: () -> Void = {}
     var clearStrokes: () -> Void = {}
     var brushRadius: Binding<Double> = .constant(0.09)
+    /// The wand's equivalent of `isPainting`/`togglePaint`: whether the canvas is waiting for this
+    /// mask's seed click. A mode rather than an always-live click, for the same reason the subject
+    /// pick is one — the canvas is also how you pan and zoom.
+    var isSeeding = false
+    var toggleSeeding: () -> Void = {}
     var hasPerson = true
     /// The detected sky, for the same class of warning as `hasPerson`: a sky mask on a frame
     /// with no sky found is quietly inert, and quiet inertness is this session's most-reported
@@ -7245,6 +7424,29 @@ struct UserMaskEditor: View {
                     }.buttonStyle(.plain)
                 }
                 ToneSlider(label: "Brush size", value: brushRadius, range: 0.02...0.35, step: 0.01, unit: "", onChange: {}, neutral: 0.09)
+            case .wand:
+                Text("Click the thing you want. The selection spreads from there until the "
+                     + "picture stops matching — it stays inside whatever you pointed at.")
+                    .font(Theme.mono(9)).foregroundColor(Theme.inkDim)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(action: toggleSeeding) {
+                    Text(isSeeding ? "Click the photo… (esc)" : "Pick a point on the photo")
+                        .font(Theme.ui(11, .semibold)).foregroundColor(isSeeding ? Theme.base : Theme.ink)
+                        .frame(maxWidth: .infinity).padding(.vertical, 7)
+                        .background(RoundedRectangle(cornerRadius: 7)
+                            .fill(isSeeding ? Theme.glow : Theme.surface2)
+                            .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.hairline, lineWidth: 1)))
+                }.buttonStyle(.plain)
+                // TOLERANCE IS THE WHOLE CONTROL, and it is not guessable — measured on a real
+                // frame, an isolated sea stack holds steady from 0.04 to 0.15 and then the fill
+                // bursts into the sky. So the useful range is the low end, finely stepped, and the
+                // top of the slider is deliberately short of "everything".
+                ToneSlider(label: "Tolerance", value: $mask.wandTolerance, range: 0.01...0.5,
+                           step: 0.005, unit: "", onChange: onChange, neutral: 0.10)
+                ToneSlider(label: "Edge", value: $mask.wandSoftness, range: 0...1, step: 0.01,
+                           unit: "", onChange: onChange, neutral: 0.25)
+                ToneSlider(label: "Seed X", value: $mask.cx, range: 0...1, step: 0.005, unit: "", onChange: onChange)
+                ToneSlider(label: "Seed Y", value: $mask.cy, range: 0...1, step: 0.005, unit: "", onChange: onChange)
             case .radial:
                 ToneSlider(label: "Center X", value: $mask.cx, range: 0...1, step: 0.01, unit: "", onChange: onChange)
                 ToneSlider(label: "Center Y", value: $mask.cy, range: 0...1, step: 0.01, unit: "", onChange: onChange)
