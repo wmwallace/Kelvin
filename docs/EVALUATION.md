@@ -95,9 +95,48 @@ licence-clean on any photos you own.
 
 The manifest format is corpus-agnostic (`corpus-init` maps any parallel-folder dataset —
 sources plus one folder per reference edit — into a `manifest.json`, and scoring takes
-the minimum ΔE across however many references an entry has). So a photographer with
-their own before/after pairs can eval against their real edits, which is the strongest
-reference there is.
+the minimum ΔE across however many references an entry has).
+
+### The second corpus: real before/after pairs
+
+**Build this one too, and read the two together.** The degradation corpus has one structural blind
+spot that no amount of care removes: its reference is the *untouched original*, so every stylistic
+choice costs ΔE and doing nothing is the strongest possible baseline. Two separate findings have
+now died on that — the endpoint rule's 20.7 ΔE turned out to be the look being priced by an
+instrument that penalises looks, and the white-balance estimator that *won* the degradation corpus
+is the one that should not ship.
+
+`corpus-pairs` builds the complement, where the reference is what the photographer actually wanted:
+
+```
+kelvin-cli corpus-pairs --root ~/Pictures/Shoots --out-dir ./corpus-pairs --long-edge 1600
+kelvin-perceive label --in-dir ./corpus-pairs/source --out-dir ./corpus-pairs/perception
+kelvin-cli eval --corpus ./corpus-pairs
+```
+
+It discovers pairs by convention rather than imposing one: any image in an `edited/` folder whose
+filename stem matches a capture elsewhere in the same shoot. Lightroom already exports that way.
+Second cameras count — one real shoot pairs Sony ARWs and Canon CR2s.
+
+Two things it does that matter more than they look:
+
+- **A cropped export is dropped, not scored.** Once Lightroom has cropped, the two images no longer
+  frame the same scene and a per-pixel ΔE measures the crop. This is the one defect that would
+  quietly produce plausible numbers. ⚠️ **Orientation is not a crop** — a portrait export of a
+  landscape-sensor frame is the same pixels rotated, and comparing width-to-height instead of
+  long-to-short threw away 31 of 67 real pairs on the first attempt.
+- **One entry per capture.** Exports nest: a real shoot had `Edited/` and inside it `Edited Small/`
+  with downscaled copies of the same frames. Both match, and counted twice those frames get double
+  weight in every mean.
+
+⚠️ **This inverts the bias rather than removing it.** The reference now carries the photographer's
+whole style, so an engine that *under*-edits is penalised exactly where the degradation corpus
+rewarded it, and neither corpus is neutral. **A change that improves both is real. A change that
+improves one at the other's expense is a taste call, not a defect fix** — and that distinction is
+the whole reason to have two.
+
+It also cannot tell "the engine chose differently" from "the engine chose worse". The reference is
+one photographer's edit, of their own work, in their own style.
 
 Curate for hard cases: mixed indoor lighting, heavy backlight, night, high-ISO, snow and
 beach (exposure-meter traps), and skin tones across a range of complexions. Twenty to

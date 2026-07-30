@@ -31,6 +31,8 @@ func printUsage() {
       \(tool) eval --corpus <dir> [--out <report.json>] [--engine-version <v>]
       \(tool) triage-compare --in-dir <dir> [--limit <n>]
       \(tool) sky-metrics --in-dir <dir> [--limit <n>] [--perception <p.json>] [--dump-dir <dir>]
+      \(tool) corpus-pairs --root <shoots> --out-dir <dir> [--long-edge <n>]
+      \(tool) faces --in-dir <dir>
       \(tool) wb-probe --in-dir <dir> [--reference-dir <dir>] [--cost]
       \(tool) instances --in <image>
       \(tool) grow --in <image> --at <x,y> [--tolerance <t>] [--softness <s>] [--out-dir <dir>]
@@ -367,6 +369,50 @@ case "corpus-degrade":
             + "degradations = \(manifest.entries.count) entries in \(outDir)")
         print("Next: kelvin-perceive label --in-dir \(outDir)/source --out-dir \(outDir)/perception")
         print("Then: \(tool) eval --corpus \(outDir)")
+    } catch {
+        fail("\(error)")
+    }
+
+case "corpus-pairs":
+    // A corpus whose reference is what the photographer ACTUALLY WANTED, not the untouched
+    // original. See `PairedCorpus` for why this had to exist and what it still cannot settle.
+    do {
+        let rest = Array(arguments.dropFirst())
+        guard let root = value(for: "--root", in: rest) else {
+            fail("corpus-pairs requires --root (a folder of shoots)")
+        }
+        guard let outDir = value(for: "--out-dir", in: rest) else {
+            fail("corpus-pairs requires --out-dir")
+        }
+        let longEdge = value(for: "--long-edge", in: rest).flatMap(Int.init)
+        let pairs = PairedCorpus.discover(root: URL(fileURLWithPath: root, isDirectory: true))
+        guard !pairs.isEmpty else {
+            fail("no pairs under \(root) — expected an `edited/` folder beside the captures, "
+                 + "holding exports whose filenames match them")
+        }
+        print("Found \(pairs.count) candidate pair(s).")
+
+        var skipped = 0
+        let manifest = try PairedCorpus.build(
+            pairs: pairs,
+            outputDir: URL(fileURLWithPath: outDir, isDirectory: true),
+            longEdge: longEdge,
+            onSkip: { url, why in
+                skipped += 1
+                print("  skipped \(url.lastPathComponent): \(why)")
+            }
+        )
+        if longEdge == nil {
+            print("NOTE: built at full resolution — pass --long-edge 1600 unless you need "
+                + "full-resolution pixels.")
+        }
+        print("Built paired corpus: \(manifest.entries.count) entries "
+            + "(\(skipped) skipped) in \(outDir)")
+        print("Next: cd Integrations/KelvinPerceptionMLX && swift run kelvin-perceive label "
+            + "--in-dir \(outDir)/source --out-dir \(outDir)/perception")
+        print("Then: \(tool) eval --corpus \(outDir)")
+        print("⚠️  Read it ALONGSIDE the degradation corpus, never instead of it: this one "
+            + "penalises under-editing exactly where that one rewards it.")
     } catch {
         fail("\(error)")
     }
@@ -1245,6 +1291,47 @@ case "wb-probe":
                 print("  " + name.padding(toLength: 8, withPad: " ", startingAt: 0)
                       + String(format: " %.3f", sum / count))
             }
+        }
+    } catch {
+        fail("\(error)")
+    }
+
+case "faces":
+    // COUNT THE FACES IN A CORPUS. `docs/EVALUATION.md` tells you to run this before trusting a
+    // corpus to cover skin, so it should not require writing a script.
+    //
+    // The first real corpus was believed to cover skin because three of its nine photographs came
+    // from a folder called `Studio Portraits`. Counted, only 2 of the 9 had a face at all and the
+    // "portraits" were shoreline landscapes — the folder name was not the content, and the skin half
+    // of the engine went unmeasured for months. A folder name is not evidence.
+    do {
+        let rest = Array(arguments.dropFirst())
+        guard let inDir = value(for: "--in-dir", in: rest) else { fail("faces requires --in-dir") }
+        let urls = try BatchApply.imageFiles(in: URL(fileURLWithPath: inDir, isDirectory: true))
+        guard !urls.isEmpty else { fail("no images in \(inDir)") }
+
+        var withFaces = 0, total = 0
+        var histogram: [Int: Int] = [:]
+        for url in urls {
+            guard let image = try? ImageDecoder.decode(url: url) else { continue }
+            // Detect on the same proxy the engine meters on, so the count is the one the engine
+            // would actually see rather than a more generous full-resolution one.
+            let count = FaceSkin.detect(in: PerceptionProxy.downsample(image, maxEdge: 768)).count
+            total += 1
+            histogram[count, default: 0] += 1
+            if count > 0 { withFaces += 1 }
+            print("  " + url.lastPathComponent.padding(toLength: 44, withPad: " ", startingAt: 0)
+                  + (count == 0 ? "—" : "\(count) face\(count == 1 ? "" : "s")"))
+        }
+        guard total > 0 else { fail("nothing decodable in \(inDir)") }
+        print("\n\(withFaces) of \(total) frames have a face "
+              + "(\(Int(100.0 * Double(withFaces) / Double(total)))%)")
+        for (n, c) in histogram.sorted(by: { $0.key < $1.key }) {
+            print("  \(n) face\(n == 1 ? "" : "s"): \(c) frame\(c == 1 ? "" : "s")")
+        }
+        if withFaces * 4 < total {
+            print("⚠️  Under a quarter of this corpus has a face in it. The skin half of the engine "
+                  + "is effectively unmeasured here — see docs/EVALUATION.md.")
         }
     } catch {
         fail("\(error)")
