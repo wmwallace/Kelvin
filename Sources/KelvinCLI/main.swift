@@ -33,6 +33,10 @@ func printUsage() {
       \(tool) sky-metrics --in-dir <dir> [--limit <n>] [--perception <p.json>] [--dump-dir <dir>]
       \(tool) corpus-pairs --root <shoots> --out-dir <dir> [--long-edge <n>]
       \(tool) faces --in-dir <dir>
+      \(tool) mask-coverage --in-dir <dir>
+      \(tool) endpoint-probe --in-dir <dir> [--reference-dir <dir>] [--perception-dir <dir>]
+      \(tool) exposure-probe --in-dir <dir> --reference-dir <dir> [--perception-dir <dir>]
+                     [--recipe-dir <dir>]
       \(tool) wb-probe --in-dir <dir> [--reference-dir <dir>] [--cost]
       \(tool) instances --in <image>
       \(tool) grow --in <image> --at <x,y> [--tolerance <t>] [--softness <s>] [--out-dir <dir>]
@@ -1292,6 +1296,78 @@ case "wb-probe":
                       + String(format: " %.3f", sum / count))
             }
         }
+    } catch {
+        fail("\(error)")
+    }
+
+case "mask-coverage":
+    // WHICH MASKS ACTUALLY FIRE, AND ON HOW MUCH OF THE FRAME?
+    //
+    // The mask layer is the most valuable thing the engine does — ablated over 77 real before/after
+    // pairs it EARNS 24.6 ΔE against 3.5 of damage, a net −21.1 and six times the next lever. No
+    // corpus of global degradations could have shown that, because none of them asks for a local
+    // edit. So the highest-value question left is not which global constant to tune; it is where
+    // the local layer is absent.
+    //
+    // This says, per frame: did a subject mask appear, did a sky mask appear, what fraction of the
+    // frame does each cover, and — the number that decides what to build next — **how much of the
+    // picture no mask touches at all**.
+    do {
+        let rest = Array(arguments.dropFirst())
+        guard let inDir = value(for: "--in-dir", in: rest) else {
+            fail("mask-coverage requires --in-dir")
+        }
+        let paths = try BatchApply.imageFiles(in: URL(fileURLWithPath: inDir, isDirectory: true))
+        guard !paths.isEmpty else { fail("no images in \(inDir)") }
+
+        print("frame                                 subject          sky      unmasked")
+        var haveSubject = 0, havePerson = 0, haveSky = 0, haveNeither = 0, total = 0
+        var unmasked: [Double] = []
+        for url in paths {
+            guard let image = try? ImageDecoder.decode(url: url) else { continue }
+            // Measure on the perception proxy, which is where the app decides.
+            let proxy = PerceptionProxy.downsample(image, maxEdge: 768)
+            let m = LocalMasks.measure(in: proxy)
+            total += 1
+
+            func coverage(_ key: String) -> Double {
+                guard let mask = m.bitmaps[key],
+                      let stats = try? ImageStatistics.compute(mask) else { return 0 }
+                // A mask is white where it applies; its mean luma IS its coverage fraction.
+                return stats.meanLuma
+            }
+            let subject = coverage("subject"), sky = coverage("sky")
+            // The two masks are already disjoint — `LocalMasks` subtracts the subject from the sky —
+            // so the covered fraction is their sum rather than a union that needs computing.
+            let covered = min(1.0, subject + sky)
+            unmasked.append(1 - covered)
+
+            if m.bitmaps["subject"] != nil { haveSubject += 1 }
+            if m.subjectOrigin == .person { havePerson += 1 }
+            if m.bitmaps["sky"] != nil { haveSky += 1 }
+            if m.bitmaps.isEmpty { haveNeither += 1 }
+
+            let name = url.deletingPathExtension().lastPathComponent
+            let shown = name.count > 34 ? String(name.suffix(34)) : name
+            // No `%s` here: it takes a C string, and handing it a Swift String passes a pointer
+            // into a temporary that is already gone. It does not warn, it segfaults — and with the
+            // output redirected that reads as a command that produced nothing.
+            let origin = m.subjectOrigin.map { $0 == .person ? "(person) " : "(salient)" } ?? "         "
+            print(shown + String(repeating: " ", count: max(1, 36 - shown.count))
+                  + String(format: "%5.1f%% ", subject * 100) + origin
+                  + String(format: " %5.1f%%      %5.1f%%", sky * 100, (1 - covered) * 100))
+        }
+        guard total > 0 else { fail("nothing decodable") }
+        func pct(_ n: Int) -> String { String(format: "%3.0f%%", 100.0 * Double(n) / Double(total)) }
+        print("\n\(total) frames:")
+        print("  subject mask: \(haveSubject) (\(pct(haveSubject))) — of which person-segmented: "
+              + "\(havePerson), salient-object fallback: \(haveSubject - havePerson)")
+        print("  sky mask:     \(haveSky) (\(pct(haveSky)))")
+        print("  NEITHER:      \(haveNeither) (\(pct(haveNeither))) — global-only edits on these")
+        let sorted = unmasked.sorted()
+        print(String(format: "  fraction of the frame no mask touches: median %.0f%%, "
+                     + "best %.0f%%, worst %.0f%%",
+                     sorted[sorted.count / 2] * 100, sorted.first! * 100, sorted.last! * 100))
     } catch {
         fail("\(error)")
     }
