@@ -20,7 +20,28 @@ public enum SubjectMask {
     /// and the automatic subject lift) silently did nothing on any photo without a person in it,
     /// which is a large fraction of a landscape or wildlife shoot.
     public static func subject(in image: CIImage) -> CIImage? {
-        person(in: image) ?? foreground(in: image)
+        subjectWithOrigin(in: image)?.mask
+    }
+
+    /// Where a subject mask came from. **The engine needs this, not just the pixels.**
+    ///
+    /// `person` is Vision's person segmentation: it found people, and a person-shaped edit is
+    /// justified. `foreground` is the generic salient-instance fallback, which returns whatever the
+    /// most prominent object in the frame happens to be — a dog, a bird, a product, or a sea stack.
+    /// Both produce a perfectly good mask; only one of them is evidence about *what* was masked.
+    public enum Origin: Sendable, Equatable { case person, foreground }
+
+    /// The subject mask and what produced it.
+    ///
+    /// Split out because conflating the two caused a visible artefact. On a landscape, person
+    /// segmentation finds nothing, the fallback returns the sea stack at a healthy 6% of frame, and
+    /// the engine — reading `subject.type == .person` from a model that correctly saw walkers on the
+    /// sand — lifted "the person" through a mask that was actually a rock. The lift landed on the
+    /// rock's soft boundary and drew a white rim around it against the sky.
+    public static func subjectWithOrigin(in image: CIImage) -> (mask: CIImage, origin: Origin)? {
+        if let people = person(in: image) { return (people, .person) }
+        if let salient = foreground(in: image) { return (salient, .foreground) }
+        return nil
     }
 
     /// The main subject of the frame, whatever it is. macOS 14+; nil when Vision finds nothing
@@ -64,9 +85,17 @@ public enum SubjectMask {
     /// Below this fraction of the frame, a "subject" is noise rather than something to edit.
     static let minimumCoverage = 0.004
 
+    /// **There is deliberately no "minimum coverage to lift" threshold here.**
+    ///
+    /// One was written, and the measurements killed it. The halo case reported against a sea stack
+    /// looked like a too-small subject, so the fix looked like a size floor — but the mask on that
+    /// frame covers 6.3% of it, against 28–55% for real wedding portraits and 2–4% for genuine
+    /// small subjects that lift perfectly well. No threshold separates them, because size was never
+    /// what was wrong: the mask was the right size and the wrong *thing*. See `Origin`.
+
     /// What fraction of the frame the mask actually selects. Sampled small — this is a sanity
     /// check, not a measurement.
-    static func coverage(of mask: CIImage) -> Double {
+    public static func coverage(of mask: CIImage) -> Double {
         guard let data = try? ImageWriter.rgba8Sampled(mask, width: 64, height: 64) else { return 0 }
         var lit = 0, total = 0
         data.withUnsafeBytes { rp in
@@ -112,4 +141,5 @@ public enum SubjectMask {
         guard weight > 4 else { return nil }   // require a meaningful subject area
         return lumaSum / weight
     }
+
 }

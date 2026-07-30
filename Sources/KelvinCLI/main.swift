@@ -170,6 +170,7 @@ case "engine":
             statistics: stats,
             subjectLuma: measured.subjectLuma,
             skyLuma: measured.skyLuma,
+            subjectOrigin: measured.subjectOrigin,
             iso: ExifReader.iso(url: URL(fileURLWithPath: inPath)),
             perceptionHash: PerceptionIO.hash(perception),
             generatedAt: ISO8601DateFormatter().string(from: Date())
@@ -200,6 +201,7 @@ case "candidates":
             statistics: stats,
             subjectLuma: measured.subjectLuma,
             skyLuma: measured.skyLuma,
+            subjectOrigin: measured.subjectOrigin,
             iso: ExifReader.iso(url: URL(fileURLWithPath: inPath)),
             perceptionHash: PerceptionIO.hash(perception),
             generatedAt: ISO8601DateFormatter().string(from: Date())
@@ -1034,6 +1036,34 @@ case "bench-load":
         _ = time("EXIF header read") { ExifReader.iso(url: url) }
     } catch { fail("\(error)") }
 
+case "subject-coverage":
+    // How much of the frame each photograph's subject mask actually covers.
+    //
+    // Exists to choose `SubjectMask.minimumLiftCoverage` from data rather than from a hunch: the
+    // halo that prompted it came from lifting through a mask far too small to carry a lift, and the
+    // threshold is only defensible if the numbers for real subjects and real bystanders are known.
+    do {
+        let rest = Array(arguments.dropFirst())
+        guard let inPath = value(for: "--in", in: rest) else { fail("subject-coverage requires --in") }
+        let root = URL(fileURLWithPath: inPath)
+        var isDir: ObjCBool = false
+        FileManager.default.fileExists(atPath: root.path, isDirectory: &isDir)
+        let urls = isDir.boolValue ? ((try? BatchApply.imageFiles(in: root)) ?? []) : [root]
+        print("frame                        coverage   lifts?")
+        for url in urls {
+            guard let full = try? ImageDecoder.decode(url: url) else { continue }
+            let proxy = PerceptionProxy.downsample(full, maxEdge: 1200)
+            guard let found = SubjectMask.subjectWithOrigin(in: proxy) else {
+                print("\(url.lastPathComponent.padding(toLength: 26, withPad: " ", startingAt: 0))    no subject")
+                continue
+            }
+            let cover = SubjectMask.coverage(of: found.mask)
+            print(String(format: "%@ %9.4f   from %@",
+                         url.lastPathComponent.padding(toLength: 26, withPad: " ", startingAt: 0),
+                         cover, found.origin == .person ? "person" : "foreground fallback"))
+        }
+    } catch { fail("\(error)") }
+
 case "proxy-compare":
     // Is the 768 px measurement proxy the same picture whether it comes from the 60 MP decode or
     // from the 1200 px proxy that was built anyway?
@@ -1323,6 +1353,7 @@ case "sky-metrics":
         let recipes = RecipeEngine.candidates(
             perception: perception, statistics: stats,
             subjectLuma: measured.subjectLuma, skyLuma: measured.skyLuma,
+            subjectOrigin: measured.subjectOrigin,
             iso: ExifReader.iso(url: file),
             perceptionHash: PerceptionIO.hash(perception),
             generatedAt: ISO8601DateFormatter().string(from: Date()))

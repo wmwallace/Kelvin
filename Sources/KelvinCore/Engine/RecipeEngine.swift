@@ -104,6 +104,7 @@ public enum RecipeEngine {
         statistics s: ImageStatistics,
         subjectLuma: Double? = nil,
         skyLuma: Double? = nil,
+        subjectOrigin: SubjectMask.Origin? = nil,
         iso: Double? = nil,
         engineVersion: String = version,
         perceptionHash: String? = nil,
@@ -158,7 +159,8 @@ public enum RecipeEngine {
             global: g,
             curve: curve,
             hsl: memoryColorHSL(p),
-            masks: localMasks(p, s, subjectLuma: subjectLuma, skyLuma: skyLuma),
+            masks: localMasks(p, s, subjectLuma: subjectLuma, skyLuma: skyLuma,
+                              subjectOrigin: subjectOrigin),
             detail: detail(p, iso: iso),
             geometry: nil
         )
@@ -173,9 +175,26 @@ public enum RecipeEngine {
     /// genuinely underexposed (much darker than the scene → backlit, or crushed), recover a
     /// fraction of the deficit *relative to the scene* (correct for any complexion), and lean on
     /// shadow recovery — which reveals detail — more than raw brightening.
-    static func subjectMask(_ p: Perception, _ s: ImageStatistics, subjectLuma: Double?) -> Mask? {
+    /// - Parameter subjectOrigin: what produced the mask this lift would ride on. **A person lift
+    ///   requires a person mask.** Vision's generic foreground fallback returns the most salient
+    ///   object in the frame whatever it is, and on a landscape that is the landscape: measured on a
+    ///   Cannon Beach frame, person segmentation found nothing, the fallback returned the sea stack
+    ///   at 6.3% of frame, and this function — reading `subject.type == .person` from a model that
+    ///   had correctly seen walkers on the sand — lifted "the person" through a rock. The lift met
+    ///   the rock's soft boundary against a bright sky and drew a white rim around it.
+    ///
+    ///   Passing nil keeps the old behaviour, which is wrong but is what every caller that has not
+    ///   been updated will get; `LocalMasks.measure` supplies it.
+    ///
+    ///   An `animal` subject is deliberately allowed to ride the fallback: person segmentation never
+    ///   fires for a dog, so the fallback IS how you get one, and "the salient object" is a fair
+    ///   description of a photograph of an animal in a way it is not of a landscape with people in it.
+    static func subjectMask(_ p: Perception, _ s: ImageStatistics, subjectLuma: Double?,
+                            subjectOrigin: SubjectMask.Origin? = nil) -> Mask? {
         guard let luma = subjectLuma, p.subject.present,
               p.subject.type == .person || p.subject.type == .animal else { return nil }
+        // The read says "person"; the mask has to agree that it found one.
+        if p.subject.type == .person, let subjectOrigin, subjectOrigin != .person { return nil }
 
         let deficit = s.medianLuma - luma      // > 0 means the subject is darker than the scene
         let backlit = deficit > 0.12
@@ -230,9 +249,10 @@ public enum RecipeEngine {
     /// single-recipe path is unchanged.
     static func localMasks(
         _ p: Perception, _ s: ImageStatistics, subjectLuma: Double?, skyLuma: Double?,
+        subjectOrigin: SubjectMask.Origin? = nil,
         style: CandidateStyle = .natural
     ) -> [Mask]? {
-        let ms = [subjectMask(p, s, subjectLuma: subjectLuma),
+        let ms = [subjectMask(p, s, subjectLuma: subjectLuma, subjectOrigin: subjectOrigin),
                   skyMask(p, s, skyLuma: skyLuma, style: style)].compactMap { $0 }
         return ms.isEmpty ? nil : ms
     }

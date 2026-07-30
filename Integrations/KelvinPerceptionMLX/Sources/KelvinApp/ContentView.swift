@@ -187,6 +187,9 @@ final class AppState: ObservableObject {
     /// Proxy-resolution subject/sky bitmaps for live previews (keyed "subject"/"sky").
     private var proxyMaskBitmaps: [String: CIImage] = [:]
     private var subjectLuma: Double?
+    /// What produced this frame's subject mask. Passed to the engine so a person lift is only
+    /// applied to a mask that actually found a person — see `RecipeEngine.subjectMask`.
+    private var subjectOrigin: SubjectMask.Origin?
     private var skyLuma: Double?
     @Published var imageId: String = ""
     @Published var perception: Perception?
@@ -2926,6 +2929,7 @@ final class AppState: ObservableObject {
                 .mapValues { Self.scaleMask($0, to: proxy.extent) }
                 .merging(measurement.instances.reduce(into: [:]) { $0[$1.id] = $1.mask }) { a, _ in a }
             self.subjectLuma = measurement.masks.subjectLuma
+            self.subjectOrigin = measurement.masks.subjectOrigin
             self.skyLuma = measurement.masks.skyLuma
             // NOT scaled: the candidates are scored on the 768 px image these were measured on, so
             // that the score the curator sees is the score the export's curator sees.
@@ -2941,6 +2945,7 @@ final class AppState: ObservableObject {
             // reuse an edit is to pick/tune one photo, then Batch apply that exact look.
             let recipes = RecipeEngine.candidates(perception: perceptionRead, statistics: stats,
                                                   subjectLuma: self.subjectLuma, skyLuma: self.skyLuma,
+                                                  subjectOrigin: self.subjectOrigin,
                                                   iso: ExifReader.iso(url: url))
 
             // Render every style, score each on the craft floors, then CURATE. The engine offers
@@ -4785,6 +4790,7 @@ final class AppState: ObservableObject {
             let iso = ExifReader.iso(url: url)
             let recipes = RecipeEngine.candidates(perception: perception, statistics: stats,
                                                   subjectLuma: m.subjectLuma, skyLuma: m.skyLuma,
+                                                  subjectOrigin: m.subjectOrigin,
                                                   iso: iso)
             // The whole set has to be built and scored, not just the one that was asked for.
             // Curation is not a per-candidate verdict: a style is dropped by the quality floor, OR

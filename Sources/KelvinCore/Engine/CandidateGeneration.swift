@@ -25,6 +25,7 @@ public extension RecipeEngine {
         statistics s: ImageStatistics,
         subjectLuma: Double? = nil,
         skyLuma: Double? = nil,
+        subjectOrigin: SubjectMask.Origin? = nil,
         iso: Double? = nil,
         engineVersion: String = version,
         perceptionHash: String? = nil,
@@ -33,7 +34,7 @@ public extension RecipeEngine {
         CandidateStyle.all.map { style in
             candidate(
                 perception: p, statistics: s, style: style,
-                subjectLuma: subjectLuma, skyLuma: skyLuma, iso: iso,
+                subjectLuma: subjectLuma, skyLuma: skyLuma, subjectOrigin: subjectOrigin, iso: iso,
                 engineVersion: engineVersion, perceptionHash: perceptionHash,
                 generatedAt: generatedAt
             )
@@ -47,6 +48,7 @@ public extension RecipeEngine {
         style: CandidateStyle,
         subjectLuma: Double? = nil,
         skyLuma: Double? = nil,
+        subjectOrigin: SubjectMask.Origin? = nil,
         iso: Double? = nil,
         engineVersion: String = version,
         perceptionHash: String? = nil,
@@ -138,7 +140,8 @@ public extension RecipeEngine {
             hsl: memoryColorHSL(p),
             // The subject lift is corrective and shared; the SKY carries the style's opinion. It
             // used to be shared too, which meant Dramatic and Soft emitted the same sky mask.
-            masks: localMasks(p, s, subjectLuma: subjectLuma, skyLuma: skyLuma, style: style),
+            masks: localMasks(p, s, subjectLuma: subjectLuma, skyLuma: skyLuma,
+                              subjectOrigin: subjectOrigin, style: style),
             detail: detail(p, iso: iso),
             geometry: nil
         )

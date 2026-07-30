@@ -16,6 +16,21 @@ public enum LocalMasks {
         public let bitmaps: [String: CIImage]
         public let subjectLuma: Double?
         public let skyLuma: Double?
+        /// What produced the subject mask — Vision's person segmentation, or the generic
+        /// salient-object fallback. Nil when there is no subject.
+        ///
+        /// Carried alongside the luma because the engine needs both to justify a lift: the luma says
+        /// whether the subject *wants* recovering, and the origin says whether the thing under the
+        /// mask is the thing the perception read was talking about. See `RecipeEngine.subjectMask`.
+        public let subjectOrigin: SubjectMask.Origin?
+
+        public init(bitmaps: [String: CIImage], subjectLuma: Double?, skyLuma: Double?,
+                    subjectOrigin: SubjectMask.Origin? = nil) {
+            self.bitmaps = bitmaps
+            self.subjectLuma = subjectLuma
+            self.skyLuma = skyLuma
+            self.subjectOrigin = subjectOrigin
+        }
     }
 
     /// Segment subject + sky once and measure them. Missing regions are simply absent (nil luma,
@@ -24,9 +39,12 @@ public enum LocalMasks {
         var bitmaps: [String: CIImage] = [:]
         var subjectLuma: Double?
         var skyLuma: Double?
+        var subjectOrigin: SubjectMask.Origin?
 
-        if let subject = SubjectMask.subject(in: image) {
+        if let found = SubjectMask.subjectWithOrigin(in: image) {
+            let subject = found.mask
             bitmaps["subject"] = subject
+            subjectOrigin = found.origin
             subjectLuma = SubjectMask.maskedMeanLuma(image: image, mask: subject)
             // Prefer metered skin brightness when a face is present: it's what the subject-lift
             // decision actually cares about, and metering (not classifying) skin keeps the
@@ -47,6 +65,7 @@ public enum LocalMasks {
             bitmaps["sky"] = sky
             skyLuma = SubjectMask.maskedMeanLuma(image: image, mask: sky)
         }
-        return Measured(bitmaps: bitmaps, subjectLuma: subjectLuma, skyLuma: skyLuma)
+        return Measured(bitmaps: bitmaps, subjectLuma: subjectLuma, skyLuma: skyLuma,
+                        subjectOrigin: subjectOrigin)
     }
 }
