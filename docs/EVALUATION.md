@@ -252,6 +252,23 @@ Read against the degradation table above, three things change completely:
   captures: Core Image applies the camera's as-shot balance during RAW decode, so a genuine cast is
   rare in real input even though it dominates the degradation corpus.
 
+⚠️ **Read the net figures PER FRAME before treating one as a defect.** Over 77 pairs the worst lever
+is 11.0 / 77 = **0.14 ΔE per frame**, where white balance on the degradation corpus was doing
+**1.85**. A row can top the table and still be nearly harmless, and `exposure_ev` is exactly that
+case — measured directly with `exposure-probe` it agrees with the photographer's own exposure
+decision to within 0.06 EV.
+
+```
+kelvin-cli exposure-probe --in-dir <corpus>/source --reference-dir <corpus>/reference \
+    [--perception-dir <corpus>/perception] [--recipe-dir <dir of per-frame recipes>]
+```
+
+It prints the photographer's decision — log2(reference median / capture median), how many stops they
+actually moved the frame — beside the engine's, so a rule that has misread *intent* (moving a frame
+the opposite way from its photographer) separates from one that merely needs a constant. With
+`--recipe-dir` the engine column becomes where the **whole rendered recipe** lands, which is what
+catches tone levers double-counting with exposure.
+
 ⚠️ **The rows are not additive.** Each is measured against the full recipe with only that one
 lever removed, so two levers that fight each other can both look harmless. Rank, do not sum.
 

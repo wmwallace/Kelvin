@@ -539,7 +539,7 @@ public enum RecipeEngine {
     /// Move the median toward a scene-appropriate target and express the move in stops.
     /// EV = log2(target / current) is the physically correct way to say "make it this much
     /// brighter," and it self-limits: a frame already near target barely moves.
-    static func exposure(_ p: Perception, _ s: ImageStatistics) -> Double {
+    public static func exposure(_ p: Perception, _ s: ImageStatistics) -> Double {
         let median = max(0.02, s.medianLuma)
         let flagged = p.problems.contains(.underexposedSubject) || p.problems.contains(.overexposed)
 

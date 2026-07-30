@@ -1296,6 +1296,112 @@ case "wb-probe":
         fail("\(error)")
     }
 
+case "exposure-probe":
+    // DOES THE ENGINE AGREE WITH THE PHOTOGRAPHER ABOUT HOW BRIGHT A FRAME SHOULD BE?
+    //
+    // `exposure_ev` is the engine's largest net error against real edits (+11.0 ΔE over 77 pairs)
+    // and it has been parked twice as "the owner's call", because the question underneath it is a
+    // product one — may a photograph be dark because the photographer wanted it dark? — and no
+    // instrument could answer it. A degradation corpus cannot: its reference is the untouched
+    // original, so it only ever says "put it back".
+    //
+    // A corpus of real before/after pairs can, because for every frame the photographer has already
+    // decided how bright the result should be. This prints their decision next to the engine's.
+    //
+    // The photographer's implied EV is log2(reference median / source median) — how many stops they
+    // actually moved the frame. Compared against `exposure_ev`, the sign is the interesting part:
+    // disagreeing about magnitude is a constant to calibrate, but moving a frame the OPPOSITE way
+    // from its photographer is a rule that has misread the intent.
+    do {
+        let rest = Array(arguments.dropFirst())
+        guard let inDir = value(for: "--in-dir", in: rest) else {
+            fail("exposure-probe requires --in-dir")
+        }
+        guard let referenceDir = value(for: "--reference-dir", in: rest) else {
+            fail("exposure-probe requires --reference-dir")
+        }
+        let perceptionDir = value(for: "--perception-dir", in: rest)
+        let recipeDir = value(for: "--recipe-dir", in: rest)
+        let paths = try FileManager.default.contentsOfDirectory(atPath: inDir)
+            .filter { !$0.hasPrefix(".") }.sorted()
+            .map { (inDir as NSString).appendingPathComponent($0) }
+
+        print("frame                                  src    ref | photographer  "
+              + (recipeDir == nil ? "engine" : "render") + "   error")
+        var errors: [Double] = [], wrongWay = 0, scored = 0
+        var engineEVs: [Double] = [], theirEVs: [Double] = []
+        for path in paths {
+            let url = URL(fileURLWithPath: path)
+            let stem = url.deletingPathExtension().lastPathComponent
+            guard let image = try? ImageDecoder.decode(url: url),
+                  let s = try? ImageStatistics.compute(image) else { continue }
+
+            var refStats: ImageStatistics?
+            for ext in ["png", "jpg", "jpeg"] where refStats == nil {
+                let refURL = URL(fileURLWithPath: referenceDir)
+                    .appendingPathComponent(stem).appendingPathExtension(ext)
+                if FileManager.default.fileExists(atPath: refURL.path),
+                   let refImage = try? ImageDecoder.decode(url: refURL) {
+                    refStats = try? ImageStatistics.compute(refImage)
+                }
+            }
+            guard let ref = refStats, s.medianLuma > 0.001, ref.medianLuma > 0.001 else { continue }
+
+            var p = Perception(
+                scene: .landscape,
+                subject: Perception.Subject(present: false, type: .none, count: .none,
+                                            placement: .center),
+                lighting: Perception.Lighting(condition: .overcast, direction: .diffuse,
+                                              contrastRange: .normal),
+                problems: [], intent: .natural, confidence: 0.9)
+            if let perceptionDir {
+                let pURL = URL(fileURLWithPath: perceptionDir)
+                    .appendingPathComponent(stem).appendingPathExtension("json")
+                if let loaded = try? PerceptionIO.load(from: pURL) { p = loaded }
+            }
+
+            let theirs = log2(ref.medianLuma / s.medianLuma)
+            // With `--recipe-dir`, "engine" is where the WHOLE recipe lands rather than what the
+            // exposure rule alone asked for. The two answer different questions and the gap between
+            // them is the point: `exposure_ev` can be well calibrated in isolation while the render
+            // still overshoots, because `whites`, `shadows` and `fusion` brighten too and nothing
+            // reconciles them. An ablation says a lever is doing damage; only this says whether the
+            // damage is that lever's own aim or the sum of everything pulling the same way.
+            var ours = RecipeEngine.exposure(p, s)
+            if let recipeDir {
+                let recipeURL = URL(fileURLWithPath: recipeDir)
+                    .appendingPathComponent(stem).appendingPathComponent("natural.json")
+                guard let recipe = try? RecipeIO.load(from: recipeURL),
+                      let rendered = try? ImageStatistics.compute(
+                          try Renderer.render(image, with: recipe)),
+                      rendered.medianLuma > 0.001 else { continue }
+                ours = log2(rendered.medianLuma / s.medianLuma)
+            }
+            let error = ours - theirs
+            let opposite = theirs * ours < 0 && abs(theirs) > 0.1 && abs(ours) > 0.1
+            if opposite { wrongWay += 1 }
+            errors.append(error); engineEVs.append(ours); theirEVs.append(theirs); scored += 1
+
+            let name = stem.count > 36 ? String(stem.suffix(36)) : stem
+            print(name + String(repeating: " ", count: max(1, 38 - name.count))
+                  + String(format: "%.3f  %.3f |   %+6.2f    %+6.2f  %+6.2f%@",
+                           s.medianLuma, ref.medianLuma, theirs, ours, error,
+                           opposite ? "  OPPOSITE" : ""))
+        }
+        guard scored > 0 else { fail("no scorable pairs") }
+        func mean(_ xs: [Double]) -> Double { xs.reduce(0, +) / Double(xs.count) }
+        func median(_ xs: [Double]) -> Double { let v = xs.sorted(); return v[v.count / 2] }
+        print(String(format:
+            "\n%d pairs. Photographer moved a frame by median %+.2f EV; the engine by %+.2f.",
+            scored, median(theirEVs), median(engineEVs)))
+        print(String(format:
+            "error (engine − photographer): mean %+.2f EV, median %+.2f, |error| > 0.5 EV on %d",
+            mean(errors), median(errors), errors.filter { abs($0) > 0.5 }.count))
+        print("moved the frame the OPPOSITE way from its photographer: \(wrongWay) of \(scored)")
+    } catch {
+        fail("\(error)")
+    }
+
 case "faces":
     // COUNT THE FACES IN A CORPUS. `docs/EVALUATION.md` tells you to run this before trusting a
     // corpus to cover skin, so it should not require writing a script.
