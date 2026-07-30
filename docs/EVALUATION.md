@@ -104,6 +104,48 @@ beach (exposure-meter traps), and skin tones across a range of complexions. Twen
 fifty images, hand-picked. Corpora stay out of git — they are photographs, and
 `.gitignore` already refuses them.
 
+⚠️ **CHECK THE CORPUS ACTUALLY CONTAINS FACES — count them, do not assume.** The first real corpus
+was believed to cover skin because three of its nine photographs came out of a folder called
+`Studio Portraits`. Counted with Vision, **only 2 of the 9 had a face at all**, and the three
+"portraits" were shoreline landscapes — the folder name was not the content. The skin half of the
+engine was therefore entirely unmeasured, and what it was hiding was not subtle: on a corpus with
+real faces the engine scored **9.90 against 6.85 for doing nothing**, where on the landscape corpus it
+was winning. `FaceSkin.detect` gives the count in one line; run it over the references before
+trusting a corpus to cover people.
+
+## Calibrating a constant: use held-out photographs, not the corpus
+
+Three of the engine's constants were set from assumptions about what a photograph *should* measure,
+and all three were wrong against real finished work — each in a way that silently disabled the rule
+it belonged to:
+
+| constant | assumed | measured on real photographs | consequence |
+|---|---|---|---|
+| white-point target | 0.965 | p99.5 median **0.808**, 1 of 38 reached it | returned its +28 cap on 25 of 38 — stopped discriminating |
+| white-balance deadband | 6.0 | \|cast\| median **17.2**, 20 of 20 exceeded it | the "leave it alone" branch never fired |
+| `exposureTarget(.interior)` | 0.44 | median luma **0.148**, 0 of 20 reached it | lifts nearly every frame; even brightens over-bright ones |
+
+The shape is always the same: **an absolute target where a relative judgment is needed.** A rule that
+returns its extreme on the ordinary case is not measuring anything, however reasonable its constant
+looks in isolation.
+
+So the method:
+
+1. **Calibrate on real photographs held OUT of the corpus.** `Shoots/` has plenty; take frames the
+   corpus does not use, from more than one shoot, and measure what the statistic actually does on
+   finished work.
+2. **Choose the value on a property, not on ΔE.** For the white point the property was
+   *discrimination* — four ordinary white points must give four different answers. A lower target
+   scored **better** on the corpus and was rejected for exactly that reason.
+3. **Use the corpus only to confirm nothing got worse.**
+4. **Render before and after on real photographs.** A table has never settled a look.
+5. **Make it sweepable** — an env override plus an entry in `RecipeEngine.tuningSignature`, so the
+   next corpus can re-measure it without a rebuild and a sweep cannot be served the previous arm's
+   cached recipes.
+
+Choosing the best-scoring constant is how the engine gets tuned into doing nothing: see the caution
+at the end of this document.
+
 ## Metrics
 
 No single number is sufficient. Report all of these; do not collapse them.
