@@ -15,6 +15,200 @@
     <link>https://usekelvin.app</link>
     <description>Updates for Kelvin, the local-AI photo editor for macOS.</description>
     <item>
+      <title>Kelvin 0.4.0 — quicker to open, truer to the photograph</title>
+      <pubDate>Wed, 29 Jul 2026 21:03:14 -0700</pubDate>
+      <sparkle:version>258</sparkle:version>
+      <sparkle:shortVersionString>0.4.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <link>https://github.com/wmwallace/Kelvin/releases/tag/v0.4.0</link>
+      <description><![CDATA[
+        <style>
+          /* Kelvin update notes. Self-contained: no external fonts, images or scripts — Sparkle
+             renders this offline, mid-install, in a narrow pane. */
+          :root {
+            color-scheme: light dark;
+            --ink: #1c1a17;
+            --dim: #6b6660;
+            --faint: #928c84;
+            --bg: #faf8f5;
+            --rule: rgba(0,0,0,0.10);
+            --glow: #b4661a;
+          }
+          @media (prefers-color-scheme: dark) {
+            :root {
+              --ink: #e8e3dc;
+              --dim: #9a938a;
+              --faint: #6f6862;
+              --bg: #131211;
+              --rule: rgba(255,255,255,0.11);
+              --glow: #e9a44c;
+            }
+          }
+          body {
+            margin: 0;
+            padding: 18px 20px 26px;
+            background: var(--bg);
+            color: var(--ink);
+            font: 13px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+            -webkit-font-smoothing: antialiased;
+          }
+          /* The blackbody rail: amber through daylight to blue, which is what the app is named after
+             and the one piece of decoration here that means something. It separates sections the way
+             the temperature rail runs under the canvas in the app itself. */
+          .rail {
+            height: 2px;
+            border: 0;
+            margin: 20px 0 16px;
+            background: linear-gradient(90deg, #e9a44c 0%, #f2ead9 42%, #cfd8e6 68%, #7fa2cc 100%);
+            opacity: 0.85;
+          }
+          .lede {
+            margin: 0;
+            font-size: 15px;
+            line-height: 1.45;
+            letter-spacing: -0.005em;
+          }
+          .version {
+            font: 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--faint);
+            margin: 0 0 9px;
+          }
+          /* Mono, tracked, uppercase — the same label treatment the app uses over its own panel
+             sections, so the notes read in the app's voice rather than a changelog's. */
+          h2 {
+            font: 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+            color: var(--glow);
+            margin: 22px 0 7px;
+          }
+          h2:first-of-type { margin-top: 0; }
+          p { margin: 0 0 9px; }
+          p.note { color: var(--dim); }
+          ul { margin: 0 0 9px; padding-left: 17px; }
+          li { margin-bottom: 4px; }
+          strong { font-weight: 600; }
+          .limit {
+            border-left: 2px solid var(--rule);
+            padding-left: 11px;
+            margin: 12px 0 0;
+            color: var(--dim);
+          }
+          .closing {
+            margin-top: 22px;
+            padding-top: 14px;
+            border-top: 1px solid var(--rule);
+            color: var(--faint);
+            font-size: 12px;
+          }
+        </style>
+
+        <p class="version">Kelvin 0.4.0</p>
+        <p class="lede">Quicker to open, and truer to the photograph in front of it.</p>
+
+        <hr class="rail">
+
+        <h2>A natural edit is natural again</h2>
+        <p>Kelvin's first candidate is called Natural, and on a grey coastal frame it was brightening the
+        sky, opening the shadows, and putting an S-curve and a colour grade over the top. Its own reading of
+        that photograph was <em>&ldquo;dark silhouette of large sea stacks against a gloomy sky&rdquo;</em> —
+        so it saw the weather correctly and then removed it.</p>
+        <p>The line is now drawn where a photographer would draw it. Exposure, white balance, highlight and
+        shadow recovery and dehaze are <strong>fixes</strong> — nobody looks at a corrected exposure and
+        calls it a look. An S-curve with a split-tone grade, a 52-point spread between the black and white
+        points, and half-strength exposure fusion are a <strong>look</strong>, and a flat scene photographed
+        flat is allowed to stay flat.</p>
+        <p class="note">On that frame: whites +28 → +11, blacks −24 → −10, fusion 55 → 20, and no curve at
+        all. The punch is not gone — it is what Vivid and Dramatic are for, one click away.</p>
+
+        <h2>The white line around the rock</h2>
+        <p>A backlit subject gets lifted out of shadow, and the mask that lift travels through comes from
+        Vision. When Vision finds no person it falls back to whatever stands out most — which, on a
+        landscape, is the landscape. Kelvin had correctly read walkers on the sand, believed the mask was
+        those people, and lifted a sea stack instead. The lift met the rock's soft edge against a bright sky
+        and drew a rim around it.</p>
+        <p>A mask now carries where it came from, and a person lift requires a mask that actually found a
+        person. Animals still use the fallback deliberately — person segmentation never fires for a dog. The
+        manual <strong>Subject pop</strong> control no longer claims &ldquo;the detected person&rdquo; over a
+        rock either; it says what was really found.</p>
+
+        <h2>A shoot on a network drive opens</h2>
+        <p>Opening a folder on a sleeping NAS froze the window before a single byte was read — the
+        file-system checks and the date-reading pass were running on the thread that draws the interface, so
+        Kelvin sat waiting on the mount with nothing on screen. All of that moved off it.</p>
+        <p>Thumbnails, capture dates and content fingerprints are also remembered between launches. On a
+        126-frame shoot from a local SSD — the conservative case, with no slow network involved — reading
+        capture dates went from 820&nbsp;ms to <strong>13&nbsp;ms</strong> and building the filmstrip from
+        637&nbsp;ms to <strong>7&nbsp;ms</strong>.</p>
+        <p class="note">That cache is half a megabyte, it lives in ~/Library/Caches, and it is safe to
+        delete — everything in it rebuilds from your photographs in milliseconds.</p>
+
+        <h2>Candidates in a third of the time</h2>
+        <p>Composing the looks for a 60-megapixel raw file took 189–263&nbsp;ms and now takes
+        65–74&nbsp;ms. Eight candidates are eight gradings of <em>one</em> photograph, so Kelvin was finding
+        the same faces eight times over; detection now runs once for the set, while the measurement of what
+        each grade did to skin still happens per candidate, because that is the part that has to differ.</p>
+        <p>The small image the scene reading uses is also derived from one Kelvin already has, rather than
+        built again from the raw file — which used to cost most of a second. Checked across 79 real frames:
+        78 produced an identical edit, and the exception differed by a hundredth of a stop.</p>
+
+        <h2>The panel</h2>
+        <ul>
+          <li><strong>It resizes</strong>, by dragging its inner edge, and remembers the width next time.</li>
+          <li><strong>The divider follows the pointer</strong> instead of drifting away from it mid-drag.</li>
+          <li><strong>It comes off entirely</strong> when you want the photograph and nothing else.</li>
+        </ul>
+
+        <h2>Smaller things</h2>
+        <ul>
+          <li>Kelvin can offer to become your default photo app — once, at the moment a photograph is on
+          screen with its candidates up, so you can see what a double-click would get you first.</li>
+          <li>A hairline of light along the top of the window, warm through daylight to cool: the same
+          blackbody ramp the temperature slider is built from.</li>
+        </ul>
+
+        <h2>What still does not work</h2>
+        <p class="limit"><strong>Dust detection finds sand, not dust.</strong> It reports scene texture and
+        patches about 120 pixels out of a million, which is why the toggle looks like it does nothing. Heal
+        spots placed by hand do work. <strong>The canvas is softer than the exported file</strong> — it draws
+        a scaled-up preview rather than re-rendering at the size you are looking at, so the exported file has
+        detail the screen does not show; open it at 100% to judge sharpness.</p>
+
+        <p class="closing">Everything runs on your Mac. No account, no upload, and nothing leaves the
+        machine except this update check — which you can switch off in Settings.</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/wmwallace/Kelvin/releases/download/v0.4.0/Kelvin-0.4.0.dmg"
+        sparkle:edSignature="oKtk8k1QXNTcWeqYfabTW3ZLJrRnwS0ejd30/eA/1I0rH8lijPQWk4ZtRRl2JKLzIU/vEzGGNgoNRGQdbhcuDw=="
+        length="1515946738"
+        type="application/octet-stream"/>
+      <!-- One delta per shipped predecessor: a patch is a pair of builds, not a version, so a user
+           two releases behind matches nothing and would take the full 1.4 GB. All three are keyed on
+           CFBundleVersion, which is what Sparkle looks a delta up by. -->
+      <sparkle:deltas>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.4.0/Kelvin-0.4.0-from-247.delta"
+          sparkle:deltaFrom="247"
+          sparkle:edSignature="9o6l/+9HlMU0EPtJ+3aegWqtm72yYUsCasiDwugJI4KW+2s7rZvE5/lt1juL3/y6yCMof0hGcODppQOINA+sAQ=="
+          length="2171722"
+          type="application/octet-stream"/>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.4.0/Kelvin-0.4.0-from-202.delta"
+          sparkle:deltaFrom="202"
+          sparkle:edSignature="V/Jt+7TJsdOpaWfZsD6XwWisWT6NL4VQrobyUlO/Jzbj/JN85/pY4OTxc+Pag2acce2AQjSE2GbmC0NmcqY7Cw=="
+          length="2511238"
+          type="application/octet-stream"/>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.4.0/Kelvin-0.4.0-from-191.delta"
+          sparkle:deltaFrom="191"
+          sparkle:edSignature="I2XVZrZW3pF3UdN3YtDtaiOUbs3dhwjE4ZrrzOUOJB/iVqUo6S4oi2R/KNzAtBOVkkqwWoXKidqcStQCCuF0Dw=="
+          length="2632186"
+          type="application/octet-stream"/>
+      </sparkle:deltas>
+    </item>
+    <item>
       <title>Kelvin 0.3.0 — point at the thing you want to edit</title>
       <pubDate>Tue, 28 Jul 2026 22:04:00 -0700</pubDate>
       <sparkle:version>247</sparkle:version>
