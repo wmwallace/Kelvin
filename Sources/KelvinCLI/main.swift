@@ -107,6 +107,11 @@ func printUsage() {
       --out             Where to write report.json. Optional; table always prints.
       --engine-version  Label recorded in the report. Default 0.1.0.
 
+    ablate options (which lever is the error — rank a recipe's levers by the damage each does):
+      --in          The frame the recipe was built for. Required.
+      --reference   The finished photograph to measure distance to. Required.
+      --recipe      Recipe JSON under test. Required.
+
     Other:
       -h, --help  Show this help.
     """)
@@ -1045,6 +1050,28 @@ case "bench-load":
         }
         _ = time("EXIF header read") { ExifReader.iso(url: url) }
     } catch { fail("\(error)") }
+
+case "ablate":
+    // WHICH LEVER IS THE ERROR? A ΔE for a whole recipe says a frame came out 9.4 from the finished
+    // photograph and nothing about why — and three guesses made without this in one session were all
+    // wrong. The first run of it ranked white balance as 100 ΔE of damage over 54 corpus entries,
+    // five times the next lever. See `RecipeAblation`.
+    let rest = Array(arguments.dropFirst())
+    guard let inPath = value(for: "--in", in: rest) else { fail("ablate requires --in") }
+    guard let refPath = value(for: "--reference", in: rest) else { fail("ablate requires --reference") }
+    guard let recipePath = value(for: "--recipe", in: rest) else { fail("ablate requires --recipe") }
+
+    do {
+        let source = try ImageDecoder.decode(url: URL(fileURLWithPath: inPath))
+        let reference = try ImageDecoder.decode(url: URL(fileURLWithPath: refPath))
+        let recipe = try RecipeIO.load(from: URL(fileURLWithPath: recipePath))
+        let result = try RecipeAblation.run(source: source, reference: reference, recipe: recipe)
+        print("\(URL(fileURLWithPath: inPath).lastPathComponent) vs "
+              + "\(URL(fileURLWithPath: refPath).lastPathComponent) [\(recipe.label ?? recipe.id ?? "recipe")]")
+        print(result.renderTable())
+    } catch {
+        fail("\(error)")
+    }
 
 case "subject-coverage":
     // How much of the frame each photograph's subject mask actually covers.

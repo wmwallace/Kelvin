@@ -123,6 +123,35 @@ averaging them produces a muddy target that no human would choose and that punis
 confident stylistic choice. The question is "did we land near *a* defensible
 interpretation," not "did we hit the centroid."
 
+## Which lever is the error
+
+A ΔE for a whole recipe says a frame came out 9.4 from the finished photograph and says
+nothing about *why*. Reason from that alone and you will blame the wrong lever — three
+successive theories about one regression were all wrong before this existed, and the first
+run of it settled the question in one pass.
+
+```
+kelvin-cli ablate --in <source> --reference <finished> --recipe <recipe.json>
+```
+
+It renders the recipe, re-renders it with each lever neutralised on its own, and ranks them
+by the ΔE that removing each one recovers. Positive means that lever is doing damage. Run
+across all 54 entries of a degradation corpus it produced the engine's error budget:
+
+| lever | total ΔE damage | worst frame |
+|---|---|---|
+| **temperatureK** | **100.0** | **17.11** |
+| whites | 20.3 | 2.07 |
+| vibrance | 9.1 | 0.92 |
+| dehaze | 7.1 | 0.92 |
+
+⚠️ **The rows are not additive.** Each is measured against the full recipe with only that one
+lever removed, so two levers that fight each other can both look harmless. Rank, do not sum.
+
+⚠️ **Pass the mask bitmaps** (or let it measure them, which is the default). Without them the
+renderer skips every local edit and the mask layer's row reads as harmless — the same trap
+that made the whole corpus score the global half of a recipe for months.
+
 ## Measuring a sky
 
 Every other metric above is global or skin-masked, and a sky is neither. That gap was not
