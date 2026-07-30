@@ -226,6 +226,32 @@ across all 54 entries of a degradation corpus it produced the engine's error bud
 | vibrance | 9.1 | 0.92 |
 | dehaze | 7.1 | 0.92 |
 
+**Run it on BOTH corpora, because they disagree about which lever is wrong.** The same ablation over
+77 real before/after pairs, where the reference is the photographer's own edit rather than the
+untouched original, reports a *net* figure — the damage a lever does minus the ΔE it earns:
+
+| lever | ΔE damage | ΔE it earns | net |
+|---|---|---|---|
+| **exposure_ev** | 25.1 | 14.1 | **+11.0** |
+| contrast | 8.8 | 1.8 | +7.0 |
+| shadows | 13.3 | 8.1 | +5.2 |
+| vibrance | 4.8 | 0.9 | +3.9 |
+| whites | 5.5 | 9.6 | **−4.1** |
+| fusion | 0.5 | 5.5 | −5.0 |
+| **masks (layer)** | 3.5 | 24.6 | **−21.1** |
+
+Read against the degradation table above, three things change completely:
+
+- **`whites` goes from the worst lever (20.7 damage) to a net positive.** Against an untouched
+  original an endpoint push is pure cost; against a real edit it is most of what the photographer
+  did too. A lever that looks like the top defect on one instrument can be one of the better ones on
+  the other, and that is the clearest argument for keeping both.
+- **The mask layer is the most valuable thing the engine does** (−21.1) — local edits are invisible
+  to a corpus of global degradations, which never asks for one.
+- **`temperatureK` does not appear at all**, because the white-balance gate fires on **0 of 77** real
+  captures: Core Image applies the camera's as-shot balance during RAW decode, so a genuine cast is
+  rare in real input even though it dominates the degradation corpus.
+
 ⚠️ **The rows are not additive.** Each is measured against the full recipe with only that one
 lever removed, so two levers that fight each other can both look harmless. Rank, do not sum.
 
