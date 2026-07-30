@@ -60,11 +60,50 @@ public struct ImageStatistics: Equatable, Sendable {
     /// Low values flag a flat/low-contrast frame independent of the perception label.
     public var dynamicRange: Double
 
+    /// Mean CIELAB a/b over the **least chromatic** pixels only — an illuminant estimate that
+    /// saturated scene colour cannot contaminate.
+    ///
+    /// `chromaA`/`chromaB` above are the whole-frame mean, which is the grey-world assumption, and
+    /// the comment in `RecipeEngine.whiteBalance` already records why that is wrong for skin: it
+    /// cannot tell "the light was yellow" from "the picture is mostly faces". Measured with
+    /// `kelvin-cli ablate`, that turned out to be the engine's **largest single error** — 100 ΔE of
+    /// damage across 54 corpus entries, five times the next lever, worst frame 17.1 — and it is not
+    /// only about skin. A blue seascape was being warmed 1230 K toward grey because the sea is blue.
+    ///
+    /// The whole-frame mean cannot be rescued by a threshold, because the two populations overlap:
+    /// finished photographs measure |chroma| 1.2–36.8 and genuinely cast frames 3.6–39.1. **These
+    /// separate them.** A real cast tints the near-neutral surfaces too, so it survives the
+    /// selection; a saturated sea does not, because what gets measured is the sand and the cloud.
+    /// Over 47 finished photographs and 18 known-cast frames, at a deadband of 6:
+    ///
+    /// | estimate | finished frames left alone | real casts caught |
+    /// |---|---|---|
+    /// | whole-frame mean | **23%** | 83% |
+    /// | these (least-chromatic 15%) | **81%** | 61% |
+    ///
+    /// The recall traded away is the *weak* casts — the ones below the deadband, which by definition
+    /// needed the least correction. That is the right side of the trade: falsely correcting a finished
+    /// photograph costs up to 17 ΔE, while missing a cast costs at most the ~2.8 ΔE that catching one
+    /// buys.
+    public var neutralChromaA: Double
+    public var neutralChromaB: Double
+
+    /// Magnitude of the neutral-pixel cast estimate. This is the number `whiteBalance` gates on.
+    public var neutralCastMagnitude: Double {
+        (neutralChromaA * neutralChromaA + neutralChromaB * neutralChromaB).squareRoot()
+    }
+
+    /// Share of the sample the illuminant estimate is drawn from. Kept low on purpose — the most
+    /// neutral 15% is the purest sample of "what colour is the light", and it measured better than
+    /// 30% or 50% at every deadband tried.
+    public static let neutralSampleFraction = 0.15
+
     public init(
         meanLuma: Double, medianLuma: Double, blackPoint: Double, shadowLevel: Double,
         highlightLevel: Double, whitePoint: Double, highlightClip: Double, shadowClip: Double,
         chromaA: Double, chromaB: Double,
-        shadowMass: Double = 0, shadowRegion: Double = 0, saturationClip: Double = 0
+        shadowMass: Double = 0, shadowRegion: Double = 0, saturationClip: Double = 0,
+        neutralChromaA: Double? = nil, neutralChromaB: Double? = nil
     ) {
         self.shadowMass = shadowMass
         self.shadowRegion = shadowRegion
@@ -79,6 +118,12 @@ public struct ImageStatistics: Equatable, Sendable {
         self.shadowClip = shadowClip
         self.chromaA = chromaA
         self.chromaB = chromaB
+        // Default to the whole-frame mean when a caller does not supply an illuminant estimate.
+        // Hand-built fixtures in tests set chroma to say "this frame has a cast of this size", and
+        // silently giving them a NEUTRAL estimate of zero would disable every white-balance rule
+        // they exist to exercise — the tests would pass by doing nothing.
+        self.neutralChromaA = neutralChromaA ?? chromaA
+        self.neutralChromaB = neutralChromaB ?? chromaB
         self.dynamicRange = max(0, whitePoint - blackPoint)
     }
 
@@ -97,6 +142,10 @@ public struct ImageStatistics: Equatable, Sendable {
         var lumas = [Double](repeating: 0, count: count)
         var lumaSum = 0.0
         var sa = 0.0, sb = 0.0
+        // Per-pixel chroma for the illuminant estimate. Near-black is excluded (chroma there is
+        // noise) and clipped highlights are too (a blown pixel has lost its hue).
+        var usable: [(chroma: Double, a: Double, b: Double)] = []
+        usable.reserveCapacity(count)
         var hi = 0, lo = 0
         var unreadable = 0, inShadow = 0, colourClipped = 0
 
@@ -117,6 +166,9 @@ public struct ImageStatistics: Equatable, Sendable {
 
                 let lab = Lab.fromSRGB8(r: r8, g: g8, b: b8)
                 sa += lab.a; sb += lab.b
+                if lab.L >= 8, r8 < 254, g8 < 254, b8 < 254 {
+                    usable.append(((lab.a * lab.a + lab.b * lab.b).squareRoot(), lab.a, lab.b))
+                }
 
                 if r8 >= 254 || g8 >= 254 || b8 >= 254 { hi += 1 }
                 if r8 <= 1 && g8 <= 1 && b8 <= 1 { lo += 1 }
@@ -129,6 +181,17 @@ public struct ImageStatistics: Equatable, Sendable {
                 let mx = max(r, g, b)
                 if mx > 0.20, (mx - min(r, g, b)) / mx > 0.85 { colourClipped += 1 }
             }
+        }
+
+        // The least chromatic slice, averaged. `partialSort` would do, but the sample is 96×96 and
+        // this runs once per statistics pass, so a full sort is not worth optimising.
+        var neutralA = sa / Double(count), neutralB = sb / Double(count)
+        if !usable.isEmpty {
+            usable.sort { $0.chroma < $1.chroma }
+            let k = max(1, Int(Double(usable.count) * neutralSampleFraction))
+            var na = 0.0, nb = 0.0
+            for i in 0..<k { na += usable[i].a; nb += usable[i].b }
+            neutralA = na / Double(k); neutralB = nb / Double(k)
         }
 
         lumas.sort()
@@ -151,7 +214,9 @@ public struct ImageStatistics: Equatable, Sendable {
             chromaB: sb / n,
             shadowMass: Double(unreadable) / n,
             shadowRegion: Double(inShadow) / n,
-            saturationClip: Double(colourClipped) / n
+            saturationClip: Double(colourClipped) / n,
+            neutralChromaA: neutralA,
+            neutralChromaB: neutralB
         )
     }
 

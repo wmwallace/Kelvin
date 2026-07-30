@@ -203,6 +203,20 @@ the pre-`b0bd667` behaviour, is the point.
 | `KELVIN_SKY_BITE` / `KELVIN_SKY_BITE_OPEN` | 16 / 8 | 16 / 8 |
 | `KELVIN_SKY_BRIGHT` / `KELVIN_SKY_RAMP` | 0.50 / 0.20 | 0.60 / 0.30 |
 
+The white-balance estimator and its deadband sweep too:
+
+| variable | shipped | before |
+|---|---|---|
+| `KELVIN_WB_ESTIMATOR` | `neutral` (near-neutral pixels) | `mean` (whole-frame grey world) |
+| `KELVIN_WB_DEADBAND` | 6.0 | 6.0 |
+
+`ablate` ranked white balance as the engine's largest single error — 100 ΔE across 54 entries, five
+times the next lever. The whole-frame mean cannot separate "the light was coloured" from "the scene is
+coloured", and no deadband fixes that because the populations overlap. At a deadband of 6 the mean
+leaves **23%** of finished photographs alone; the near-neutral estimate leaves **81%**. Sweeping the
+deadband (3/4/5/6) does not move the one row that regresses, which is how we know the residual is a
+magnitude problem and not a gating one.
+
 The endpoint rule's white-point target sweeps the same way, and for the same reason:
 
 | variable | shipped | before |
