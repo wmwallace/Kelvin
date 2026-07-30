@@ -47,9 +47,54 @@ public enum RecipeEngine {
             "skyBite:\(SkyLever.contrastBite)/\(SkyLever.contrastBiteOpening)",
             "skyFeather:\(SkyLever.feather)",
             "maskFloor:\(SkyMask.brightFloor)",
-            "maskRamp:\(SkyMask.brightRamp)"
+            "maskRamp:\(SkyMask.brightRamp)",
+            "whiteTarget:\(whitePointTarget)"
         ].joined(separator: ";")
     }
+
+    /// Where `pointPlacement` aims a frame's white point (p99.5 luma), and the second **taste**
+    /// constant in the engine — overridable from the environment for exactly the reasons
+    /// `SkyLever`'s numbers are.
+    ///
+    /// **It was 0.965, and that is not a measurement of anything.** It reads as "true white is 1.0,
+    /// so aim just under it", and the consequence is that the rule stopped discriminating: measured
+    /// over **38 real finished photographs held out of the eval corpus** (studio portraits, a
+    /// waterfall shoot, Sunriver — three shoots, none of them corpus references), p99.5 has a median
+    /// of **0.808** and a maximum of 0.988. Exactly **one of the 38 reached 0.965**, so the rule
+    /// asked for its maximum +28 whites on **25 of 38** and left only 3 alone. A rule that returns
+    /// its cap on two thirds of finished photographs is not measuring how far short they fall; it is
+    /// asserting that every photograph is short by the same maximum amount, which defeats the
+    /// engine's whole premise that magnitude comes from measurement (CLAUDE.md non-negotiable #1).
+    ///
+    /// The corpus reference set agrees independently: those nine measure p99.5 0.66–0.83, median
+    /// 0.801, against the held-out median of 0.808.
+    ///
+    /// **0.88 was chosen on the discrimination property, not on corpus ΔE.** Over the held-out 38:
+    ///
+    /// | target | pinned at the +28 cap | left alone | median push |
+    /// |---|---|---|---|
+    /// | 0.965 (was) | **25 / 38** | 3 / 38 | 28 |
+    /// | 0.92 | 14 / 38 | 5 / 38 | 24 |
+    /// | 0.90 | 12 / 38 | 6 / 38 | 19 |
+    /// | **0.88 (shipped)** | **8 / 38** | 7 / 38 | **15** |
+    /// | 0.85 | 4 / 38 | 9 / 38 | 9 |
+    ///
+    /// Lower scores better on the eval corpus — 0.85 measured best — and that is exactly why the pick
+    /// is not made on ΔE. The corpus's reference is the *untouched original*, so any stylistic push
+    /// costs distance and blandness always wins on paper (the caution is recorded in
+    /// docs/EVALUATION.md). 0.88 restores the rule's range — capping drops from two thirds of real
+    /// photographs to a fifth — while keeping a substantial 15-point endpoint push on a typical
+    /// frame. A frame at the held-out p25 (0.748) still caps, which is intended: highlights stopping
+    /// that far short of white genuinely is the case endpoint-setting exists for. Aiming at the 0.808 median would have made it a near-no-op, which is a look decision
+    /// dressed up as a measurement.
+    ///
+    /// This is a taste boundary, so it is sweepable rather than argued about:
+    /// `KELVIN_WHITE_TARGET=0.965 make open PHOTO=<file>` restores the old behaviour on a real
+    /// photograph. It is in `tuningSignature` above, so a sweep cannot be served a cached recipe
+    /// from the previous arm.
+    public static let whitePointTarget: Double =
+        ProcessInfo.processInfo.environment["KELVIN_WHITE_TARGET"]
+            .flatMap(Double.init).map { min(1.0, max(0.60, $0)) } ?? 0.88
 
     /// The style's graduated-ND lever over a sky, and the one part of the engine whose numbers
     /// are a **taste** call rather than a measurement.
@@ -638,7 +683,10 @@ public enum RecipeEngine {
         let rangeGate = clamp((s.dynamicRange - 0.15) / 0.35, to: 0...1)   // 0 below DR .15, full by .50
         var whites = 0.0, blacks = 0.0
         if s.highlightClip < 0.02 && s.whitePoint > 0.55 {
-            whites = min(28, max(0, (0.965 - s.whitePoint) * 210)) * rangeGate   // whitePoint 0.84 → ~26
+            // `whitePointTarget` rather than a literal: at the old 0.965 this expression returned its
+            // +28 cap for any frame below p99.5 0.832, which is 27 of 38 real finished photographs —
+            // so it measured nothing. See the constant for the calibration.
+            whites = min(28, max(0, (whitePointTarget - s.whitePoint) * 210)) * rangeGate
         }
         if s.shadowClip < 0.02 {
             // Ease off when a large part of the picture LIVES in the shadows.

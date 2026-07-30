@@ -174,6 +174,22 @@ the pre-`b0bd667` behaviour, is the point.
 | `KELVIN_SKY_BITE` / `KELVIN_SKY_BITE_OPEN` | 16 / 8 | 16 / 8 |
 | `KELVIN_SKY_BRIGHT` / `KELVIN_SKY_RAMP` | 0.50 / 0.20 | 0.60 / 0.30 |
 
+The endpoint rule's white-point target sweeps the same way, and for the same reason:
+
+| variable | shipped | before |
+|---|---|---|
+| `KELVIN_WHITE_TARGET` | 0.88 | 0.965 |
+
+**Calibrated on 38 real photographs held out of the corpus**, because the old value was not a
+measurement: p99.5 luma has a median of 0.808 across those frames and only one reached 0.965, so
+`pointPlacement` returned its maximum +28 whites on 25 of 38 and could not tell a frame needing +5
+from one needing +28. At 0.88 that drops to 8 of 38 while a typical frame still gets +15.
+
+⚠️ **The pick was made on that discrimination property, not on corpus ΔE.** Lower targets score
+*better* here — 0.85 measured best of the arms tried — which is precisely the reason not to choose on
+ΔE: see the caution below. Calibrate a constant like this on held-out photographs and use the corpus
+to check it did not make anything worse.
+
 They reach the app too, so a look can be auditioned on a real photograph and not only in a
 table:
 
