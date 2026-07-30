@@ -5753,7 +5753,18 @@ struct ContentView: View {
                         if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
                     }
                     .gesture(
-                        DragGesture(minimumDistance: 1)
+                        // IN GLOBAL COORDINATES, and this is the whole fix for the jumping.
+                        //
+                        // A `DragGesture` reports `translation` relative to the view it is attached
+                        // to — and this view is the divider, which MOVES as the drag resizes the
+                        // panel. So each frame measured the pointer against a handle that had just
+                        // shifted underneath it, the translation partly cancelled itself, and the
+                        // panel stuttered and jumped instead of tracking the pointer. Reported as
+                        // "doesn't move left to right without jumping".
+                        //
+                        // `.global` is a frame that does not move while the layout does, so the
+                        // translation means what it says.
+                        DragGesture(minimumDistance: 1, coordinateSpace: .global)
                             .onChanged { value in
                                 // Anchored to the width the drag STARTED at. `translation` is
                                 // cumulative from the start of the gesture, so applying it to the
