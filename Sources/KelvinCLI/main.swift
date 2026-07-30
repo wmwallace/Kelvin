@@ -1250,6 +1250,110 @@ case "wb-probe":
         fail("\(error)")
     }
 
+case "endpoint-probe":
+    // DOES THE ENDPOINT RULE OVERSHOOT? `whites` is the engine's largest single error since white
+    // balance was fixed — 20.7 ΔE over 54 corpus entries, concentrated on `dull` (6.1) and `flat`
+    // (5.0) and **zero** on the one genuinely underexposed row.
+    //
+    // `460b135` calibrated `whitePointTarget` on a DISCRIMINATION property: how often the rule
+    // returns its cap. That is necessary and not sufficient — a rule can discriminate perfectly and
+    // still aim at the wrong place. This measures direction instead: where the frame's white point
+    // starts, where the rule moves it to, and where the photographer's own finished version actually
+    // put it. Overshoot is the rule driving highlights past the truth.
+    //
+    // `dull` is the sharpest case, because it is a saturation-only degradation — the luma
+    // distribution is IDENTICAL to the reference, so the correct whites push is exactly zero and
+    // anything the rule asks for there is invented.
+    do {
+        let rest = Array(arguments.dropFirst())
+        guard let inDir = value(for: "--in-dir", in: rest) else {
+            fail("endpoint-probe requires --in-dir")
+        }
+        let referenceDir = value(for: "--reference-dir", in: rest)
+        let perceptionDir = value(for: "--perception-dir", in: rest)
+        let paths = try FileManager.default.contentsOfDirectory(atPath: inDir)
+            .filter { !$0.hasPrefix(".") }.sorted()
+            .map { (inDir as NSString).appendingPathComponent($0) }
+
+        print("frame                          p99.5   whites  ->  after  | reference  overshoot")
+        var overshoot: [Double] = [], pushes: [Double] = []
+        var pushedWhenNothingWanted = 0, scored = 0
+        for path in paths {
+            let url = URL(fileURLWithPath: path)
+            guard let image = try? ImageDecoder.decode(url: url),
+                  let s = try? ImageStatistics.compute(image) else { continue }
+
+            // The rule needs a perception for its intent gate; fall back to a neutral one so the
+            // probe still works on a bare folder of photographs.
+            var p = Perception(
+                scene: .landscape,
+                subject: Perception.Subject(present: false, type: .none, count: .none,
+                                            placement: .center),
+                lighting: Perception.Lighting(condition: .overcast, direction: .diffuse,
+                                              contrastRange: .normal),
+                problems: [], intent: .natural, confidence: 0.9)
+            let stem = url.deletingPathExtension().lastPathComponent
+            if let perceptionDir {
+                let pURL = URL(fileURLWithPath: perceptionDir)
+                    .appendingPathComponent(stem).appendingPathExtension("json")
+                if let loaded = try? PerceptionIO.load(from: pURL) { p = loaded }
+            }
+
+            let whites = RecipeEngine.pointPlacement(p, s).whites
+            // Where that push actually lands, measured rather than assumed: render whites alone and
+            // re-measure p99.5. The slider's units are not luma units and the mapping is the
+            // renderer's business, so asking it is the only honest way to get "after".
+            var recipe = Recipe.neutral
+            recipe.global.whites = whites
+            let after = (try? ImageStatistics.compute(try Renderer.render(image, with: recipe)))?
+                .whitePoint ?? s.whitePoint
+
+            var line = stem + String(repeating: " ", count: max(1, 30 - stem.count))
+            line += String(format: "%6.3f  %+6.0f  ->  %5.3f", s.whitePoint, whites, after)
+
+            if let referenceDir {
+                let base = stem.components(separatedBy: "__").first ?? stem
+                var refPoint: Double?
+                for ext in ["png", "jpg", "jpeg"] where refPoint == nil {
+                    let refURL = URL(fileURLWithPath: referenceDir)
+                        .appendingPathComponent(base).appendingPathExtension(ext)
+                    if FileManager.default.fileExists(atPath: refURL.path),
+                       let refImage = try? ImageDecoder.decode(url: refURL),
+                       let refStats = try? ImageStatistics.compute(refImage) {
+                        refPoint = refStats.whitePoint
+                    }
+                }
+                if let refPoint {
+                    let over = after - refPoint
+                    line += String(format: "  |    %5.3f    %+6.3f%@", refPoint, over,
+                                   over > 0.02 ? "  OVER" : (over < -0.02 ? "  under" : ""))
+                    overshoot.append(over); scored += 1
+                    // The frame already reaches where the finished photograph does, and the rule
+                    // pushed anyway.
+                    if s.whitePoint >= refPoint - 0.005, whites > 0 { pushedWhenNothingWanted += 1 }
+                }
+            }
+            pushes.append(whites)
+            print(line)
+        }
+
+        func median(_ xs: [Double]) -> Double {
+            let v = xs.sorted(); return v.isEmpty ? 0 : v[v.count / 2]
+        }
+        print("\nwhites asked for: median \(Int(median(pushes))), "
+              + "capped at 30 on \(pushes.filter { $0 >= 30 }.count) of \(pushes.count), "
+              + "left alone on \(pushes.filter { $0 == 0 }.count)")
+        if scored > 0 {
+            print(String(format:
+                "overshoot past the finished photograph: median %+.3f, over on %d of %d frames",
+                median(overshoot), overshoot.filter { $0 > 0.02 }.count, scored))
+            print("pushed a frame that ALREADY reached the reference: "
+                  + "\(pushedWhenNothingWanted) of \(scored)")
+        }
+    } catch {
+        fail("\(error)")
+    }
+
 case "subject-coverage":
     // How much of the frame each photograph's subject mask actually covers.
     //

@@ -672,7 +672,9 @@ public enum RecipeEngine {
     /// Nudge whites/blacks to occupy the tonal range without clipping. Conservative — the
     /// M1 renderer does not yet apply these, but they round-trip and will be correct when it
     /// does, and they make the recipe diff meaningful today.
-    static func pointPlacement(_ p: Perception, _ s: ImageStatistics) -> (whites: Double, blacks: Double) {
+    public static func pointPlacement(
+        _ p: Perception, _ s: ImageStatistics
+    ) -> (whites: Double, blacks: Double) {
         guard p.intent != .archival, p.intent != .productAccurate else { return (0, 0) }
 
         // Set clean endpoints: drive the whites toward true white and the blacks toward true black
