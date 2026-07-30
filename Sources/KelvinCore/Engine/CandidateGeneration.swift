@@ -99,10 +99,29 @@ public extension RecipeEngine {
         // Dramatic reads most cinematic, Soft barely graded.
         // `curveDamping` keeps the endpoints and the S-curve from double-counting the same
         // contrast — see its documentation.
-        let curve = toneCurve(
+        var curve = toneCurve(
             p, s,
             strength: curveStrength(p, s) * style.curveScale * curveDamping(points.whites, points.blacks),
             toe: style.matteToe, grade: 0.38 * style.curveScale)
+
+        // A corrective style keeps the fixes above and drops everything that is an opinion.
+        // Applied here, after the style layer, so the shared baseline stays the single place the
+        // fixes are computed — this subtracts a look rather than computing a second recipe.
+        if style.corrective {
+            // The grade is the clearest tell: a per-channel curve is a colour opinion, and no
+            // amount of it is "faithful". Gone outright rather than scaled.
+            curve = nil
+            // Local contrast crunch reads as processing, which is the opposite of the claim.
+            g.clarity = 0
+            g.texture = 0
+            // Exposure fusion is genuinely corrective at low amounts — it recovers a window or a
+            // sky — and becomes the HDR look above that. Capped, not removed.
+            g.fusion = min(g.fusion, 20)
+            // Endpoints set a black and white point, which is fair; a 52-point spread is a
+            // contrast decision wearing a fix's clothes.
+            g.whites = roundedClamp(g.whites * 0.4, to: 0...30, step: 1)
+            g.blacks = roundedClamp(g.blacks * 0.4, to: -30...0, step: 1)
+        }
 
         return Recipe(
             schemaVersion: Recipe.currentSchemaVersion,
@@ -187,6 +206,24 @@ public struct CandidateStyle: Sendable, Equatable {
     /// Lifts the black end of the curve (0…255) for a matte / film toe.
     let matteToe: Double
 
+    /// **Fix the photograph and stop.** No S-curve, no split-tone grade, no local-contrast crunch,
+    /// restrained endpoints and restrained exposure fusion.
+    ///
+    /// Reported as "the natural edit no longer looks natural", and it was right. `natural` carries
+    /// every style multiplier at 1.0, which made it *stylistically* neutral — but neutral multipliers
+    /// still pass the full corrective baseline through, and that baseline had grown a look of its
+    /// own. Measured on an overcast ISO 100 beach frame whose own perception read is "dark silhouette
+    /// of large sea stacks against a gloomy sky", Natural shipped whites +28, blacks −24, exposure
+    /// fusion 55, an S-curve and a per-channel blue/green grade. Kelvin read the gloom and then
+    /// removed it.
+    ///
+    /// The judgement encoded here, plainly: exposure, white balance, highlight and shadow recovery
+    /// and dehaze are **fixes** — nobody looks at a corrected exposure and calls it a look. An
+    /// S-curve with a split-tone grade, a 52-point endpoint spread and half-strength fusion are a
+    /// **look**, and a flat scene photographed flat is allowed to stay flat. The punch is not lost;
+    /// it is what Vivid and Dramatic are for, and they are one click away.
+    var corrective: Bool = false
+
     // MARK: The sky
     //
     // **A style has to be able to treat a sky differently, or several of these styles do not mean
@@ -216,7 +253,10 @@ public struct CandidateStyle: Sendable, Equatable {
         contrastScale: 1.0, contrastBias: 0,
         vibranceScale: 1.0, vibranceBias: 0, saturationBias: 0,
         whitesBias: 0, blacksBias: 0, wbStrengthScale: 1.0,
-        curveScale: 1.0, matteToe: 0
+        curveScale: 1.0, matteToe: 0,
+        // Neutral multipliers were never enough to make this faithful — they only meant "add no
+        // style of my own to the baseline", and the baseline had a style. See `corrective`.
+        corrective: true
         // The faithful rendering has no opinion about a sky, by definition.
     )
 

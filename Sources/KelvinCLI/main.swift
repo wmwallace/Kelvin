@@ -967,11 +967,62 @@ case "bench-load":
                                     subjectLuma: nil, skyLuma: nil, iso: ExifReader.iso(url: url))
         }
         print("    (\(recipes.count) candidates)")
-        _ = time("render + score all candidates") { () -> Int in
+        // Serial, as this stage used to be — kept so the arrangement below has something to be
+        // measured against rather than asserted about.
+        _ = time("candidates: serial") { () -> Int in
             var kept = 0
             for r in recipes {
                 let out = Renderer.render(proxy, with: r, maskBitmaps: [:])
                 if AestheticEvaluator.score(rendered: out) != nil { kept += 1 }
+            }
+            return kept
+        }
+
+        // The arrangement the app now uses: render + statistics concurrently, Vision serially.
+        //
+        // The split is not an optimisation detail, it is the whole design. `AestheticEvaluator`'s
+        // convenience entry point runs `FaceSkin.read`, which is Vision, and concurrent Vision is
+        // what crashed this app before (see the measurement block in the app's `loadPhoto`). Core
+        // Image and `ImageStatistics` are safe together and are the expensive half; the face read
+        // stays on one thread behind them.
+        _ = time("candidates: render ‖, Vision serial") { () -> Int in
+            let group = DispatchGroup()
+            let lock = NSLock()
+            var prepared: [(Int, CIImage, ImageStatistics)] = []
+            for (i, r) in recipes.enumerated() {
+                group.enter()
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let out = Renderer.render(proxy, with: r, maskBitmaps: [:])
+                    if let stats = try? ImageStatistics.compute(out) {
+                        lock.lock(); prepared.append((i, out, stats)); lock.unlock()
+                    }
+                    group.leave()
+                }
+            }
+            group.wait()
+            prepared.sort { $0.0 < $1.0 }
+            var kept = 0
+            for (_, image, stats) in prepared {
+                _ = AestheticEvaluator.score(stats: stats, face: FaceSkin.read(in: image))
+                kept += 1
+            }
+            return kept
+        }
+        // How much of the stage is the Vision face read. Scoring only consults `face` for skin
+        // plausibility, and `AestheticEvaluator` documents that as applying "only when a face is
+        // present" — so on a frame with nobody in it, eight Vision passes buy one constant.
+        //
+        // NOT a change anyone should make from this number alone: perception's `subject.present`
+        // and Vision's face detector can disagree, and skipping the read on the model's word would
+        // let a missed face through to a skin score of 1.0. It is measured here so the size of the
+        // prize is known before anyone decides whether it is worth an eval-harness run.
+        _ = time("candidates: no face read (floor)") { () -> Int in
+            var kept = 0
+            for r in recipes {
+                let out = Renderer.render(proxy, with: r, maskBitmaps: [:])
+                if let stats = try? ImageStatistics.compute(out) {
+                    _ = AestheticEvaluator.score(stats: stats, face: nil); kept += 1
+                }
             }
             return kept
         }

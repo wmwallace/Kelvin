@@ -2866,17 +2866,68 @@ final class AppState: ObservableObject {
             // window for the whole of it. Hand the batch to a background task and come back with
             // the results.
             let built = await Task.detached(priority: .userInitiated) { () -> CandidateBatch in
+                // TWO PHASES, and the split is a crash-avoidance decision rather than a tidy one.
+                //
+                // This was one serial loop over eight styles, measured at 378 ms in release and
+                // 515 ms in debug — the whole of "Composing candidates…", and the wait people
+                // describe as the app being slow. The eight jobs are independent, so the obvious
+                // move is to run them together.
+                //
+                // What stops that being one `withTaskGroup` around the whole body: scoring calls
+                // `AestheticEvaluator.score(rendered:)`, which calls `FaceSkin.read`, which runs
+                // **Vision**. Running Vision requests concurrently is exactly what crashed this app
+                // before — EXC_BAD_ACCESS in `objc_release` inside Vision's own request queue,
+                // intermittent at 2 crashes in 6 runs, documented at the measurement site in
+                // `loadPhoto`. A quarter of a second is not worth a segfault, and it was not worth
+                // one then either.
+                //
+                // So: phase one is Core Image and statistics, which are thread-safe and are the
+                // expensive half — run concurrently. Phase two is the Vision read, kept strictly
+                // serial. Every candidate is still rendered and scored on the same 768 px
+                // measurement image with the same inputs, so no number here changes; only the
+                // wall-clock does.
+                struct Prepared: @unchecked Sendable {
+                    let index: Int
+                    let recipe: Recipe
+                    let rendered: CIImage
+                    let cg: CGImage
+                    let stats: ImageStatistics
+                }
+
+                var prepared: [Prepared] = await withTaskGroup(of: Prepared?.self) { group in
+                    for (index, recipe) in recipes.enumerated() {
+                        group.addTask {
+                            // Rendered on the 768 px measurement image, matching `adaptedRecipe`
+                            // exactly. The previews are picker thumbnails, so 768 is ample.
+                            let renderedCI = Renderer.render(measureOn, with: recipe,
+                                                             maskBitmaps: proxyMasks)
+                            guard let cg = Self.sharedContext.createCGImage(
+                                      renderedCI, from: renderedCI.extent),
+                                  let stats = try? ImageStatistics.compute(renderedCI)
+                            else { return nil }
+                            return Prepared(index: index, recipe: recipe,
+                                            rendered: renderedCI, cg: cg, stats: stats)
+                        }
+                    }
+                    var out: [Prepared] = []
+                    for await item in group { if let item { out.append(item) } }
+                    return out
+                }
+                // A task group completes in whatever order the work finishes. The curator is fed a
+                // list and ties on score are broken by position, so an order that depends on which
+                // GPU job landed first would make the candidate set non-deterministic between runs
+                // on the same photograph. Sorted back into engine order.
+                prepared.sort { $0.index < $1.index }
+
                 var scored: [CandidateCurator.Scored] = []
                 var previews: [String: NSImage] = [:]
-                for recipe in recipes {
-                    // Rendered and scored on the 768 px measurement image, matching `adaptedRecipe`
-                    // exactly. The previews are picker thumbnails, so 768 is more than they need.
-                    let renderedCI = Renderer.render(measureOn, with: recipe, maskBitmaps: proxyMasks)
-                    guard let cg = Self.sharedContext.createCGImage(renderedCI, from: renderedCI.extent),
-                          let score = AestheticEvaluator.score(rendered: renderedCI) else { continue }
-                    let key = recipe.id ?? UUID().uuidString
-                    previews[key] = NSImage(cgImage: cg, size: .zero)
-                    scored.append(.init(recipe: recipe, score: score))
+                for item in prepared {
+                    // SERIAL, and deliberately so — see above.
+                    let face = FaceSkin.read(in: item.rendered)
+                    let score = AestheticEvaluator.score(stats: item.stats, face: face)
+                    let key = item.recipe.id ?? UUID().uuidString
+                    previews[key] = NSImage(cgImage: item.cg, size: .zero)
+                    scored.append(.init(recipe: item.recipe, score: score))
                 }
                 return CandidateBatch(scored: scored, previews: previews)
             }.value
