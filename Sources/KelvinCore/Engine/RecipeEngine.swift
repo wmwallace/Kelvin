@@ -49,7 +49,8 @@ public enum RecipeEngine {
             "maskFloor:\(SkyMask.brightFloor)",
             "maskRamp:\(SkyMask.brightRamp)",
             "whiteTarget:\(whitePointTarget)",
-            "wbEstimator:\(useMeanChroma ? "mean" : "neutral")",
+            "wbEstimator:\(estimator.rawValue)",
+            "wbEdgeP:\(ImageStatistics.edgeMinkowskiP)",
             "wbDeadband:\(castDeadband)"
         ].joined(separator: ";")
     }
@@ -795,20 +796,14 @@ public enum RecipeEngine {
         // from "the scene is coloured", and the deadband below could not fix that: it left only 23%
         // of finished photographs alone. On the neutral estimate the same deadband leaves 81% alone.
         // See `ImageStatistics.neutralChromaA` for the measurement.
-        // TWO ESTIMATES, TWO JOBS, and splitting them is the whole point.
         //
-        // The GATE — "is there a cast at all" — reads the near-neutral pixels, because that is the
-        // question the whole-frame mean answers badly: at this deadband the mean leaves only 23% of
-        // finished photographs alone against the neutral estimate's 81%.
-        //
-        // The MAGNITUDE — "how much" — reads the whole-frame mean, because the neutral selection
-        // *underestimates* a genuine global cast. Selecting the least chromatic pixels of an
-        // already-shifted frame preferentially picks the surfaces whose own colour opposes the
-        // shift, which partially cancels it. Measured: using the neutral estimate for both halves
-        // improved four corpus rows and cost `warm-cast` +1.77 — the one case white balance exists
-        // for. Gate on one, size with the other, and every row improves.
+        // ONE ESTIMATE DOES BOTH JOBS by default, and the one attempt at splitting them was measured
+        // and rejected: gating on the neutral estimate while sizing from the whole-frame *mean*
+        // recovers `warm-cast` exactly — the neutral selection under-reads a genuine global cast —
+        // but it gives up half the total gain (corpus `engine-default` 9.02 against 8.81), because
+        // the mean's magnitude is wrong everywhere the mean's gate was wrong.
         let gate = gateChroma(s)
-        let cast = useMeanChroma ? (a: s.chromaA, b: s.chromaB) : gate
+        let cast = castChroma(s)
         let castMagnitude = (gate.a * gate.a + gate.b * gate.b).squareRoot()
         guard strength > 0, castMagnitude > castDeadband else { return (nil, 0) }
 
@@ -861,25 +856,100 @@ public enum RecipeEngine {
     public static func neutralisingWhiteBalance(
         for s: ImageStatistics
     ) -> (temperatureK: Double, tint: Double) {
-        // The MEAN, matching the automatic path's magnitude half — the user asked for the colour to
-        // come out, so there is no gate here, only the amount.
-        let cast = (a: s.chromaA, b: s.chromaB)
-        return (roundedClamp(temperature(correctingChromaB: cast.b), to: Ranges.temperatureK, step: 10),
-                roundedClamp(cast.a * 1.8, to: Ranges.tint, step: 1))
+        // The same estimate the automatic path sizes its correction from — the user asked for the
+        // colour to come out, so there is no gate here and no intent scaling, only the amount.
+        let cast = castChroma(s)
+        return whiteBalanceCorrecting(chromaA: cast.a, chromaB: cast.b)
     }
 
-    /// The estimate the cast GATE reads — near-neutral pixels by default.
-    ///
-    /// `KELVIN_WB_ESTIMATOR=mean` restores the whole-frame grey-world gate, so the change can be
-    /// auditioned on a real photograph rather than argued about — the same affordance the sky lever
-    /// and the white-point target have, and it is in `tuningSignature` for the same reason.
-    static func gateChroma(_ s: ImageStatistics) -> (a: Double, b: Double) {
-        useMeanChroma ? (s.chromaA, s.chromaB) : (s.neutralChromaA, s.neutralChromaB)
+    /// The temperature and tint that pull a given measured cast back to neutral. Split out from
+    /// `neutralisingWhiteBalance` so an instrument can ask "what would *this* estimate do" without
+    /// having to fabricate an `ImageStatistics` around it — `kelvin-cli wb-probe --cost` compares
+    /// three estimators on one frame and needs exactly that.
+    public static func whiteBalanceCorrecting(
+        chromaA: Double, chromaB: Double, strength: Double = 1.0
+    ) -> (temperatureK: Double, tint: Double) {
+        (roundedClamp(temperature(correctingChromaB: chromaB, strength: strength),
+                      to: Ranges.temperatureK, step: 10),
+         roundedClamp(chromaA * 1.8 * strength, to: Ranges.tint, step: 1))
     }
+
+    /// Which illuminant estimate the white-balance rule reads, for both the gate and the magnitude.
+    ///
+    /// Sweepable so a change can be auditioned on a real photograph rather than argued about — the
+    /// same affordance the sky lever and the white-point target have, and it is in
+    /// `tuningSignature` for the same reason.
+    public enum WhiteBalanceEstimator: String, Sendable {
+        /// Whole-frame mean chroma — grey-world. The original, kept because it is the only way to
+        /// reproduce a pre-`3cf9c8d` render.
+        case mean
+        /// Mean chroma of the least-chromatic 15% of pixels. Shipped since `3cf9c8d`.
+        case neutral
+        /// Grey-edge: the average of local colour *differences*. See `ImageStatistics.edgeChromaA`.
+        case edge
+        /// `neutral` gated, `edge` sized — the gate that leaves finished photographs alone, with a
+        /// magnitude that a large flat colour field cannot dilute.
+        case hybrid
+    }
+
+    /// The estimate the cast GATE reads — "is there a cast at all".
+    public static func gateChroma(
+        _ s: ImageStatistics, _ estimator: WhiteBalanceEstimator = RecipeEngine.estimator
+    ) -> (a: Double, b: Double) {
+        switch estimator {
+        case .mean: return (s.chromaA, s.chromaB)
+        case .neutral, .hybrid: return (s.neutralChromaA, s.neutralChromaB)
+        case .edge: return (s.edgeChromaA, s.edgeChromaB)
+        }
+    }
+
+    /// The estimate the correction MAGNITUDE reads — "how much". The same as the gate except under
+    /// `hybrid`, which exists precisely to let the two differ.
+    public static func castChroma(
+        _ s: ImageStatistics, _ estimator: WhiteBalanceEstimator = RecipeEngine.estimator
+    ) -> (a: Double, b: Double) {
+        switch estimator {
+        case .mean: return (s.chromaA, s.chromaB)
+        case .neutral: return (s.neutralChromaA, s.neutralChromaB)
+        case .edge, .hybrid: return (s.edgeChromaA, s.edgeChromaB)
+        }
+    }
+
+    /// The chosen estimator.
+    ///
+    /// **`hybrid`, and the two halves are chosen from different measurements** because the gate and
+    /// the magnitude are different questions and no single estimate answers both. Over the 38
+    /// held-out finished photographs and the 18 genuinely cast corpus entries:
+    ///
+    /// | estimator | leaves finished work alone | ΔE it moves it by | cast it recovers | corpus |
+    /// |---|---|---|---|---|
+    /// | `mean` | 18% (fires on 31/38) | 6.18 | 1.07 | 9.36 |
+    /// | `neutral` | **82%** (7/38) | **0.68** | 0.48 | 8.81 |
+    /// | `edge` | 34% (25/38) | 3.65 | **1.06** | **6.96** |
+    /// | **`hybrid`** | **82%** (7/38) | 0.86 | **1.06** | 7.56 |
+    ///
+    /// Read the first two columns and the third as answering different questions, because they do.
+    /// `neutral` is the best gate by a distance and recovers **less than half** of a cast it does
+    /// catch; `edge` sizes a cast almost exactly and fires on 25 of 38 photographs that did not want
+    /// touching. `hybrid` fires on **exactly the frames `neutral` fires on** — same gate, so the
+    /// restraint that `3cf9c8d` was made to protect is preserved by construction — and then takes
+    /// out the right amount rather than half of it.
+    ///
+    /// ⚠️ **`edge` alone wins the corpus (6.96 against hybrid's 7.56) and is still the wrong pick.**
+    /// Every corpus entry is a *degraded* frame, so correcting is always the right answer there and
+    /// the corpus **structurally cannot see** the cost of firing on finished work. That cost is
+    /// 3.65 ΔE per photograph — 59% of the damage `mean` did — and restraint on finished work is the
+    /// whole reason `mean` was replaced. The bigger corpus win is the instrument's bias, not a better
+    /// estimator.
+    ///
+    /// Note the earlier hybrid that was measured and rejected is a *different* pairing — it sized
+    /// from the whole-frame `mean` and scored 9.02. The magnitude is what changed.
+    public static let estimator: WhiteBalanceEstimator =
+        ProcessInfo.processInfo.environment["KELVIN_WB_ESTIMATOR"]
+            .flatMap { WhiteBalanceEstimator(rawValue: $0.lowercased()) } ?? .hybrid
 
     /// True when the legacy whole-frame gate has been asked for.
-    public static let useMeanChroma =
-        ProcessInfo.processInfo.environment["KELVIN_WB_ESTIMATOR"]?.lowercased() == "mean"
+    public static var useMeanChroma: Bool { estimator == .mean }
 
     /// Below this measured cast, leave the colour alone. Sweepable because the estimator it gates on
     /// changed underneath it: the near-neutral estimate reads smaller in absolute terms than the

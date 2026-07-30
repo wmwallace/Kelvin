@@ -98,13 +98,75 @@ public struct ImageStatistics: Equatable, Sendable {
     /// 30% or 50% at every deadband tried.
     public static let neutralSampleFraction = 0.15
 
+    /// A **grey-edge** illuminant estimate, expressed as the CIELAB (a, b) a mid-grey surface would
+    /// measure under the estimated light — the same units, sign and scale as `neutralChromaA/B`, so
+    /// it drops into the same deadband and the same mired calibration.
+    ///
+    /// The two estimates already here both read *absolute pixel colour*, and both fail the same way
+    /// for the same reason: a large saturated region votes with its area. The whole-frame mean warms
+    /// a blue seascape by 1230 K because the sea is blue; the least-chromatic 15% fixes that but
+    /// under-reads a genuine cast, because in an already-shifted frame the pixels nearest neutral are
+    /// preferentially the surfaces whose own colour *opposes* the shift. Refining that iteratively
+    /// was tried and failed (see the note in `compute`) — re-selecting around a running estimate
+    /// converges on the densest chroma cluster, which is a mode, not the illuminant.
+    ///
+    /// This reads a different signal: **the average of local colour differences**, not of colours.
+    /// The grey-edge assumption (van de Weijer et al.) is that the average reflectance *difference*
+    /// in a scene is achromatic, so whatever colour the edge-average has is the light. A big flat
+    /// blue sea has almost no internal edges, so it contributes almost nothing however much of the
+    /// frame it covers — which is exactly the failure mode the other two share. And unlike the
+    /// least-chromatic selection, nothing is selected *by* chroma, so a global cast cannot bias the
+    /// sample against its own direction.
+    public var edgeChromaA: Double
+    public var edgeChromaB: Double
+
+    /// Magnitude of the grey-edge cast estimate.
+    public var edgeCastMagnitude: Double {
+        (edgeChromaA * edgeChromaA + edgeChromaB * edgeChromaB).squareRoot()
+    }
+
+    /// Minkowski order for the grey-edge norm. p=1 is the plain average of gradients — the textbook
+    /// grey-edge; higher p weights strong edges more, and p→∞ becomes max-edge, where the estimate
+    /// rests on the few strongest transitions in the frame.
+    ///
+    /// **8, calibrated on two properties and vetoed on a third**, because a mean ΔE cannot choose
+    /// between "corrects a real cast" and "leaves finished work alone" — it mixes them. Measured over
+    /// the 18 genuinely cast corpus entries and the 38 held-out finished photographs:
+    ///
+    /// | p | cast recovered | ΔE moved on finished work | corpus `engine-default` |
+    /// |---|---|---|---|
+    /// | 1 | 0.99 | 1.36 | 8.04 |
+    /// | 4 | 1.06 | 0.95 | 7.59 |
+    /// | **8** | **1.06** | **0.86** | **7.56** |
+    /// | 16 | 1.07 | 0.74 | 7.73 |
+    ///
+    /// Recovery plateaus from p=4 and the restraint cost falls monotonically, so the two properties
+    /// on their own would say "as high as it goes". **The corpus is what says otherwise**: it turns
+    /// over at 16 while the held-out cost is still improving, which is the signature of an estimate
+    /// starting to rest on too few pixels. 8 sits inside the plateau with the turn beyond it rather
+    /// than on its edge. The recipe is resolution-stable at every p tried (`proxy-compare`: 0 of 38
+    /// recipes differ between the 768 px and 1200 px proxies), so stability did not decide this.
+    ///
+    /// Sweepable, and in `tuningSignature`, for the same reason the sky lever and the white-point
+    /// target are.
+    public static let edgeMinkowskiP =
+        ProcessInfo.processInfo.environment["KELVIN_WB_EDGE_P"]
+            .flatMap(Double.init).map { min(16, max(1, $0)) } ?? 8.0
+
+    /// Lightness the estimated illuminant is reported at. The chromaticity is scale-free; CIELAB
+    /// a/b are not, so a grey has to be named before the estimate has the units the deadband and the
+    /// mired constant were calibrated in. L* 50 is the middle of the range and the anchor the other
+    /// estimators land near in practice.
+    public static let edgeReferenceGrey = 0.184187 // linear-light Y for L* = 50
+
 
     public init(
         meanLuma: Double, medianLuma: Double, blackPoint: Double, shadowLevel: Double,
         highlightLevel: Double, whitePoint: Double, highlightClip: Double, shadowClip: Double,
         chromaA: Double, chromaB: Double,
         shadowMass: Double = 0, shadowRegion: Double = 0, saturationClip: Double = 0,
-        neutralChromaA: Double? = nil, neutralChromaB: Double? = nil
+        neutralChromaA: Double? = nil, neutralChromaB: Double? = nil,
+        edgeChromaA: Double? = nil, edgeChromaB: Double? = nil
     ) {
         self.shadowMass = shadowMass
         self.shadowRegion = shadowRegion
@@ -125,12 +187,102 @@ public struct ImageStatistics: Equatable, Sendable {
         // they exist to exercise — the tests would pass by doing nothing.
         self.neutralChromaA = neutralChromaA ?? chromaA
         self.neutralChromaB = neutralChromaB ?? chromaB
+        self.edgeChromaA = edgeChromaA ?? chromaA
+        self.edgeChromaB = edgeChromaB ?? chromaB
         self.dynamicRange = max(0, whitePoint - blackPoint)
+    }
+
+    /// The grey-edge illuminant estimate over a row-major RGBA8 grid, returned as the CIELAB (a, b)
+    /// of a mid-grey surface under the estimated light. See `edgeChromaA` for why this signal.
+    ///
+    /// Gradients are taken in **linear light**, because that is the only space where the image is
+    /// reflectance times illumination — the whole assumption the method rests on. A pair is skipped
+    /// when either pixel is clipped (a blown channel has no gradient left, only a ceiling) or when
+    /// both are too dark to carry colour, which is the same exclusion the neutral estimate makes.
+    public static func greyEdgeChroma(from data: Data, width: Int) -> (a: Double, b: Double)? {
+        let count = data.count / 4
+        guard width > 1, count >= width * 2 else { return nil }
+        let height = count / width
+        let p = Self.edgeMinkowskiP
+
+        // The Minkowski power, by repeated squaring when the order is a whole number — which every
+        // order worth using is. `pow` here is three calls per pixel over the whole grid and measured
+        // **+2 ms on the statistics stage** at the shipped p=8; squaring costs three multiplies and
+        // gives the identical result. The general `pow` stays for a fractional sweep.
+        let wholeOrder = p == p.rounded() ? Int(p) : 0
+        func raise(_ x: Double) -> Double {
+            guard wholeOrder > 0 else { return pow(x, p) }
+            var result = 1.0, base = x, e = wholeOrder
+            while e > 0 {
+                if e & 1 == 1 { result *= base }
+                base *= base
+                e >>= 1
+            }
+            return result
+        }
+
+        var sum = (r: 0.0, g: 0.0, b: 0.0)
+        var pairs = 0
+
+        data.withUnsafeBytes { dp in
+            let px = dp.bindMemory(to: UInt8.self)
+            // Neighbour differences: one to the right and one below, so every interior pixel
+            // contributes both axes and the estimate is not biased by scan direction.
+            for y in 0..<(height - 1) {
+                for x in 0..<(width - 1) {
+                    let i = (y * width + x) * 4
+                    let right = i + 4
+                    let down = i + width * 4
+
+                    func usable(_ o: Int) -> Bool {
+                        let r = px[o], g = px[o + 1], b = px[o + 2]
+                        if r >= 254 || g >= 254 || b >= 254 { return false }
+                        return Int(r) + Int(g) + Int(b) > 24
+                    }
+                    guard usable(i), usable(right), usable(down) else { continue }
+
+                    func gradient(_ c: Int) -> Double {
+                        let here = Lab.toLinear(px[i + c])
+                        let dx = Lab.toLinear(px[right + c]) - here
+                        let dy = Lab.toLinear(px[down + c]) - here
+                        return (dx * dx + dy * dy).squareRoot()
+                    }
+                    let dr = gradient(0), dg = gradient(1), db = gradient(2)
+                    sum.r += raise(dr); sum.g += raise(dg); sum.b += raise(db)
+                    pairs += 1
+                }
+            }
+        }
+
+        // Too few usable pairs to say anything — a frame that is almost entirely blown or black.
+        guard pairs >= 64 else { return nil }
+
+        let n = Double(pairs)
+        let e = (
+            r: pow(sum.r / n, 1 / p),
+            g: pow(sum.g / n, 1 / p),
+            b: pow(sum.b / n, 1 / p)
+        )
+        // A frame with no edges at all (a flat colour field) carries no grey-edge evidence.
+        let scale = (e.r + e.g + e.b) / 3
+        guard scale > 1e-9 else { return nil }
+
+        // The normalised edge-average IS the illuminant, by the grey-edge assumption. Report it as
+        // the colour a mid-grey surface takes under it, which puts it in the units every downstream
+        // rule already speaks.
+        let grey = Self.edgeReferenceGrey
+        let lab = Lab.fromLinearSRGB(
+            r: grey * e.r / scale, g: grey * e.g / scale, b: grey * e.b / scale
+        )
+        return (lab.a, lab.b)
     }
 
     /// Compute statistics from a row-major RGBA8 sample grid (as produced by
     /// `ImageMetrics.sample`). Pure function of the bytes — no I/O, deterministic.
-    public static func compute(from data: Data) -> ImageStatistics {
+    ///
+    /// `width` is the grid's row length. It defaults to the square grid `ImageMetrics.sample`
+    /// produces; only the grey-edge estimate needs it, since everything else here is per-pixel.
+    public static func compute(from data: Data, width: Int? = nil) -> ImageStatistics {
         let count = data.count / 4
         guard count > 0 else {
             return ImageStatistics(
@@ -236,6 +388,13 @@ public struct ImageStatistics: Equatable, Sendable {
             if taken > 0 { neutralA = na / Double(taken); neutralB = nb / Double(taken) }
         }
 
+        // The grey-edge estimate needs the grid's row length; a caller that did not supply one is
+        // using the square sample grid, which is every caller in the app today.
+        let gridWidth = width ?? Int(Double(count).squareRoot().rounded())
+        let edge = gridWidth * gridWidth <= count
+            ? greyEdgeChroma(from: data, width: gridWidth)
+            : nil
+
         lumas.sort()
         func percentile(_ q: Double) -> Double {
             let idx = min(lumas.count - 1, max(0, Int(q * Double(lumas.count - 1))))
@@ -258,13 +417,15 @@ public struct ImageStatistics: Equatable, Sendable {
             shadowRegion: Double(inShadow) / n,
             saturationClip: Double(colourClipped) / n,
             neutralChromaA: neutralA,
-            neutralChromaB: neutralB
+            neutralChromaB: neutralB,
+            edgeChromaA: edge?.a,
+            edgeChromaB: edge?.b
         )
     }
 
     /// Convenience: rasterize a `CIImage` to the standard sample grid and compute. This is
     /// the only member that touches Core Image; the engine itself consumes the value type.
     public static func compute(_ image: CIImage) throws -> ImageStatistics {
-        compute(from: try ImageMetrics.sample(image))
+        compute(from: try ImageMetrics.sample(image), width: ImageMetrics.sampleEdge)
     }
 }

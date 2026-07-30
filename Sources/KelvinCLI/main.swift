@@ -31,8 +31,23 @@ func printUsage() {
       \(tool) eval --corpus <dir> [--out <report.json>] [--engine-version <v>]
       \(tool) triage-compare --in-dir <dir> [--limit <n>]
       \(tool) sky-metrics --in-dir <dir> [--limit <n>] [--perception <p.json>] [--dump-dir <dir>]
+      \(tool) wb-probe --in-dir <dir> [--reference-dir <dir>] [--cost]
       \(tool) instances --in <image>
       \(tool) grow --in <image> --at <x,y> [--tolerance <t>] [--softness <s>] [--out-dir <dir>]
+
+    wb-probe options (docs/EVALUATION.md, "Which illuminant estimate is right"):
+      --in / --in-dir  One photograph, or a folder of them. Required.
+      --reference-dir  The corpus's untouched originals. Adds the TRUE cast — the mean-chroma
+                       difference between a degraded frame and the original it came from — and
+                       `recovery`, the share of it each estimator would remove. 1.00 is exact;
+                       negative means the correction points the wrong way.
+      --cost           Render each estimator's correction and report how far it moved the frame.
+                       Point this at FINISHED photographs, where the right answer is zero.
+
+      Both halves are needed to choose an estimator and neither is a corpus ΔE: the corpus is all
+      degraded frames, so correcting is always right there and it cannot see the cost of firing on
+      work that was already finished. `edge` wins the corpus and is the wrong pick for exactly
+      that reason.
 
     grow options (the magic wand — RegionGrow, on a real photograph):
       --in         One photograph. Required.
@@ -1069,6 +1084,168 @@ case "ablate":
         print("\(URL(fileURLWithPath: inPath).lastPathComponent) vs "
               + "\(URL(fileURLWithPath: refPath).lastPathComponent) [\(recipe.label ?? recipe.id ?? "recipe")]")
         print(result.renderTable())
+    } catch {
+        fail("\(error)")
+    }
+
+case "wb-probe":
+    // EVERY ILLUMINANT ESTIMATE ON ONE FRAME, side by side, and — when a reference is supplied —
+    // the cast that is actually there.
+    //
+    // White balance is the engine's largest single error (`ablate`: 100 ΔE over 54 corpus entries
+    // before `3cf9c8d`, 54.9 after), and the two questions it fails at are different: does the
+    // estimate FIRE on a finished photograph it should leave alone, and does it recover the RIGHT
+    // MAGNITUDE on a frame that genuinely is cast. A corpus ΔE answers neither directly — it mixes
+    // them with every other lever. This prints the estimates themselves.
+    //
+    // With `--reference`, the true cast is measured as the whole-frame mean-chroma difference
+    // between this frame and the untouched original it was degraded from, which is the one place a
+    // ground-truth cast exists. `recovery` is the share of that the estimator would take out.
+    do {
+        let rest = Array(arguments.dropFirst())
+        var paths: [String] = []
+        if let dir = value(for: "--in-dir", in: rest) {
+            paths = try FileManager.default
+                .contentsOfDirectory(atPath: dir)
+                .filter { !$0.hasPrefix(".") }
+                .sorted()
+                .map { (dir as NSString).appendingPathComponent($0) }
+        } else if let one = value(for: "--in", in: rest) {
+            paths = [one]
+        } else {
+            fail("wb-probe requires --in or --in-dir")
+        }
+        let referenceDir = value(for: "--reference-dir", in: rest)
+        let wantCost = rest.contains("--cost")
+        let estimatorsUnderTest: [RecipeEngine.WhiteBalanceEstimator] =
+            [.mean, .neutral, .edge, .hybrid]
+
+        print("frame                        "
+              + estimatorsUnderTest.map { "  " + $0.rawValue.padding(toLength: 11, withPad: " ", startingAt: 0) }.joined()
+              + (wantCost ? "| ΔE moved (0 = left alone)" : "| true cast    recovery"))
+        var totals: [String: (Double, Double)] = [:]
+        var costs: [String: (Double, Double)] = [:]
+        var fires: [String: Int] = [:]
+        var n = 0
+        for path in paths {
+            let url = URL(fileURLWithPath: path)
+            guard let image = try? ImageDecoder.decode(url: url) else { continue }
+            let s = try ImageStatistics.compute(image)
+
+            func fmt(_ a: Double, _ b: Double) -> String {
+                String(format: "%+5.1f/%+5.1f", a, b)
+            }
+            // Driven through the engine's own accessors rather than reimplemented here, so that
+            // `hybrid` — whose whole point is that its gate and its magnitude disagree — is measured
+            // as the engine would apply it and not as a guess about what it does.
+            let estimates: [(String, Double, Double)] = estimatorsUnderTest.map {
+                let cast = RecipeEngine.castChroma(s, $0)
+                return ($0.rawValue, cast.a, cast.b)
+            }
+
+            // The truth, when there is one: how far this frame's colour was moved from the original.
+            var truth: (a: Double, b: Double)?
+            if let referenceDir {
+                // corpus-degrade names a degraded frame "<reference>__<degradation>.<ext>"; the
+                // reference keeps the bare name.
+                let stem = url.deletingPathExtension().lastPathComponent
+                let base = stem.components(separatedBy: "__").first ?? stem
+                for candidate in [base, stem] where truth == nil {
+                    for ext in ["jpg", "png", "jpeg"] {
+                        let refURL = URL(fileURLWithPath: referenceDir)
+                            .appendingPathComponent(candidate).appendingPathExtension(ext)
+                        guard FileManager.default.fileExists(atPath: refURL.path),
+                              let refImage = try? ImageDecoder.decode(url: refURL),
+                              let refStats = try? ImageStatistics.compute(refImage) else { continue }
+                        truth = (s.chromaA - refStats.chromaA, s.chromaB - refStats.chromaB)
+                        break
+                    }
+                }
+            }
+
+            // NOT `padding(toLength:)`, which truncates when the string is longer than the field —
+            // it silently clipped ".png" off every corpus filename, and a truncated name is worse
+            // than a ragged column because it can no longer be matched back to the file.
+            let name28 = url.lastPathComponent
+            var line = name28 + String(repeating: " ", count: max(1, 30 - name28.count))
+            for (_, a, b) in estimates { line += "  " + fmt(a, b) }
+
+            // THE COST OF FIRING ON A PHOTOGRAPH THAT IS ALREADY FINISHED. Restraint measured as a
+            // count — "leaves 82% alone" — says nothing about the size of the mistakes it does make,
+            // and an estimator that fires often but gently can easily beat one that fires rarely and
+            // hard. This renders each estimate's correction and measures how far it moved a frame
+            // that, being the photographer's own finished work, should not have moved at all.
+            if wantCost {
+                let sourceSample = try ImageMetrics.sample(image)
+                for (est, (name, a, b)) in zip(estimatorsUnderTest, estimates) {
+                    // The GATE is the estimator's own, which for `hybrid` is not the estimate the
+                    // correction is sized from — that separation is the thing being measured.
+                    let gate = RecipeEngine.gateChroma(s, est)
+                    let magnitude = (gate.a * gate.a + gate.b * gate.b).squareRoot()
+                    costs[name, default: (0, 0)].1 += 1
+                    guard magnitude > RecipeEngine.castDeadband else {
+                        line += "  \(name)= ----"
+                        continue
+                    }
+                    fires[name, default: 0] += 1
+                    var recipe = Recipe.neutral
+                    let wb = RecipeEngine.whiteBalanceCorrecting(chromaA: a, chromaB: b)
+                    recipe.global.temperatureK = wb.temperatureK
+                    recipe.global.tint = wb.tint
+                    let rendered = try Renderer.render(image, with: recipe)
+                    let moved = ImageMetrics.meanDeltaE2000(
+                        try ImageMetrics.sample(rendered), sourceSample
+                    )
+                    line += String(format: "  %@=%5.2f", name, moved)
+                    costs[name, default: (0, 0)].0 += moved
+                }
+            }
+            if let truth {
+                let trueMag = (truth.a * truth.a + truth.b * truth.b).squareRoot()
+                line += "  | " + fmt(truth.a, truth.b) + " "
+                for (name, a, b) in estimates {
+                    // How much of the true cast this estimate would remove: the projection of the
+                    // estimate onto the true cast direction. 1.0 is exact, <1 under-reads, and a
+                    // negative number is a correction pointing the wrong way.
+                    let recovery = trueMag > 0.5
+                        ? (a * truth.a + b * truth.b) / (trueMag * trueMag) : 0
+                    line += String(format: " %@=%+.2f", name, recovery)
+                    var acc = totals[name] ?? (0, 0)
+                    acc.0 += recovery; acc.1 += 1
+                    totals[name] = acc
+                }
+            }
+            print(line)
+            n += 1
+        }
+        if !totals.isEmpty {
+            print("\nmean recovery over \(n) frames (1.00 = exact, <1 under-reads):")
+            for name in estimatorsUnderTest.map(\.rawValue) {
+                guard let (sum, count) = totals[name], count > 0 else { continue }
+                print("  " + name.padding(toLength: 8, withPad: " ", startingAt: 0)
+                      + String(format: " %+.3f", sum / count))
+            }
+        }
+        if !costs.isEmpty {
+            // The fire count is reported here rather than left to be derived from the columns above,
+            // because those print the MAGNITUDE estimate and the gate is a different one under
+            // `hybrid` — deriving it from the columns reads hybrid's restraint as edge's, which is
+            // the opposite of the property it was chosen for.
+            print("\nfired on / left alone, at deadband \(RecipeEngine.castDeadband) — the GATE:")
+            for name in estimatorsUnderTest.map(\.rawValue) {
+                guard let (_, count) = costs[name], count > 0 else { continue }
+                let fired = fires[name] ?? 0
+                print("  " + name.padding(toLength: 8, withPad: " ", startingAt: 0)
+                      + String(format: " fired on %2d of %2.0f — left %3.0f%% alone",
+                               fired, count, 100 * (count - Double(fired)) / count))
+            }
+            print("\nmean ΔE moved over \(n) frames — lower is more restrained:")
+            for name in estimatorsUnderTest.map(\.rawValue) {
+                guard let (sum, count) = costs[name], count > 0 else { continue }
+                print("  " + name.padding(toLength: 8, withPad: " ", startingAt: 0)
+                      + String(format: " %.3f", sum / count))
+            }
+        }
     } catch {
         fail("\(error)")
     }

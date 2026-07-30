@@ -194,6 +194,30 @@ lever removed, so two levers that fight each other can both look harmless. Rank,
 renderer skips every local edit and the mask layer's row reads as harmless — the same trap
 that made the whole corpus score the global half of a recipe for months.
 
+## Which illuminant estimate is right
+
+`ablate` says *which lever* is wrong. When the answer is white balance — it has been, twice — the
+next question is which of the four estimators to read, and a corpus ΔE cannot answer it because it
+mixes two opposite failures: firing on a photograph that wanted leaving alone, and under-correcting
+one that genuinely is cast.
+
+```
+kelvin-cli wb-probe --in-dir <folder>                                # every estimate, side by side
+kelvin-cli wb-probe --in-dir <corpus>/source --reference-dir <corpus>/reference   # + true cast
+kelvin-cli wb-probe --in-dir <finished photographs> --cost           # + what firing costs
+```
+
+- With `--reference-dir` it measures the **true cast** as the mean-chroma difference between a
+  degraded frame and the untouched original it came from — the one place a ground truth exists — and
+  prints `recovery`, the share of it each estimator would remove. 1.00 is exact; a negative number is
+  a correction pointing the wrong way, which the least-chromatic estimate does on cool casts.
+- With `--cost` it renders each estimator's correction and measures how far it moved the frame. Point
+  this at **finished photographs**, where the right answer is "did not move at all". A leave-alone
+  *rate* is not enough on its own: an estimator that fires often and gently can beat one that fires
+  rarely and hard, and only this tells them apart.
+
+Both properties are needed to choose. See the estimator table under "Sweeping the lever" below.
+
 ## Measuring a sky
 
 Every other metric above is global or skin-masked, and a sky is neither. That gap was not
@@ -245,19 +269,49 @@ the pre-`b0bd667` behaviour, is the point.
 | `KELVIN_SKY_BITE` / `KELVIN_SKY_BITE_OPEN` | 16 / 8 | 16 / 8 |
 | `KELVIN_SKY_BRIGHT` / `KELVIN_SKY_RAMP` | 0.50 / 0.20 | 0.60 / 0.30 |
 
-The white-balance estimator and its deadband sweep too:
+The white-balance estimator, its Minkowski order and its deadband sweep too:
 
 | variable | shipped | before |
 |---|---|---|
-| `KELVIN_WB_ESTIMATOR` | `neutral` (near-neutral pixels) | `mean` (whole-frame grey world) |
+| `KELVIN_WB_ESTIMATOR` | `hybrid` | `neutral`, and `mean` before that |
+| `KELVIN_WB_EDGE_P` | 8 | — |
 | `KELVIN_WB_DEADBAND` | 6.0 | 6.0 |
 
 `ablate` ranked white balance as the engine's largest single error — 100 ΔE across 54 entries, five
-times the next lever. The whole-frame mean cannot separate "the light was coloured" from "the scene is
-coloured", and no deadband fixes that because the populations overlap. At a deadband of 6 the mean
-leaves **23%** of finished photographs alone; the near-neutral estimate leaves **81%**. Sweeping the
-deadband (3/4/5/6) does not move the one row that regresses, which is how we know the residual is a
-magnitude problem and not a gating one.
+times the next lever, and still the top item after being halved. Four estimators exist and
+`KELVIN_WB_ESTIMATOR` selects between them:
+
+| | what it reads | leaves finished work alone | ΔE it moves it by | cast recovered | corpus |
+|---|---|---|---|---|---|
+| `mean` | whole-frame mean chroma | 18% | 6.18 | 1.07 | 9.36 |
+| `neutral` | least-chromatic 15% of pixels | **82%** | **0.68** | 0.48 | 8.81 |
+| `edge` | grey-edge: mean local colour *difference* | 34% | 3.65 | **1.06** | **6.96** |
+| **`hybrid`** | `neutral` gate, `edge` magnitude | **82%** | 0.86 | **1.06** | 7.56 |
+
+**The first three columns answer different questions and that is the whole point.** "Leaves finished
+work alone" and "ΔE it moves it by" are measured over **38 real photographs held out of the corpus**;
+"cast recovered" is measured over the corpus's 18 genuinely cast entries as the share of the known
+cast the estimate would take out (1.00 is exact).
+
+The whole-frame mean cannot separate "the light was coloured" from "the scene is coloured" — it
+counts pixels, so a blue sea votes with its area — and no deadband fixes that because the populations
+overlap. The least-chromatic selection fixes the gate and then recovers **less than half** of a cast
+it does catch, because in an already-shifted frame the pixels nearest neutral are preferentially the
+surfaces whose own colour opposes the shift. Grey-edge averages local colour *differences* instead,
+so a flat field contributes nothing however large it is, and it sizes a cast almost exactly.
+
+⚠️ **`edge` alone wins the corpus and is the wrong pick.** Every corpus entry is a *degraded* frame,
+so correcting is always right there and the corpus structurally cannot see the cost of firing on
+finished work — which for `edge` is 3.65 ΔE per photograph, 59% of the damage `mean` did. `hybrid`
+fires on **exactly the frames `neutral` fires on**, so it inherits that restraint by construction and
+only changes how much comes out. This is the clearest example in the project of the corpus's timidity
+bias pointing the wrong way; see the caution below.
+
+`KELVIN_WB_EDGE_P` is the grey-edge Minkowski order — 1 is the plain gradient average, higher weights
+strong edges more. Recovery plateaus at 1.06 from p=4 and the held-out cost falls monotonically
+(1.36 → 0.95 → 0.86 → 0.74 at p=1/4/8/16), so the properties alone would say "as high as it goes";
+the corpus is what vetoes it, turning over at p=16 (7.73) while the held-out cost is still improving.
+8 sits inside the plateau with the turn beyond it.
 
 The endpoint rule's white-point target sweeps the same way, and for the same reason:
 

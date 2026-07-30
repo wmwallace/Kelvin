@@ -14,12 +14,33 @@ public struct Lab: Equatable, Sendable {
 
     /// Convert an 8-bit sRGB triple (0…255) to CIELAB under a D65 white point.
     public static func fromSRGB8(r: UInt8, g: UInt8, b: UInt8) -> Lab {
-        func toLinear(_ c8: UInt8) -> Double {
-            let c = Double(c8) / 255.0
-            return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
-        }
-        let rl = toLinear(r), gl = toLinear(g), bl = toLinear(b)
+        fromLinearSRGB(r: toLinear(r), g: toLinear(g), b: toLinear(b))
+    }
 
+    /// The sRGB EOTF on an 8-bit code value — display encoding to linear light.
+    ///
+    /// Table-driven, because an 8-bit code has exactly 256 possible answers and the `pow` was being
+    /// paid per channel per pixel. `greyEdgeChroma` alone calls this nine times per pixel of the
+    /// sample grid — three channels at the pixel and its two neighbours — which is ~83k `pow` calls
+    /// per statistics pass for 256 distinct results.
+    ///
+    /// ⚠️ **It did not measurably speed anything up**: the statistics stage is 19.1 ms best-of-6
+    /// against 19.3 ms with the `pow`, which is inside the run-to-run spread. Kept because it is the
+    /// simpler thing to have written, not on the strength of a number — do not cite it as a win.
+    public static func toLinear(_ c8: UInt8) -> Double { linearFromSRGB8[Int(c8)] }
+
+    private static let linearFromSRGB8: [Double] = (0...255).map { i in
+        let c = Double(i) / 255.0
+        return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+    }
+
+    /// Convert a **linear-light** sRGB triple to CIELAB under a D65 white point.
+    ///
+    /// Exists because the illuminant estimate in `ImageStatistics.greyEdgeChroma` works in linear
+    /// light — reflectance and illumination multiply there and nowhere else — and round-tripping
+    /// its result back through 8-bit encoding to reach `fromSRGB8` would quantise away exactly the
+    /// small chromaticities the estimate is made of.
+    public static func fromLinearSRGB(r rl: Double, g gl: Double, b bl: Double) -> Lab {
         // linear sRGB → XYZ (D65)
         let x = 0.4124564 * rl + 0.3575761 * gl + 0.1804375 * bl
         let y = 0.2126729 * rl + 0.7151522 * gl + 0.0721750 * bl
