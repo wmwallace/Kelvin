@@ -5272,10 +5272,17 @@ struct ContentView: View {
 
     // MARK: Workspace
 
-    private var workspace: some View {
-        HSplitView {
-            // Preview + the active look's white balance on the rail
-            VStack(spacing: 0) {
+    /// Canvas, footer and filmstrip — everything that is not the edit panel.
+    ///
+    /// Extracted so `workspace` can hand it to an `HSplitView` when the panel is showing and use it
+    /// on its own when it is not. **That structure is the fix, not a tidy-up.** The first attempt put
+    /// an `if` around the sidebar *inside* the split view, which builds and does nothing:
+    /// `HSplitView` is backed by `NSSplitView`, it resolves its panes when it is created, and a pane
+    /// that disappears from the `ViewBuilder` afterwards leaves the divider and the space behind.
+    /// Reported, correctly, as "panel doesn't collapse".
+    private var canvasColumn: some View {
+        // Preview + the active look's white balance on the rail
+        VStack(spacing: 0) {
                 GeometryReader { geo in
                     ZStack {
                         PreviewImage(preview: appState.preview,
@@ -5434,20 +5441,34 @@ struct ContentView: View {
                 }
             )
 
-            // THE PANEL COMES OFF, and the photograph takes the room.
-            //
-            // Reported as "edit panel needs to be able to be collapsed so you have more room to see
-            // edited photo — too small now". 360 points of a 1432-point window is a quarter of it,
-            // permanently, whether or not anything in there is being used. Judging a photograph and
-            // adjusting one are different activities, and only the second needs the sliders.
-            //
-            // Removed from the tree rather than given a width of zero: `HSplitView` keeps a
-            // draggable divider for a zero-width pane, which leaves an invisible handle at the edge
-            // of the window that resizes something you cannot see.
-            if !panelCollapsed {
-                sidebar
-                    .frame(width: 360)
-                    .background(Theme.surface)
+    }
+
+    /// THE PANEL COMES OFF, and the photograph takes the room.
+    ///
+    /// Reported as "edit panel needs to be able to be collapsed so you have more room to see edited
+    /// photo — too small now". 360 points of a 1432-point window is a quarter of it, permanently,
+    /// whether or not anything in there is being used. Judging a photograph and adjusting one are
+    /// different activities, and only the second needs the sliders.
+    ///
+    /// The whole `HSplitView` is swapped out rather than one of its panes — see `canvasColumn` for
+    /// why a conditional pane silently does nothing.
+    private var workspace: some View {
+        Group {
+            if panelCollapsed {
+                canvasColumn
+            } else {
+                HSplitView {
+                    canvasColumn
+                    // RESIZABLE, not pinned at 360. It was a fixed width, which meant the divider
+                    // `HSplitView` draws could not move — reported as "you have to click a button,
+                    // not drag", and that was the honest description of a split view with nothing
+                    // to split. A range makes the divider do what a divider on a Mac does, and
+                    // dragging it to the left edge is a second, discoverable way to get the room
+                    // back without knowing a shortcut exists.
+                    sidebar
+                        .frame(minWidth: 300, idealWidth: 360, maxWidth: 560)
+                        .background(Theme.surface)
+                }
             }
         }
         // The way back in, when there is no panel to put a button on. Sits over the top-right of the
