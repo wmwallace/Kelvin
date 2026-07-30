@@ -2986,13 +2986,30 @@ final class AppState: ObservableObject {
                     let stats: ImageStatistics
                 }
 
+                // The renderer's INPUTS, boxed, for the same reason `Prepared` above boxes its
+                // outputs: `CIImage` is `Sendable` on the macOS 27 SDK and is NOT on the one CI
+                // builds against (Xcode 16.4 / macOS 15.5), so capturing `measureOn` and
+                // `proxyMasks` directly in the task-group closure below compiles on this machine and
+                // fails for everybody else. Boxing states the promise once, in the place where the
+                // reasoning for it belongs.
+                //
+                // The promise is the same one `Prepared` already makes and it is sound: these two
+                // values are read-only for the whole of the group's life, `Renderer.render` does not
+                // mutate what it is handed, and Core Image is documented thread-safe for concurrent
+                // reads of an immutable `CIImage`.
+                struct Inputs: @unchecked Sendable {
+                    let measureOn: CIImage
+                    let masks: [String: CIImage]
+                }
+                let inputs = Inputs(measureOn: measureOn, masks: proxyMasks)
+
                 var prepared: [Prepared] = await withTaskGroup(of: Prepared?.self) { group in
                     for (index, recipe) in recipes.enumerated() {
                         group.addTask {
                             // Rendered on the 768 px measurement image, matching `adaptedRecipe`
                             // exactly. The previews are picker thumbnails, so 768 is ample.
-                            let renderedCI = Renderer.render(measureOn, with: recipe,
-                                                             maskBitmaps: proxyMasks)
+                            let renderedCI = Renderer.render(inputs.measureOn, with: recipe,
+                                                             maskBitmaps: inputs.masks)
                             guard let cg = Self.sharedContext.createCGImage(
                                       renderedCI, from: renderedCI.extent),
                                   let stats = try? ImageStatistics.compute(renderedCI)
@@ -4276,39 +4293,82 @@ final class AppState: ObservableObject {
         let sourceMasks = proxyMaskBitmaps
         let renderURL = url
 
+        // Boxed for the same reason as the candidate stage's `Inputs`: `CIImage` is `Sendable` on
+        // the macOS 27 SDK and not on the one CI builds against, so capturing `fullRes`, `cached`
+        // and `sourceMasks` straight into the detached task compiles here and fails there. All
+        // three are read-only for the life of the task.
+        struct Inputs: @unchecked Sendable {
+            let fullRes: CIImage
+            let cached: CIImage?
+            let masks: [String: CIImage]
+        }
+        let inputs = Inputs(fullRes: fullRes, cached: cached, masks: sourceMasks)
+
         Task.detached(priority: .utility) { [weak self] in
             // Build the display image if this is the first fine render for this photograph. For
             // anything that is not RAW, ImageIO decodes straight to the size we want; RAW goes
             // through the decode already in hand rather than reading the file twice.
             let display: CIImage
-            if let cached {
+            if let cached = inputs.cached {
                 display = cached
             } else if let fast = PerceptionProxy.fromFile(url, maxEdge: target,
-                                                          matching: fullRes.extent) {
+                                                          matching: inputs.fullRes.extent) {
                 display = Self.materialiseShared(fast)
             } else {
                 display = Self.materialiseShared(
-                    PerceptionProxy.downsample(fullRes, maxEdge: target))
+                    PerceptionProxy.downsample(inputs.fullRes, maxEdge: target))
             }
             let extent = display.extent
-            let bitmaps = sourceMasks.mapValues { Self.scaleMask($0, to: extent) }
+            let bitmaps = inputs.masks.mapValues { Self.scaleMask($0, to: extent) }
             let rendered = Renderer.render(display, with: recipe, maskBitmaps: bitmaps)
             guard let cg = Self.sharedContext.createCGImage(rendered, from: rendered.extent) else {
                 return
             }
-            await MainActor.run {
-                guard let self, self.fineToken == token, self.loadedURL == renderURL else { return }
-                self.displayCI = display
-                self.displayCIURL = renderURL
-                // ONLY `active`, never `lastRenderedCI`. That one feeds the histogram and the craft
-                // self-check, both of which are read off the 1200 px render — publishing a different
-                // resolution into it would change measured numbers as a side effect of the picture
-                // getting sharper, which is precisely the class of bug the note on `measureOn`
-                // exists to warn about.
-                self.preview.active = TaggedPreview(url: renderURL,
-                                                    image: NSImage(cgImage: cg, size: .zero))
-            }
+            // Handed to a main-actor METHOD as one boxed value, rather than published from inside
+            // `MainActor.run`.
+            //
+            // Two separate CI-only failures are being avoided here. `MainActor.run { guard let
+            // self … }` reads naturally and does not compile there: `self` is task-isolated out
+            // here, so capturing it in a main-actor closure is "sending 'self' risks causing data
+            // races" — the compiler cannot see that every use inside is a main-actor one. Calling an
+            // isolated method with `await` never sends `self` anywhere; it stays on its own actor.
+            //
+            // And the payload has to cross as a single `Sendable` box rather than as `CIImage` and
+            // `CGImage` parameters, which would just move the same complaint from `self` to the
+            // arguments. Sound for the same reason as `Inputs`: nothing here touches `finished`
+            // again after the hop.
+            await self?.adoptFineRender(FineRender(display: display, cg: cg,
+                                                   url: renderURL, token: token))
         }
+    }
+
+    /// A finished fine render, boxed so it can cross from the render task to the main actor in one
+    /// piece. `@unchecked` for the SDK reason recorded at the call site, and sound because the
+    /// render task hands this over and never looks at it again.
+    private struct FineRender: @unchecked Sendable {
+        let display: CIImage
+        let cg: CGImage
+        let url: URL
+        let token: Int
+    }
+
+    /// Publish a finished fine render, if it is still the one being waited for.
+    ///
+    /// Split out of `fineRender` so the hop back is a call to a main-actor method rather than a
+    /// `MainActor.run` closure that captures `self` — see the note at the call site. The staleness
+    /// checks live here, on the actor that owns the state they read, which is where they belong.
+    @MainActor
+    private func adoptFineRender(_ finished: FineRender) {
+        guard fineToken == finished.token, loadedURL == finished.url else { return }
+        displayCI = finished.display
+        displayCIURL = finished.url
+        // ONLY `active`, never `lastRenderedCI`. That one feeds the histogram and the craft
+        // self-check, both of which are read off the 1200 px render — publishing a different
+        // resolution into it would change measured numbers as a side effect of the picture
+        // getting sharper, which is precisely the class of bug the note on `measureOn`
+        // exists to warn about.
+        preview.active = TaggedPreview(url: finished.url,
+                                       image: NSImage(cgImage: finished.cg, size: .zero))
     }
 
     /// The objective craft self-check (clipping / skin / cast) runs ~200 ms after the last edit, so

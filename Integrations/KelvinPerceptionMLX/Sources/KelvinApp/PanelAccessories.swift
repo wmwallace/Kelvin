@@ -109,12 +109,27 @@ enum PanelAccessories {
         if let savePanel {
             let intended = savePanel.nameFieldStringValue
             RunLoop.main.perform(inModes: [.common, .modalPanel]) { [weak savePanel] in
-                guard let savePanel else { return }
-                // Only if AppKit changed it. If the photographer got there first, that is a real
-                // edit and it stands.
-                guard savePanel.nameFieldStringValue != intended else { return }
-                savePanel.nameFieldStringValue = intended
-                target.suggestedName = intended
+                // `assumeIsolated` rather than a `Task { @MainActor in }`, and this is a
+                // portability fix rather than a preference. `RunLoop.main.perform` takes a
+                // `@Sendable` block, so touching `NSSavePanel`'s main-actor state inside it is
+                // rejected by the compiler CI builds with (Xcode 16.4 / macOS 15.5 SDK) and
+                // accepted by the newer local one — see the CI-divergence notes. The assumption is
+                // true by construction: this block is scheduled on the MAIN run loop and cannot run
+                // anywhere else.
+                //
+                // A `Task { @MainActor in … }` would compile too and would be wrong: it hops
+                // through the concurrency executor, which is not drained in `.modalPanel`, and the
+                // whole reason this uses `RunLoop.perform(inModes:)` is that a save panel runs its
+                // own modal run loop. That would put the correction back to landing after the panel
+                // closed — the bug this code exists to fix.
+                MainActor.assumeIsolated {
+                    guard let savePanel else { return }
+                    // Only if AppKit changed it. If the photographer got there first, that is a
+                    // real edit and it stands.
+                    guard savePanel.nameFieldStringValue != intended else { return }
+                    savePanel.nameFieldStringValue = intended
+                    target.suggestedName = intended
+                }
             }
         }
 
