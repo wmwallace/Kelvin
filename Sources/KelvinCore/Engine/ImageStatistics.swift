@@ -98,6 +98,7 @@ public struct ImageStatistics: Equatable, Sendable {
     /// 30% or 50% at every deadband tried.
     public static let neutralSampleFraction = 0.15
 
+
     public init(
         meanLuma: Double, medianLuma: Double, blackPoint: Double, shadowLevel: Double,
         highlightLevel: Double, whitePoint: Double, highlightClip: Double, shadowClip: Double,
@@ -185,6 +186,21 @@ public struct ImageStatistics: Equatable, Sendable {
 
         // The least chromatic slice, averaged. `partialSort` would do, but the sample is 96×96 and
         // this runs once per statistics pass, so a full sort is not worth optimising.
+        //
+        // ⚠️ **ITERATIVE REFINEMENT WAS TRIED AND MEASURED AND DOES NOT WORK — do not re-propose it.**
+        // A single pass under-reads a genuine global cast (the corpus's `warm-cast` row costs +1.77),
+        // and the obvious explanation is that "least chromatic" is measured in the already-shifted
+        // space, so the pixels nearest neutral are the ones whose own surface colour opposes the cast.
+        // The obvious fix follows: estimate, subtract, re-select in the corrected space, sum the
+        // residual. It was implemented and swept at 1, 2 and 4 refinements, and it made the corpus
+        // *worse* — overall `engine-default` 8.81 → 8.97/8.95/8.94 — while barely touching the row it
+        // was for: warm-cast 12.71 → 12.86, 12.86, 12.76.
+        //
+        // Why: re-selecting around the running estimate converges on the densest cluster of chroma
+        // values, which is a *mode*, not the illuminant. It is a different estimator and not a better
+        // one. Recovering the cast magnitude needs a genuinely different signal — near-neutral
+        // *surfaces* identified some other way, e.g. by local gradient invariants rather than by
+        // absolute chroma.
         var neutralA = sa / Double(count), neutralB = sb / Double(count)
         if !usable.isEmpty {
             usable.sort { $0.chroma < $1.chroma }

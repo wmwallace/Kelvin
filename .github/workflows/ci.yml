@@ -59,15 +59,21 @@ jobs:
     name: App + perception (MLX)
     runs-on: macos-15
     timeout-minutes: 45
-    # NOT REQUIRED TO MERGE, and honestly labelled as such rather than quietly ignored.
+    # `continue-on-error` REMOVED, 30 July 2026, and the reason it had to go is worth keeping.
     #
-    # Xcode 16 moved the Metal compiler into a separately-downloadable component, and this project
-    # has already lost time to exactly that (`xcodebuild -downloadComponent MetalToolchain`, ~840 MB).
-    # Whether a GitHub runner image ships it is not something that can be verified from a laptop, so
-    # this job reports rather than blocks until someone has watched it pass. Once it is green
-    # consistently, drop this line and add it to the branch protection rules — an informational job
-    # that stays informational forever is a job nobody reads.
-    continue-on-error: true
+    # It was added as a hedge on whether a GitHub runner image ships the Metal compiler — a thing that
+    # genuinely cannot be verified from a laptop. What it actually did was hide a compile error for
+    # **eleven consecutive pushes**, `050ce23` (the published v0.3.0) among them, while `gh run list`
+    # printed `completed success` the whole time. The failure was never Metal; it was the Swift-6
+    # concurrency divergence between this toolchain and the local one, and the only job that surfaced
+    # it was CodeQL — 36 minutes later, and red so often that nobody read it either.
+    #
+    # The comment here predicted its own fate: "an informational job that stays informational forever
+    # is a job nobody reads." Green on the app build since `4bb8af6`.
+    #
+    # ⚠️ This makes the RUN fail when the app fails. It does not make the job **required to merge** —
+    # that is a branch-protection setting on GitHub and is the owner's to change. Until it is added
+    # there, a red app job blocks nothing; it just stops lying about being green.
 
     steps:
       - uses: actions/checkout@v4
