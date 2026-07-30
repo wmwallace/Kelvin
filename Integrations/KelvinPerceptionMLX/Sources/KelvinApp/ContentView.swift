@@ -39,6 +39,77 @@ enum Theme {
     static func ui(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
         .system(size: size, weight: weight)
     }
+
+    // MARK: - Glass
+    //
+    // **The one rule: glass never touches the photograph.**
+    //
+    // Translucency is a colour cast. A material behind the canvas would pull whatever is underneath
+    // it — the desktop, another window, the Dock — through the surround the eye uses as its
+    // reference while judging a grade, and it would do it differently depending on what was open
+    // behind Kelvin. So the canvas and its immediate surround stay flatly opaque, forever, and the
+    // glass goes on the chrome that floats away from the image: the header, the panel, the footer.
+    // That is not a compromise on the look; it is the difference between a darkroom and a lightbox.
+    //
+    // Real `Material` rather than a translucent fill, because the ask was an app that looks like
+    // Apple built it and this is the actual mechanism — backdrop blur plus vibrancy, matched to the
+    // system, adapting to what is behind the window.
+
+    /// The floating-chrome material. Behind the panel and the header.
+    static let glassSurface: Material = .regularMaterial
+    /// Lighter, for cards sitting ON the panel — a second level of the same idea.
+    static let glassCard: Material = .ultraThinMaterial
+
+    /// **The signature.** A hairline lit along the blackbody curve — warm at one end, daylight
+    /// through the middle, cool at the other — on the top edge of a floating surface.
+    ///
+    /// This is Kelvin's own physics used as an edge light rather than as a decoration: the same
+    /// 2700K → 5500K → 9000K ramp that the temperature rail is built from, the app is named after,
+    /// and the icon draws. A glass panel in any other app has a plain white rim; this one catches
+    /// light the colour of the thing the product measures.
+    ///
+    /// Kept to a single hairline and to top edges only. It is the one loud gesture in the pass, and
+    /// it earns that by being one pixel tall.
+    static let rimLight = LinearGradient(
+        colors: [warm.opacity(0.55), neutral.opacity(0.32), cool.opacity(0.5)],
+        startPoint: .leading, endPoint: .trailing)
+
+    /// A softer version for card edges, where a full-strength rim on every box would become noise.
+    static let rimLightSoft = LinearGradient(
+        colors: [warm.opacity(0.22), neutral.opacity(0.13), cool.opacity(0.2)],
+        startPoint: .leading, endPoint: .trailing)
+}
+
+/// A floating chrome surface: material, a hairline rim lit along the colour-temperature curve, and
+/// nothing else.
+///
+/// A `ViewModifier` rather than a copied stack of modifiers, so "what a floating surface looks like"
+/// has one definition and the rim cannot drift out of agreement with itself across four call sites.
+struct GlassSurface: ViewModifier {
+    var material: Material = Theme.glassSurface
+    var cornerRadius: CGFloat = 0
+    var rim: LinearGradient = Theme.rimLight
+    /// Where the rim sits. A panel is lit along its top; a footer sits below the photograph and is
+    /// lit along the edge that faces it.
+    var edge: VerticalAlignment = .top
+
+    func body(content: Content) -> some View {
+        content
+            .background(material)
+            .overlay(alignment: edge == .top ? .top : .bottom) {
+                Rectangle().fill(rim).frame(height: 1)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+    }
+}
+
+extension View {
+    func glassSurface(material: Material = Theme.glassSurface,
+                      cornerRadius: CGFloat = 0,
+                      rim: LinearGradient = Theme.rimLight,
+                      edge: VerticalAlignment = .top) -> some View {
+        modifier(GlassSurface(material: material, cornerRadius: cornerRadius, rim: rim, edge: edge))
+    }
 }
 
 /// Motion in a darkroom: enough to say that something changed, never enough to look at.
@@ -5283,7 +5354,10 @@ struct ContentView: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
-        .background(Theme.base)
+        // The title bar is hidden, so this strip IS the window's top edge — the first thing the eye
+        // lands on and the right place for the material to announce itself.
+        .glassSurface(edge: .bottom)
+
     }
 
     // MARK: Empty state — the scale is the hero
@@ -5538,17 +5612,43 @@ struct ContentView: View {
             if panelCollapsed {
                 canvasColumn
             } else {
-                HSplitView {
+                // NOT `HSplitView`, because it would not do as it was told.
+                //
+                // Asked for twice — "like the smaller panel size to be the default", then "still
+                // larger than I like" — and `idealWidth: 280` did not produce 280. `HSplitView`
+                // treats an ideal width as a hint and divides the leftover between its panes, so at
+                // the 940 pt minimum window the panel took about 470 pt whatever it was asked for.
+                // A plain `.frame(width:)` gets the number honoured but takes the drag away, which
+                // was the complaint before that ("you have to click a button not drag").
+                //
+                // An `HStack` with its own handle gets both, plus the thing neither `HSplitView`
+                // arrangement could do: **the width is remembered**. Dragging the panel is a
+                // statement about how someone works, and making them repeat it every morning is the
+                // mistake `FilmstripFold` exists to avoid.
+                HStack(spacing: 0) {
                     canvasColumn
-                    // RESIZABLE, not pinned at 360. It was a fixed width, which meant the divider
-                    // `HSplitView` draws could not move — reported as "you have to click a button,
-                    // not drag", and that was the honest description of a split view with nothing
-                    // to split. A range makes the divider do what a divider on a Mac does, and
-                    // dragging it to the left edge is a second, discoverable way to get the room
-                    // back without knowing a shortcut exists.
+                    panelDivider
                     sidebar
-                        .frame(minWidth: 300, idealWidth: 360, maxWidth: 560)
-                        .background(Theme.surface)
+                        .frame(width: panelWidth)
+                        // NO `.clipped()` HERE, and that is the lesson rather than an omission.
+                        //
+                        // The panel was narrowed to 280 without the panel's *contents* being made to
+                        // work at 280 — the slider rows, the mask grid, the repair toggles all still
+                        // wanted their old width. Clipping turned that overflow into a clean cut
+                        // straight through every control: "Fusion +55" halved, "Backgr…", a sliced
+                        // "4 SPOTS", sliders running off the edge. It looked like a rendering fault,
+                        // and it was rightly rejected on sight.
+                        //
+                        // Clipping hides a layout problem instead of solving one. The width now
+                        // starts where the contents actually fit; making it genuinely narrow is a
+                        // pass over those controls, not a smaller number here.
+                        // Glass, and a rim lit along the temperature curve. The panel is the largest
+                        // piece of chrome and it sits beside the photograph rather than under it, so
+                        // it is the right place for the material to read.
+                        .background(Theme.glassSurface)
+                        .overlay(alignment: .leading) {
+                            Rectangle().fill(Theme.rimLight).frame(width: 1)
+                        }
                 }
             }
         }
@@ -5575,6 +5675,68 @@ struct ContentView: View {
     /// is telling you how they work, and making them say it again every morning is the same mistake
     /// the filmstrip's fold made before `FilmstripFold` existed.
     @AppStorage("panel.collapsed") private var panelCollapsed = false
+
+    /// How wide the edit panel is, in points, remembered between launches.
+    ///
+    /// **300 by default**, down from the 360 it was pinned at when the width could not be changed at
+    /// all.
+    ///
+    /// 300 specifically, and not a round guess: while the panel was briefly an `HSplitView` pane
+    /// with `minWidth: 300`, that lower bound is the size it got dragged to and kept — "before you
+    /// started editing the panel that was the smallest size that i liked, and you could drag to that
+    /// size as the minimum". So the size that was reached by dragging is now the size it opens at,
+    /// and the range still goes narrower for anyone who wants it.
+    ///
+    /// Clamped on the way in as well as on the way out, so a value edited by hand in defaults — or
+    /// left behind by a future change to the bounds — cannot produce a panel that swallows the
+    /// window or one too narrow to read.
+    /// 360 is where the panel's contents currently fit. Narrower is a content problem, not a number.
+    @AppStorage("panel.width") private var panelWidth: Double = 360
+
+    /// The lower bound is 340 because that is the narrowest the *existing* controls survive. It was
+    /// briefly 260, which produced a panel whose every row was sliced off at the edge. Lower it when
+    /// the controls inside can take it, and not before.
+    private static let panelWidthRange: ClosedRange<Double> = 340...560
+
+    /// The width the current drag began at. Nil when no drag is in flight.
+    @State private var panelWidthStart: Double?
+
+    /// The drag handle between the photograph and the panel.
+    ///
+    /// Two points of hairline with a wider invisible grab area, because a divider that is as easy to
+    /// grab as it is to see would have to be thick enough to be furniture. `onHover` swaps the
+    /// cursor so it advertises itself the way a Mac divider does.
+    private var panelDivider: some View {
+        Rectangle()
+            .fill(Theme.hairline)
+            .frame(width: 1)
+            .overlay(
+                Rectangle()
+                    .fill(Color.clear)
+                    .frame(width: 10)
+                    .contentShape(Rectangle())
+                    .onHover { inside in
+                        if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+                    }
+                    .gesture(
+                        DragGesture(minimumDistance: 1)
+                            .onChanged { value in
+                                // Anchored to the width the drag STARTED at. `translation` is
+                                // cumulative from the start of the gesture, so applying it to the
+                                // live width on every change compounds it and the panel flies to a
+                                // bound after a few pixels of movement.
+                                let start = panelWidthStart ?? panelWidth
+                                if panelWidthStart == nil { panelWidthStart = start }
+                                // Dragging left widens the panel, hence the subtraction: the handle
+                                // sits on the panel's leading edge.
+                                let proposed = start - value.translation.width
+                                panelWidth = min(max(proposed, Self.panelWidthRange.lowerBound),
+                                                 Self.panelWidthRange.upperBound)
+                            }
+                            .onEnded { _ in panelWidthStart = nil }
+                    )
+            )
+    }
 
     private func togglePanel() {
         withAnimation(Motion.gated(Motion.standard, reduceMotion)) {
@@ -5763,6 +5925,8 @@ struct ContentView: View {
                                 .font(.system(size: 10))
                             Text("Overlay")
                                 .font(Theme.ui(10, appState.isOverlayShowing ? .semibold : .regular))
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                         }
                         .foregroundColor(appState.isOverlayShowing ? Theme.glow : Theme.inkDim)
                         .padding(.horizontal, 7).padding(.vertical, 3)
@@ -5878,6 +6042,12 @@ struct ContentView: View {
                 }
             }
             HStack(spacing: 10) {
+                // The row SCROLLS rather than squeezing. Now that each label holds its own width
+                // (see `toolbarLabel`), a narrow window would otherwise push the right-hand buttons
+                // off the edge with no way to reach them. Export stays outside the scroller because
+                // it is the one button that must never be the one that got pushed off.
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
                 // Discoverable way to bring in a photo from a different folder. The filmstrip only
                 // ever shows the folder you arrived from, so without this the only routes out were
                 // ⌘O or a drag — neither of them visible.
@@ -5951,7 +6121,10 @@ struct ContentView: View {
                     .gesture(DragGesture(minimumDistance: 0)
                         .onChanged { _ in if !appState.showingOriginal { appState.showingOriginal = true } }
                         .onEnded { _ in appState.showingOriginal = false })
-                Spacer()
+                    }
+                    .padding(.trailing, 4)
+                }
+                Spacer(minLength: 0)
                 Button(action: openExportPanel) {
                     toolbarLabel(appState.exportOneButtonLabel, filled: true)
                 }
@@ -5960,8 +6133,9 @@ struct ContentView: View {
             }
         }
         .padding(20)
-        .background(Theme.base)
-        .overlay(alignment: .top) { Rectangle().fill(Theme.hairline).frame(height: 1) }
+        // Rim on the TOP edge here, unlike the header: this strip sits below the photograph, so the
+        // lit edge is the one facing it. The light in this app always faces the picture.
+        .glassSurface(edge: .top)
     }
 
     /// Deliberately still text-only, unlike every other button in this pass.
@@ -5974,6 +6148,13 @@ struct ContentView: View {
         Text(text)
             .font(Theme.ui(12, .semibold))
             .foregroundColor(filled ? Theme.base : Theme.ink)
+            // ONE LINE, ALWAYS — the same rule as `lookChip`, and here it prevents something far
+            // uglier. Narrow the window and SwiftUI squeezed these buttons rather than letting the
+            // row overflow, so "Export full-res" wrapped to one character per line and the toolbar
+            // became a wall of vertical text. A button's label is not a paragraph; it has one width
+            // and the layout has to work around it.
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .padding(.horizontal, 16).padding(.vertical, 9)
             .background(
                 Capsule().fill(filled ? Theme.glow : Theme.surface2)
@@ -6133,6 +6314,14 @@ struct ContentView: View {
             Text(look.name)
                 .font(Theme.ui(11, on ? .semibold : .regular))
                 .foregroundColor(on ? Theme.base : Theme.ink)
+                // ONE LINE, ALWAYS. Narrow the panel and "Golden hour", "Chrome slide" and
+                // "Vintage warm" wrapped *inside* their capsules, so those chips became two lines
+                // tall while their neighbours stayed one — a row of pills at two different heights,
+                // which reads as a layout fault rather than a narrow panel. `FlowRow` already knows
+                // how to move a chip to the next row; the chip's job is to have one honest width and
+                // let it.
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
                 .padding(.horizontal, 11).padding(.vertical, 6)
                 .background(
                     Capsule().fill(on ? Theme.glow : Theme.surface2)
@@ -6150,9 +6339,14 @@ struct ContentView: View {
         HStack(spacing: 5) {
             Image(systemName: icon).font(.system(size: 10))
             Text(text).font(Theme.ui(11, .semibold))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
         }
         .foregroundColor(enabled ? Theme.ink : Theme.inkFaint)
-        .padding(.horizontal, 12).padding(.vertical, 6)
+        // Tighter than the 12 it was. Three of these — Undo, Redo, Reset sliders — sit on one row,
+        // and at a 280 pt panel the horizontal padding is the difference between the row fitting and
+        // the row being clipped.
+        .padding(.horizontal, 9).padding(.vertical, 6)
         .background(
             RoundedRectangle(cornerRadius: 7).fill(Theme.surface2.opacity(enabled ? 1 : 0.4))
                 .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.hairline, lineWidth: 1))
@@ -6771,22 +6965,33 @@ struct CandidateRow: View {
                     .clipShape(RoundedRectangle(cornerRadius: 7))
                     .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.hairline, lineWidth: 1))
 
+                // THE MIDDLE COLUMN IS THE ONE THAT GIVES. A row is a 62 pt thumbnail, a name, a
+                // line of numbers and a temperature — and in a 300 pt panel there is not room for
+                // all of it at natural width. Without saying which part yields, SwiftUI shared the
+                // shortfall out and pushed the temperature off the edge, so the panel looked cut in
+                // half. The name and the numbers truncate; the temperature does not, because a
+                // half-drawn "as-shot" is worse than a shortened signature.
                 VStack(alignment: .leading, spacing: 5) {
                     Text(candidate.label)
                         .font(Theme.ui(14, .semibold))
                         .foregroundColor(isSelected ? Theme.ink : Theme.inkDim)
+                        .lineLimit(1)
                     Text(signature)
                         .font(Theme.mono(10)).foregroundColor(Theme.inkFaint)
                         .lineLimit(1)
+                        .truncationMode(.tail)
                 }
-                Spacer()
+                .frame(maxWidth: .infinity, alignment: .leading)
                 VStack(alignment: .trailing, spacing: 5) {
                     Circle().fill(temp.map(KelvinScale.color) ?? Theme.inkFaint)
                         .frame(width: 9, height: 9)
                         .overlay(Circle().stroke(Theme.hairline, lineWidth: 1))
                     Text(temp.map { "\(Int($0))K" } ?? "as-shot")
                         .font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
+                .layoutPriority(1)
             }
             .padding(9)
             .background(
