@@ -65,6 +65,34 @@ public enum FaceSkin {
         return found.map(\.boundingBox)
     }
 
+    // ⛔ **"SKIP THE VISION FACE READ WHEN NOBODY IS IN FRAME" WAS MEASURED AND REJECTED.**
+    //
+    // It was a standing to-do on the strength of a figure that turns out to be wrong. The bench
+    // reported a "no face read (floor)" of 87 ms against a 182 ms candidate stage, which read as an
+    // 87 ms prize — but that floor is measured on the SERIAL arrangement while the stage runs
+    // concurrently, so the two were never comparable. Timed directly on a 768 px proxy, best of five:
+    //
+    //     landscape, 0 faces    detect =  16.7 ms
+    //     portrait,  3 faces    detect = 626.6 ms
+    //
+    // The pass is cheap precisely when it finds nothing, and expensive only when there are faces —
+    // which is the case that has to run anyway. So the real prize is **16.7 ms on frames with no
+    // people**, a fifth of what the item assumed.
+    //
+    // The gate was also implemented and validated first: across 78 corpus entries (13 photographs,
+    // three shoots, six degradations each) the model's `subject.type == person` and this detector
+    // agreed every time — 36 both-yes, 42 both-no, zero misses in either direction — and the corpus
+    // scores came back byte-identical on all 702 per-image values, because every use of the reading
+    // in `AestheticEvaluator.score` is gated on `faceCount > 0`.
+    //
+    // It was still reverted. 16.7 ms is not worth making skin quality depend on the model's word: a
+    // missed face silently drops the skin and subject terms from the aesthetic score, so a style that
+    // damages skin stops being penalised for it. And the model is the least reliable part of this
+    // pipeline — measured in the same session labelling a lakeside evening "night", reporting
+    // `animal` on two shoreline landscapes with no animal in them, and naming `color-cast` on zero of
+    // nine frames that definitely had one. Spend a measurement to save 16.7 ms and the trade is the
+    // wrong way round.
+
     /// Meter skin inside boxes that have already been found. Touches no Vision, so it is safe to
     /// run concurrently and cheap to repeat per candidate.
     public static func meter(in image: CIImage, faces: [CGRect]) -> Reading {
