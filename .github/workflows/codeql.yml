@@ -18,14 +18,24 @@
 name: CodeQL
 
 on:
-  push:
-    branches: [main]
   pull_request:
   schedule:
     # Weekly, matching what default setup was doing. Deliberately off the hour: scheduled runs pile
     # up on :00 across all of GitHub and get queued behind the crowd.
     - cron: "17 5 * * 1"
   workflow_dispatch:
+
+# NO `push` TRIGGER, deliberately. A Swift analysis takes ~50 minutes, and with `cancel-in-progress`
+# below a run started by one push to main is killed by the next one — so on a working session of
+# several small commits it mostly produced cancelled runs, while making every push feel like it had
+# to be timed around the scanner. Coverage is unchanged in substance: pull requests are scanned
+# before merge, the weekly cron scans `main` regardless of how it got there (which is what GitHub's
+# own default setup did), and `workflow_dispatch` runs it on demand before a release.
+#
+# The trade is that a direct push to main is not scanned until the following Monday. That is
+# acceptable for this repo's branch policy — small changes go straight to main, anything substantial
+# goes through a PR and is therefore scanned — but it is a real trade, so put the trigger back if
+# direct pushes ever stop being small.
 
 permissions:
   contents: read
