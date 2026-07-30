@@ -55,11 +55,19 @@ public enum DegradationCorpus {
 
     /// Build the corpus into `outputDir`: `reference/` (the originals), `source/` (degraded
     /// variants), and `manifest.json`. Returns the manifest.
+    ///
+    /// - Parameter longEdge: cap the long edge of every reference and source. **Use it.** A corpus
+    ///   built from 60 MP frames cannot run on every commit, which is the whole point of the
+    ///   harness (docs/EVALUATION.md) — the evaluator renders every style on every entry, and it
+    ///   does that at whatever size the corpus was written at. Reference and sources are capped
+    ///   together, so the ΔE target is unaffected: both sides of the comparison move identically.
+    ///   Nil keeps full resolution.
     @discardableResult
     public static func build(
         goodPhotos: [URL],
         degradations: [Degradation] = standard,
-        outputDir: URL
+        outputDir: URL,
+        longEdge: Int? = nil
     ) throws -> CorpusManifest {
         let fm = FileManager.default
         let refDir = outputDir.appendingPathComponent("reference")
@@ -70,7 +78,12 @@ public enum DegradationCorpus {
         var entries: [CorpusManifest.Entry] = []
         for photo in goodPhotos.sorted(by: { $0.path < $1.path }) {
             let stem = photo.deletingPathExtension().lastPathComponent
-            let good = try ImageDecoder.decode(url: photo)
+            // Resized BEFORE degrading, not after: a degradation is a recipe, and applying it to
+            // the frame the corpus will actually be scored on keeps the source an exact render of
+            // the reference. Resizing afterwards would resample the two independently and put a
+            // small, unowned difference between them on every entry.
+            var good = try ImageDecoder.decode(url: photo)
+            if let longEdge { good = PerceptionProxy.downsample(good, maxEdge: longEdge) }
 
             // Reference = the original, normalised to PNG so metric sampling is format-stable.
             let refRel = "reference/\(stem).png"

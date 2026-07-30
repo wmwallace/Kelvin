@@ -39,6 +39,18 @@ public enum CandidateCurator {
     /// How different two candidates must be to both earn a place, in the distance below.
     public static let minimumSeparation = 12.0
 
+    /// Whether a candidate clears the craft floor — the one reason curation ever calls a look
+    /// *unusable*, as opposed to merely not making the four slots.
+    ///
+    /// Exposed because those two are worth telling apart and a list of what got shown cannot. A
+    /// report that says "four of eight dropped" on every frame is describing the slot cap and
+    /// reads as a verdict; "this style has a real defect on this photograph" is a verdict. The
+    /// faithful rendering is exempt, and that exemption is the rule rather than an edge case —
+    /// see `select`.
+    public static func passesFloor(_ candidate: Scored) -> Bool {
+        candidate.score.overall >= qualityFloor || candidate.recipe.id == faithfulStyleID
+    }
+
     /// Pick the set to show, in the engine's own order.
     ///
     /// The score is used to **demote, never to promote**. That distinction is the whole design and
@@ -61,8 +73,7 @@ public enum CandidateCurator {
         // exempt from the quality floor that culls the rest. A frame difficult enough that even the
         // faithful read trips a defect is exactly the frame where you most want to see it and
         // decide for yourself, rather than being handed only stylised alternatives.
-        let isFaithful = { (c: Scored) in c.recipe.id == faithfulStyleID }
-        let clean = candidates.filter { $0.score.overall >= qualityFloor || isFaithful($0) }
+        let clean = candidates.filter(passesFloor)
         let pool = clean.isEmpty
             ? [candidates.max { $0.score.overall < $1.score.overall }!]   // least-bad, not nothing
             : clean

@@ -19,6 +19,51 @@ For every image in the corpus: run the engine, render the recipe, score the resu
 against reference edits, aggregate, and print a table. Fast enough to run on every
 commit.
 
+## What the report scores — read this before trusting a number
+
+The harness scores **the path the app ships**, and for a long time it did not. `Evaluator`
+ran `RecipeEngine.recipe()` — a single-recipe path nothing in the app calls — and built the
+candidate set with no mask measurements and rendered it with no mask bitmaps. Three
+consequences, all silent, all now fixed in `ShippedCandidates`:
+
+- **Every local edit rendered as nothing.** `Renderer` skips a mask it is handed no bitmap
+  for, so the corpus compared the *global half* of a recipe against an expert edit of the
+  whole photograph. The sky lever and the subject lift were in the recipe and not in the
+  pixels being scored.
+- **The recipe under test was not the recipe the app builds.** `subjectLuma`, `skyLuma` and
+  `subjectOrigin` were nil, so the engine's local decisions were made without their inputs.
+- **Nothing scored the candidate a photographer opens on.** This is how `natural` grew a
+  look — whites +28, blacks −24, an S-curve and a per-channel grade on a frame whose own
+  perception read was "gloomy" — with a green suite behind it. No number in the report was
+  a function of what Natural does.
+
+So the rows mean different things and are not interchangeable:
+
+| row | what it is |
+|---|---|
+| `engine-default` | **What a photographer opens on** — `CandidateCurator`'s resolution, rendered as export renders it. Read this first. It is the only row whose quality is unconditionally somebody's experience of the app, and the only one that falls when a single style drifts. |
+| `engine-best` | The best of the **curated** set. An **oracle** — it picks with the reference in hand, so it cannot fall when one style goes wrong, because another covers for it. A ceiling, never a gate. |
+| `engine-<style>` | One row per `CandidateStyle`. Where a taste change to one look shows up. |
+| `engine` | `RecipeEngine.recipe()`, the single-recipe path. **The app does not ship it.** Kept because `kelvin-cli engine` produces it and the flat-degradation over-correction is diagnosed on it. |
+
+Below the table, `opened in:` tallies which look each frame resolved to, and
+`culled (craft defect):` counts the styles the curator judged **unusable** — below its quality
+floor. That second line separates two things a ΔE cannot: a frame the engine has **no good
+answer** for, and one it answers **badly**.
+
+⚠️ **Do not report `droppedStyles` as a verdict.** Eight styles compete for four slots, so on a
+perfectly healthy photograph exactly four are unshown. The first version of this reporting
+printed `curator dropped: airy ×28, cool ×28, rich ×28, warm ×28` across a 28-entry corpus,
+which reads as the engine failing four ways on every frame and was entirely the cap. `culled`
+is the verdict; `dropped` is arithmetic. Both are in `report.json` per frame, alongside
+`defaultStyle` and `curatedStyles`.
+
+Generation and curation happen on the **768 px perception proxy**, because that is where the
+app makes those decisions — measuring at two sizes once let the canvas and the exported file
+resolve a shoot's style to different candidates, a `subjectLuma` difference of 0.007 moving
+an aesthetic score across the curator's 0.55 quality floor. Scoring then happens on the
+**frame's own resolution** with masks re-measured there, which is what export writes to disk.
+
 ## The corpus
 
 **Build it from your own photographs.** The academic retouching datasets — MIT-Adobe
@@ -32,9 +77,16 @@ folder of good photos and synthesises degraded versions of each — a known unde
 a colour cast, flatness — as the sources, keeping the original as the truth:
 
 ```
-kelvin-cli corpus-degrade --in-dir ~/Pictures/keepers --out-dir ./corpus
+kelvin-cli corpus-degrade --in-dir ~/Pictures/keepers --out-dir ./corpus --long-edge 1600
+kelvin-perceive label --in-dir ./corpus/source --out-dir ./corpus/perception
 kelvin-cli eval --corpus ./corpus
 ```
+
+**Pass `--long-edge`.** The evaluator renders every style on every entry at whatever size the
+corpus was written at, so a corpus of 60 MP frames is not something you can run per commit —
+which is the point of having it. References and sources are capped together, so the ΔE target
+does not move. The middle step is not optional either: without perception labels the report
+scores only the baselines and silently omits every engine row.
 
 The engine perceives a degraded source and must recover it toward the original; the
 harness scores ΔE against a known-good answer. This measures exactly what the
@@ -154,6 +206,11 @@ and take the answer seriously.
 
 ## Success criteria for v1
 
+**Read them off `engine-default`.** Every criterion below is a statement about what a
+photographer gets, so it is answered by the row that is what a photographer gets — not by
+`engine-best`, which chooses with the reference in hand and cannot fail these on the strength
+of one good style.
+
 - Beats camera JPEG on min-ΔE for **> 80%** of the corpus
 - Never clips highlights worse than the camera JPEG on **any** image
 - Beats naive-auto on min-ΔE for **> 70%** of the corpus
@@ -162,8 +219,9 @@ and take the answer seriously.
   candidates above a floor, so the picker offers a real choice rather than four
   near-identical looks
 
-That last one is easy to lose accidentally and it kills the product concept if lost. Add
-it as a test early.
+That last one is easy to lose accidentally and it kills the product concept if lost. It is
+pinned by `CandidateGenerationTests.testPairwiseRenderDivergence`, on the **curated** set
+rather than the raw style list — divergence is a property of what the photographer is shown.
 
 ## A caution on the target
 

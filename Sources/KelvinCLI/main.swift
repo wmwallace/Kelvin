@@ -99,6 +99,8 @@ func printUsage() {
     corpus-degrade options (commercial-clean: good photos → degraded sources + originals):
       --in-dir      Folder of good photographs you own (references). Required.
       --out-dir     Where to write reference/, source/, and manifest.json. Required.
+      --long-edge   Cap the long edge of references and sources. Recommended: eval renders
+                    every style on every entry, so a full-resolution corpus is not per-commit.
 
     eval options:
       --corpus          Directory containing a manifest.json. Required.
@@ -192,49 +194,50 @@ case "candidates":
 
     do {
         let image = try ImageDecoder.decode(url: URL(fileURLWithPath: inPath))
-        let stats = try ImageStatistics.compute(image)
         let perception = try PerceptionIO.load(from: URL(fileURLWithPath: perceptionPath))
-        let measured = LocalMasks.measure(in: image)
-        // One perception, one statistics pass → N recipes (parameter swaps, no re-perception).
-        let recipes = RecipeEngine.candidates(
+
+        // One perception, one statistics pass → N recipes (parameter swaps, no re-perception),
+        // scored and curated. Composed through `ShippedCandidates` so this command reports and
+        // writes the app's decision rather than a second implementation of it — and so the recipes
+        // on disk are measured on the same image the "curated" line below was decided from. They
+        // were not: this generated from the full frame and then curated from the proxy, which is
+        // precisely the two-measurement disagreement that once put a different recipe on the canvas
+        // than in the exported file.
+        let composed = try ShippedCandidates.compose(
+            for: image,
             perception: perception,
-            statistics: stats,
-            subjectLuma: measured.subjectLuma,
-            skyLuma: measured.skyLuma,
-            subjectOrigin: measured.subjectOrigin,
             iso: ExifReader.iso(url: URL(fileURLWithPath: inPath)),
             perceptionHash: PerceptionIO.hash(perception),
             generatedAt: ISO8601DateFormatter().string(from: Date())
         )
 
         try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
-        // Optional: --render also writes a preview PNG per candidate (masks applied).
+        // Optional: --render also writes a preview PNG per candidate, rendered the way export
+        // renders it — full-resolution pixels with masks measured at that resolution.
         let alsoRender = rest.contains("--render")
-        for recipe in recipes {
-            let base = recipe.id ?? recipe.label ?? "candidate"
-            try RecipeIO.save(recipe, to: outDir.appendingPathComponent(base + ".json"))
+        let fullMasks = alsoRender ? LocalMasks.measure(in: image).bitmaps : [:]
+        for candidate in composed.all {
+            let base = candidate.recipe.id ?? candidate.recipe.label ?? "candidate"
+            try RecipeIO.save(candidate.recipe, to: outDir.appendingPathComponent(base + ".json"))
             if alsoRender {
-                let rendered = Renderer.render(image, with: recipe, maskBitmaps: measured.bitmaps)
-                try ImageWriter.write(rendered, to: outDir.appendingPathComponent(base + ".png"), format: .png)
+                let rendered = ShippedCandidates.deliver(candidate.recipe, on: image,
+                                                         masks: fullMasks)
+                try ImageWriter.write(rendered, to: outDir.appendingPathComponent(base + ".png"),
+                                      format: .png)
             }
         }
-        // What the picker would actually show, after scoring and curation.
-        let scoredItems = recipes.compactMap { recipe -> CandidateCurator.Scored? in
-            let out = Renderer.render(image, with: recipe, maskBitmaps: measured.bitmaps)
-            guard let score = AestheticEvaluator.score(rendered: out) else { return nil }
-            return .init(recipe: recipe, score: score)
-        }
-        let curatedSet = CandidateCurator.select(from: scoredItems, count: 4)
-        print("curated: " + curatedSet.map {
+
+        print("curated: " + composed.curated.map {
             String(format: "%@ %.2f", $0.recipe.label ?? "?", $0.score.overall)
         }.joined(separator: ", "))
-        let dropped = recipes.compactMap { $0.label }
-            .filter { l in !curatedSet.contains { $0.recipe.label == l } }
-        if !dropped.isEmpty { print("dropped: " + dropped.joined(separator: ", ")) }
+        if !composed.droppedStyleIDs.isEmpty {
+            print("dropped: " + composed.droppedStyleIDs.joined(separator: ", "))
+        }
+        print("opens in: " + (composed.chosen?.recipe.label ?? "nothing"))
 
-        let labels = recipes.map { $0.label ?? "?" }.joined(separator: ", ")
-        let sky = measured.skyLuma.map { String(format: "sky luma %.2f", $0) } ?? "no sky"
-        print("Wrote \(recipes.count) candidates to \(outDir.path) [\(labels)] (\(sky))")
+        let labels = composed.all.map { $0.recipe.label ?? "?" }.joined(separator: ", ")
+        let sky = composed.masks.skyLuma.map { String(format: "sky luma %.2f", $0) } ?? "no sky"
+        print("Wrote \(composed.all.count) candidates to \(outDir.path) [\(labels)] (\(sky))")
     } catch {
         fail("\(error)")
     }
@@ -328,10 +331,17 @@ case "corpus-degrade":
     do {
         let photos = try BatchApply.imageFiles(in: URL(fileURLWithPath: inDir, isDirectory: true))
         guard !photos.isEmpty else { fail("no images in \(inDir)") }
+        let longEdge = value(for: "--long-edge", in: rest).flatMap(Int.init)
         let manifest = try DegradationCorpus.build(
             goodPhotos: photos,
-            outputDir: URL(fileURLWithPath: outDir, isDirectory: true)
+            outputDir: URL(fileURLWithPath: outDir, isDirectory: true),
+            longEdge: longEdge
         )
+        if longEdge == nil {
+            print("NOTE: built at full resolution. `eval` renders every style on every entry, so a "
+                + "corpus of\n      large frames will not run per commit — pass --long-edge 1600 "
+                + "unless you need\n      full-resolution pixels.")
+        }
         let photoCount = Set(manifest.entries.map { $0.id.components(separatedBy: "__").first ?? $0.id }).count
         print("Built degradation corpus: \(photoCount) photo(s) × \(DegradationCorpus.standard.count) "
             + "degradations = \(manifest.entries.count) entries in \(outDir)")
