@@ -115,6 +115,10 @@ struct PhotoSession {
     /// every switch when the whole point of this cache is that coming back is instant.
     let subjectInstances: [SubjectInstances.Instance]
     let subjectLuma: Double?
+    /// What produced this frame's subject mask. Cached with the rest because the mask cards read it
+    /// to decide whether to say "person", and a stale origin would have photo B's card describing
+    /// photo A's subject.
+    let subjectOrigin: SubjectMask.Origin?
     let skyLuma: Double?
     let healSpots: [HealSpot]
     let detectedSpotCount: Int

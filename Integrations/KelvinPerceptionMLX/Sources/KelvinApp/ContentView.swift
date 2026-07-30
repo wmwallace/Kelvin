@@ -2298,7 +2298,7 @@ final class AppState: ObservableObject {
             perception: perception,
             candidates: candidates, proxyMaskBitmaps: proxyMaskBitmaps,
             subjectInstances: subjectInstances,
-            subjectLuma: subjectLuma, skyLuma: skyLuma,
+            subjectLuma: subjectLuma, subjectOrigin: subjectOrigin, skyLuma: skyLuma,
             healSpots: healSpots, detectedSpotCount: detectedSpotCount,
             capture: capture, activeLookId: activeLookId,
             maskAdjustments: maskAdjustments, maskFeather: maskFeather,
@@ -2327,7 +2327,7 @@ final class AppState: ObservableObject {
         activeCraftIssues = []; lastCraftReading = nil; exhaustedFixes = []
         userMasks = []; paintingMaskId = nil; selectedMask = nil; pickingInstance = false
         subjectInstances = []; highlightedInstanceId = nil
-        proxyMaskBitmaps = [:]; brushCache = [:]
+        proxyMaskBitmaps = [:]; brushCache = [:]; subjectOrigin = nil
         healSpots = []; detectedSpotCount = 0; removeDust = false
         baseMasks = []; maskEnabled = [:]; maskStrength = [:]
         maskAdjustments = [:]; maskFeather = [:]; maskTightness = [:]; maskInvert = [:]
@@ -2345,7 +2345,7 @@ final class AppState: ObservableObject {
         proxyMaskBitmaps = s.proxyMaskBitmaps
         subjectInstances = s.subjectInstances
         highlightedInstanceId = nil
-        subjectLuma = s.subjectLuma; skyLuma = s.skyLuma
+        subjectLuma = s.subjectLuma; skyLuma = s.skyLuma; subjectOrigin = s.subjectOrigin
         healSpots = s.healSpots; detectedSpotCount = s.detectedSpotCount
         // Restored, not left standing. Every one of these was previously carried over from
         // whichever photo happened to be open before.
@@ -4810,7 +4810,8 @@ final class AppState: ObservableObject {
             // the requested style directly rather than failing the export: the photographer asked
             // for this look, and the curator having nothing to say is not a reason to skip a file.
             return RecipeEngine.candidate(perception: perception, statistics: stats, style: style,
-                                          subjectLuma: m.subjectLuma, skyLuma: m.skyLuma, iso: iso)
+                                          subjectLuma: m.subjectLuma, skyLuma: m.skyLuma,
+                                          subjectOrigin: m.subjectOrigin, iso: iso)
         }.value
         ResolvedRecipeStore.save(resolved, for: url, styleId: style.id, modelId: modelIdForCache)
         return resolved
@@ -4916,9 +4917,19 @@ final class AppState: ObservableObject {
     /// The ids of the auto-masks on the current candidate (e.g. "subject", "sky"), for the UI.
     var baseMaskIds: [String] { baseMasks.map { $0.id } }
 
-    /// Whether a person was segmented in this photo. Skin and Background masks are built from that
-    /// segmentation, so without it they can't do anything — the UI says so rather than going quiet.
+    /// Whether a SUBJECT was segmented in this photo — not necessarily a person.
+    ///
+    /// The name is kept because it is what every call site reads, but the doc used to say "a person"
+    /// and that was the mislabel behind a reported halo: `SubjectMask.subject` falls back to Vision's
+    /// generic salient-instance segmentation, which on a landscape returns the landscape. Subject and
+    /// Background masks are legitimate on any subject — a dog, a bird, a sea stack — so this stays
+    /// the gate for those. Anything that genuinely needs a *person* asks `subjectIsPerson`.
     var hasPerson: Bool { proxyMaskBitmaps["subject"] != nil }
+
+    /// Whether the subject mask came from person segmentation rather than the salient-object
+    /// fallback. The difference is invisible in the mask and decisive in the copy: a card that says
+    /// "the detected person" over a mask of a rock is how somebody ends up lifting a rock.
+    var subjectIsPerson: Bool { subjectOrigin == .person }
     var hasSky: Bool { proxyMaskBitmaps["sky"] != nil }
 
     /// A binding for the white-balance slider (absolute Kelvin; nil → as-shot shown as 5500).
@@ -6664,6 +6675,7 @@ struct ContentView: View {
                                 appState.seedingMaskId = (appState.seedingMaskId == m.id) ? nil : m.id
                             },
                             hasPerson: appState.hasPerson,
+                            subjectIsPerson: appState.subjectIsPerson,
                             hasSky: appState.hasSky,
                             people: appState.subjectInstances.filter { $0.kind == .person },
                             onSavePreset: { appState.promptSaveMaskPreset(m) },
@@ -8026,6 +8038,9 @@ struct UserMaskEditor: View {
     var isSeeding = false
     var toggleSeeding: () -> Void = {}
     var hasPerson = true
+    /// Whether that subject is actually a person. Drives the copy on the Subject and Skin cards,
+    /// which otherwise promise a person over a mask that may be a dog or a sea stack.
+    var subjectIsPerson = true
     /// The detected sky, for the same class of warning as `hasPerson`: a sky mask on a frame
     /// with no sky found is quietly inert, and quiet inertness is this session's most-reported
     /// bug shape.
@@ -8197,7 +8212,9 @@ struct UserMaskEditor: View {
                 ToneSlider(label: "Softness", value: $mask.selSoftness, range: 0...0.3, step: 0.005, unit: "", onChange: onChange)
             case .skin:
                 Text(mask.instanceId == nil
-                     ? "Skin tones within the detected person, fair across complexions."
+                     ? (subjectIsPerson
+                        ? "Skin tones within the detected person, fair across complexions."
+                        : "Skin tones — but no person was detected in this frame, so this has nothing to narrow.")
                      : "Skin tones within \(mask.instanceLabel ?? "this person") only — nobody else's.")
                     .font(Theme.mono(9)).foregroundColor(Theme.inkDim).fixedSize(horizontal: false, vertical: true)
                 // WHOSE skin, when the frame offers a choice. On a frame with three people a
@@ -8239,7 +8256,14 @@ struct UserMaskEditor: View {
                 Text("Everything except the detected subject — darken or desaturate it to make the subject pop.")
                     .font(Theme.mono(9)).foregroundColor(Theme.inkDim).fixedSize(horizontal: false, vertical: true)
             case .subject:
-                Text("The detected person — lift, model, or recover them without touching the scene.")
+                // SAYS WHAT WAS ACTUALLY FOUND. This read "The detected person" unconditionally,
+                // over a mask that is whatever Vision found most salient — and on the frame this was
+                // reported against, that was a sea stack. Applying the person-shaped preset to it
+                // (+0.3 EV) put a white rim around the rock, which is a surprising result only
+                // because the card had promised a person.
+                Text(subjectIsPerson
+                     ? "The detected person — lift, model, or recover them without touching the scene."
+                     : "The main object Kelvin could isolate — not a person in this frame, so lift it gently: a large exposure change through a soft edge shows as a halo.")
                     .font(Theme.mono(9)).foregroundColor(Theme.inkDim).fixedSize(horizontal: false, vertical: true)
             case .instance:
                 Text("Just this one — everything else in the frame is untouched.")
