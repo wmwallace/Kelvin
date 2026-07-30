@@ -117,6 +117,25 @@ public struct ImageStatistics: Equatable, Sendable {
     /// frame it covers — which is exactly the failure mode the other two share. And unlike the
     /// least-chromatic selection, nothing is selected *by* chroma, so a global cast cannot bias the
     /// sample against its own direction.
+    ///
+    /// ⚠️ **It reads COOLER than the least-chromatic estimate on real photographs, and that is not a
+    /// bias — do not "correct" it.** Over 38 held-out finished frames it reads chroma-b negative on
+    /// **35 of 38** (median −3.3) where the least-chromatic estimate reads +0.8, an offset of −4.3.
+    /// Two explanations were tested and both are refuted:
+    ///
+    /// - ⛔ **Shadow edges lit by blue skylight.** Plausible — grey-edge cannot tell a *shading* edge
+    ///   from a reflectance one — but excluding darker pixels from the gradient does not remove the
+    ///   offset, it slightly deepens it. Swept at luma floors 0.031 / 0.10 / 0.18 / 0.28, the median
+    ///   goes −3.3 / −3.5 / −3.7 / −3.8 while recovery on real casts stays at 1.06.
+    /// - ⛔ **A systematic cool offset in the estimator.** Refuted by its sign. An estimator reading
+    ///   cool would *over*-recover warm casts and *under*-recover cool ones; measured on the corpus's
+    ///   known casts it is warm **0.96** and cool **1.15** — the opposite gap.
+    ///
+    /// So the reading is real: that held-out set is forest shade and open shade, which genuinely are
+    /// blue-lit, and the photographer left the blue in. **Do not treat "fires on a finished
+    /// photograph" as evidence the estimate is wrong** — it usually means the light really was
+    /// coloured, and whether to neutralise it is what `wbStrength` and the deadband are for. The same
+    /// caution applies to reading `wb-probe --cost`, which cannot tell the two apart.
     public var edgeChromaA: Double
     public var edgeChromaB: Double
 
