@@ -5629,7 +5629,8 @@ struct ContentView: View {
                     canvasColumn
                     panelDivider
                     sidebar
-                        .frame(width: panelWidth)
+                        // The live value wins while dragging; the stored one the rest of the time.
+                        .frame(width: liveWidth ?? panelWidth)
                         // NO `.clipped()` HERE, and that is the lesson rather than an omission.
                         //
                         // The panel was narrowed to 280 without the panel's *contents* being made to
@@ -5645,7 +5646,19 @@ struct ContentView: View {
                         // Glass, and a rim lit along the temperature curve. The panel is the largest
                         // piece of chrome and it sits beside the photograph rather than under it, so
                         // it is the right place for the material to read.
-                        .background(Theme.glassSurface)
+                        //
+                        // A blackbody wash sits UNDER the material: warm at the top where the panel
+                        // meets the header, cooling as it falls. Two percent at its strongest — far
+                        // too little to name a colour, just enough that the glass has something to
+                        // refract and the panel stops reading as a flat grey slab. Without it a
+                        // material over a dark app on a dark desktop has nothing to blur and looks
+                        // identical to the opaque fill it replaced.
+                        .background {
+                            LinearGradient(colors: [Theme.warm.opacity(0.05),
+                                                    Theme.cool.opacity(0.035)],
+                                           startPoint: .top, endPoint: .bottom)
+                                .background(Theme.glassSurface)
+                        }
                         .overlay(alignment: .leading) {
                             Rectangle().fill(Theme.rimLight).frame(width: 1)
                         }
@@ -5698,6 +5711,10 @@ struct ContentView: View {
     /// the controls inside can take it, and not before.
     private static let panelWidthRange: ClosedRange<Double> = 340...560
 
+    /// The width while a drag is in flight, kept out of `UserDefaults` so the gesture stays smooth.
+    /// Nil when nothing is being dragged, at which point `panelWidth` is the truth.
+    @State private var liveWidth: Double?
+
     /// The width the current drag began at. Nil when no drag is in flight.
     @State private var panelWidthStart: Double?
 
@@ -5730,10 +5747,23 @@ struct ContentView: View {
                                 // Dragging left widens the panel, hence the subtraction: the handle
                                 // sits on the panel's leading edge.
                                 let proposed = start - value.translation.width
-                                panelWidth = min(max(proposed, Self.panelWidthRange.lowerBound),
-                                                 Self.panelWidthRange.upperBound)
+                                // INTO `@State` DURING THE DRAG, NOT `@AppStorage`.
+                                //
+                                // Reported as "little glitchey when draging", and this was why: an
+                                // `@AppStorage` write is a `UserDefaults` write, and this fires on
+                                // every frame of the gesture. Sixty synchronous defaults writes a
+                                // second, each one notifying every observer of that key, is a stutter
+                                // you can feel in the drag. The live value is local; the preference
+                                // is written once, on release, which is also the only moment it
+                                // means anything.
+                                liveWidth = min(max(proposed, Self.panelWidthRange.lowerBound),
+                                                Self.panelWidthRange.upperBound)
                             }
-                            .onEnded { _ in panelWidthStart = nil }
+                            .onEnded { _ in
+                                if let settled = liveWidth { panelWidth = settled }
+                                liveWidth = nil
+                                panelWidthStart = nil
+                            }
                     )
             )
     }
@@ -6994,13 +7024,23 @@ struct CandidateRow: View {
                 .layoutPriority(1)
             }
             .padding(9)
-            .background(
+            // The candidate rows are the one piece of content in the panel worth making of glass:
+            // they are cards ABOUT photographs, sitting on chrome, and they are what the eye goes to
+            // first. The selected one takes the rim light — the same warm-through-cool hairline the
+            // header and footer carry — so "chosen" is said in the app's own physics rather than
+            // with a second accent colour.
+            .background {
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(isSelected ? Theme.surface2 : Theme.surface.opacity(0.5))
+                    .fill(Theme.glassCard)
                     .overlay(RoundedRectangle(cornerRadius: 10)
-                        .stroke(isSelected ? Theme.glow : Theme.hairline.opacity(0.6),
-                                lineWidth: isSelected ? 1.5 : 1))
-            )
+                        .fill(isSelected ? Theme.glow.opacity(0.10) : Color.clear))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .strokeBorder(isSelected
+                                          ? AnyShapeStyle(Theme.rimLight)
+                                          : AnyShapeStyle(Theme.hairline.opacity(0.5)),
+                                          lineWidth: isSelected ? 1.5 : 1))
+            }
         }
         .buttonStyle(.plain)
         // The row is a thumbnail plus two lines of numbers, so unlabelled it announces as an image
