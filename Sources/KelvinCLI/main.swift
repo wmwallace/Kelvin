@@ -1001,9 +1001,14 @@ case "bench-load":
             }
             group.wait()
             prepared.sort { $0.0 < $1.0 }
+            // One detection for the whole set — eight candidates are eight gradings of one frame,
+            // so this was finding the same faces eight times. Metering stays per candidate because
+            // that is the part that must differ.
+            let faces = FaceSkin.detect(in: proxy)
             var kept = 0
             for (_, image, stats) in prepared {
-                _ = AestheticEvaluator.score(stats: stats, face: FaceSkin.read(in: image))
+                _ = AestheticEvaluator.score(stats: stats,
+                                             face: FaceSkin.meter(in: image, faces: faces))
                 kept += 1
             }
             return kept
@@ -1027,6 +1032,65 @@ case "bench-load":
             return kept
         }
         _ = time("EXIF header read") { ExifReader.iso(url: url) }
+    } catch { fail("\(error)") }
+
+case "proxy-compare":
+    // Is the 768 px measurement proxy the same picture whether it comes from the 60 MP decode or
+    // from the 1200 px proxy that was built anyway?
+    //
+    // The question is worth a command because the answer decides ~900 ms of every RAW open.
+    // `loadPhoto` builds both proxies from the full-resolution decode — for RAW, `fromFile` refuses
+    // (it would hand back the camera's JPEG) so each is a Lanczos pass over 60 megapixels, measured
+    // at 1326 ms and 937 ms. Deriving the smaller one from the larger is nearly free.
+    //
+    // The catch is that it is a two-step resample rather than a one-step, so the 768 px image is not
+    // bit-identical — and EVERY recipe number is measured on it. Cheaper is only interesting if the
+    // numbers do not move, so this prints what actually moves: the statistics, and the recipe the
+    // engine derives from them.
+    do {
+        let rest = Array(arguments.dropFirst())
+        guard let inPath = value(for: "--in", in: rest) else { fail("proxy-compare requires --in") }
+        let root = URL(fileURLWithPath: inPath)
+        var isDir: ObjCBool = false
+        FileManager.default.fileExists(atPath: root.path, isDirectory: &isDir)
+        let urls = isDir.boolValue ? ((try? BatchApply.imageFiles(in: root)) ?? []) : [root]
+        guard !urls.isEmpty else { fail("no readable images at \(inPath)") }
+
+        print("frame                     Δmean    Δblack    Δwhite   Δdyn   |  Δev  Δcon Δvib Δwht Δblk  same?")
+        var worstStat = 0.0, differing = 0
+        for url in urls {
+            guard let full = try? ImageDecoder.decode(url: url) else { continue }
+            let direct = PerceptionProxy.downsample(full, maxEdge: PerceptionProxy.defaultMaxEdge)
+            let large = PerceptionProxy.downsample(full, maxEdge: 1200)
+            let derived = PerceptionProxy.downsample(large, maxEdge: PerceptionProxy.defaultMaxEdge)
+            guard let a = try? ImageStatistics.compute(direct),
+                  let b = try? ImageStatistics.compute(derived) else { continue }
+
+            let p = Perception(
+                scene: .landscape,
+                subject: Perception.Subject(present: false, type: .none, count: .none, placement: .center),
+                lighting: Perception.Lighting(condition: .overcast, direction: .diffuse,
+                                              contrastRange: .low),
+                problems: [.flat], intent: .natural, confidence: 0.9)
+            let ra = RecipeEngine.recipe(perception: p, statistics: a).global
+            let rb = RecipeEngine.recipe(perception: p, statistics: b).global
+            let same = ra.exposureEV == rb.exposureEV && ra.contrast == rb.contrast
+                && ra.vibrance == rb.vibrance && ra.whites == rb.whites && ra.blacks == rb.blacks
+            if !same { differing += 1 }
+            worstStat = max(worstStat, abs(a.meanLuma - b.meanLuma))
+            print(String(format: "%@ %8.5f %9.5f %9.5f %6.4f  | %5.2f %4.0f %4.0f %4.0f %4.0f  %@",
+                         url.lastPathComponent.padding(toLength: 24, withPad: " ", startingAt: 0),
+                         a.meanLuma - b.meanLuma, a.blackPoint - b.blackPoint,
+                         a.whitePoint - b.whitePoint, a.dynamicRange - b.dynamicRange,
+                         ra.exposureEV - rb.exposureEV, ra.contrast - rb.contrast,
+                         ra.vibrance - rb.vibrance, ra.whites - rb.whites, ra.blacks - rb.blacks,
+                         same ? "yes" : "NO"))
+        }
+        print("")
+        print(String(format: "worst |Δ mean luma| %.5f · recipes differing: %d of %d",
+                     worstStat, differing, urls.count))
+        print("A recipe that differs on any lever means the cheap proxy changes the edit, and the")
+        print("900 ms is not free. Identical recipes across the set is the result that permits it.")
     } catch { fail("\(error)") }
 
 case "bench-focus":

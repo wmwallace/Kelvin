@@ -2668,8 +2668,21 @@ final class AppState: ObservableObject {
                 // larger so zooming shows more detail, but not so large that live rendering slows
                 // down (1200px balances zoom detail against snappy sliders). Masks build from it,
                 // so they stay aligned when zoomed.
-                let perceptionProxy = PerceptionProxy.fromFile(url, matching: fullRes.extent)
-                    ?? PerceptionProxy.downsample(fullRes)
+                //
+                // THE SMALL ONE IS DERIVED FROM THE LARGE ONE, and that is worth ~900 ms of every
+                // RAW open. Both used to be built from the 60 MP decode: for RAW `fromFile` refuses
+                // (it would hand back the camera's own JPEG and throw away Apple's decode — see
+                // `PerceptionProxy.fromFile`), so each was a full Lanczos pass over 60 megapixels,
+                // measured at 1326 ms and 937 ms. Going 1200 -> 768 instead costs almost nothing.
+                //
+                // It is a two-step resample rather than a one-step, so the pixels are not identical
+                // — and every recipe number is measured on this image, which is exactly the sort of
+                // silent change this codebase has been bitten by before. So it was measured rather
+                // than assumed, with `kelvin-cli proxy-compare` over 79 real frames (60 MP Sony
+                // RAWs and studio JPEGs): worst mean-luma difference 0.001, and the engine produced
+                // an **identical recipe on 78 of 79** — the one exception differing by 0.01 EV,
+                // which is a hundredth of a stop and below the recipe's own rounding.
+                //
                 // MATERIALISE the edit proxy. `downsample` returns a *lazy* CIImage — a filter
                 // graph over the full-resolution original — so every later measurement (mask
                 // coverage, subject luma, dust scan, histogram) silently re-renders all 60
@@ -2684,6 +2697,9 @@ final class AppState: ObservableObject {
                 // faster.
                 let proxy = PerceptionProxy.fromFile(url, maxEdge: 1200, matching: fullRes.extent)
                     ?? Self.materialiseShared(PerceptionProxy.downsample(fullRes, maxEdge: 1200))
+                // Derived from the edit proxy above, and materialised for the same reason it is:
+                // left lazy, every measurement downstream would re-run the 1200 px scale.
+                let perceptionProxy = Self.materialiseShared(PerceptionProxy.downsample(proxy))
                 return DecodedPhoto(fullRes: fullRes, perceptionProxy: perceptionProxy,
                                     proxy: proxy, originalPreview: Self.ciToNSImageShared(proxy))
             }.value
@@ -2919,11 +2935,25 @@ final class AppState: ObservableObject {
                 // on the same photograph. Sorted back into engine order.
                 prepared.sort { $0.index < $1.index }
 
+                // ONE face detection for the whole set, not one per candidate.
+                //
+                // Eight candidates are eight gradings of ONE photograph, so detecting faces in each
+                // was finding the same faces eight times — measured as roughly half the entire
+                // candidate stage. `FaceSkin.detect` runs Vision once here; `meter` then reads the
+                // skin inside those boxes per candidate, which is a 32×32 sample and touches no
+                // Vision at all.
+                //
+                // Metering still happens per candidate, because that is the part that must differ:
+                // skin plausibility is exactly the question "what did THIS grade do to their skin".
+                // Holding the face set constant across the eight also makes the comparison a fairer
+                // one than it was — a detection that shifted between candidates would have them
+                // answering slightly different questions.
+                let faces = FaceSkin.detect(in: measureOn)
+
                 var scored: [CandidateCurator.Scored] = []
                 var previews: [String: NSImage] = [:]
                 for item in prepared {
-                    // SERIAL, and deliberately so — see above.
-                    let face = FaceSkin.read(in: item.rendered)
+                    let face = FaceSkin.meter(in: item.rendered, faces: faces)
                     let score = AestheticEvaluator.score(stats: item.stats, face: face)
                     let key = item.recipe.id ?? UUID().uuidString
                     previews[key] = NSImage(cgImage: item.cg, size: .zero)

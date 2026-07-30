@@ -43,23 +43,40 @@ public enum FaceSkin {
     /// Detect faces and meter their skin brightness. Each face box is inset toward the centre
     /// (cheeks/forehead) to avoid hair and background at the edges, then averaged, area-weighted.
     public static func read(in image: CIImage) -> Reading {
-        let ext = image.extent
-        guard !ext.isInfinite, ext.width > 0, ext.height > 0 else { return .empty }
+        meter(in: image, faces: detect(in: image))
+    }
 
+    /// Where the faces are, as Vision's normalised bottom-left-origin boxes.
+    ///
+    /// Split out from `read` so a caller scoring **several gradings of one photograph** pays for
+    /// Vision once instead of once per grading. Candidate generation renders eight styles of the
+    /// same frame and scored each one with its own `read`, which is eight face detections of the
+    /// same faces — measured at roughly half the entire candidate stage.
+    ///
+    /// Reusing one detection across the eight is also the more correct comparison, not merely the
+    /// cheaper one: the candidates differ by grade, and a face set that shifted between them would
+    /// mean the skin score was answering a slightly different question for each.
+    public static func detect(in image: CIImage) -> [CGRect] {
+        let ext = image.extent
+        guard !ext.isInfinite, ext.width > 0, ext.height > 0 else { return [] }
         let request = VNDetectFaceRectanglesRequest()
         let handler = VNImageRequestHandler(ciImage: image, options: [:])
-        guard (try? handler.perform([request])) != nil,
-              let faces = request.results, !faces.isEmpty else {
-            return .empty
-        }
+        guard (try? handler.perform([request])) != nil, let found = request.results else { return [] }
+        return found.map(\.boundingBox)
+    }
+
+    /// Meter skin inside boxes that have already been found. Touches no Vision, so it is safe to
+    /// run concurrently and cheap to repeat per candidate.
+    public static func meter(in image: CIImage, faces: [CGRect]) -> Reading {
+        let ext = image.extent
+        guard !ext.isInfinite, ext.width > 0, ext.height > 0, !faces.isEmpty else { return .empty }
 
         var lumaSum = 0.0, weight = 0.0
         var rSum = 0.0, gSum = 0.0, bSum = 0.0     // area-weighted mean skin colour
         var faceLuma: [Double] = []                // every sampled face pixel, for range + clipping
-        for face in faces {
+        for b in faces {
             // Vision boxes are normalised, bottom-left origin — the same space as a CIImage — so no
             // vertical flip is needed to crop. Inset 18% per side onto skin.
-            let b = face.boundingBox
             let inset = 0.18
             let fx = b.minX + b.width * inset
             let fy = b.minY + b.height * inset

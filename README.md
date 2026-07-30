@@ -66,7 +66,7 @@ it will invent one, confidently, and you will never know which answers were gues
 - Auto-masks can be refined and inverted, but not brushed by hand
 - Nothing generative, on purpose
 
-479 tests — 390 over the core, 89 over the app. CI runs on every pull request.
+723 tests — 513 over the core, 210 over the app. CI runs on every pull request.
 
 <p align="center">
 <img src="docs/images/01-hero.webp" width="900" alt="The Kelvin window: the photograph, what the model made of the scene, the candidate list, the adjustment panel and the filmstrip">
