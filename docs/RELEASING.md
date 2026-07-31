@@ -93,9 +93,11 @@ itself must not be a 1.4 GB download nobody asked for. The plumbing:
   it is not a secret); `KELVIN_SPARKLE_PUBKEY` overrides it if the pair is ever regenerated.
 - **Appcast**: served from the domain (a few KB, permanent URL); the DMG itself is a GitHub
   release asset. Each release's appcast entry is signed with `sign_update` (same artifacts
-  directory). Pass the key as a *file* — `sign_update -f "<backup>/sparkle_private_key"`. Reading it
-  from the login Keychain raises an authorisation dialog, and with nobody to answer it the command
-  simply hangs rather than failing.
+  directory). Pass the key as a *file* by setting `KELVIN_SPARKLE_KEYFILE` to wherever your backup
+  of it lives — `scripts/make-delta.sh` has no default path, on purpose, because this repository is
+  public and where the signing key is kept does not belong in it. Reading the key from the login
+  Keychain instead raises an authorisation dialog, and with nobody to answer it the command simply
+  hangs rather than failing.
 - **Binary deltas**: required from the second release onwards, because with the weights inside a
   full update is a 1.4 GB download. `scripts/make-delta.sh` builds one; see the next section.
 

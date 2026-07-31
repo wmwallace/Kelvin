@@ -161,13 +161,26 @@ rm -rf "$VERIFY"
 # authorisation dialog, and when this runs without a visible session sign_update simply HANGS on it.
 # The backed-up copy of the private key is the reliable path. It is not in the repository and must
 # never be.
-KEYFILE="${KELVIN_SPARKLE_KEYFILE:-$HOME/Documents/Code/kelvin support/sparkle_private_key}"
-# An array, not a string: the backup lives in a directory with a space in its name, and unquoted
-# word splitting would hand sign_update two nonexistent paths.
-if [ -f "$KEYFILE" ]; then
+#
+# NO DEFAULT PATH HERE, deliberately. This file is public, and where the signing key is kept is not
+# something a public repository should say — it is not a secret in itself, but it is a free hint to
+# anyone who gets a foothold, and it costs nothing to withhold. Set it in the environment:
+#
+#   KELVIN_SPARKLE_KEYFILE="/path/to/sparkle_private_key" scripts/make-delta.sh …
+#
+# It also stops the script silently working on one machine and mysteriously falling through to the
+# Keychain on any other.
+KEYFILE="${KELVIN_SPARKLE_KEYFILE:-}"
+# An array, not a string: the key is likely to sit in a directory with a space in its name, and
+# unquoted word splitting would hand sign_update two nonexistent paths.
+if [ -n "$KEYFILE" ] && [ -f "$KEYFILE" ]; then
   KEY_ARGS=(-f "$KEYFILE")
+elif [ -n "$KEYFILE" ]; then
+  echo "make-delta.sh: KELVIN_SPARKLE_KEYFILE is set but there is no file at $KEYFILE." >&2
+  exit 1
 else
-  echo "  no key file at $KEYFILE — falling back to the Keychain, which may block on a prompt." >&2
+  echo "  KELVIN_SPARKLE_KEYFILE is not set — falling back to the Keychain, which raises an" >&2
+  echo "  authorisation prompt and will HANG if nobody is there to answer it." >&2
   KEY_ARGS=()
 fi
 echo "▸ Signing the delta…"
