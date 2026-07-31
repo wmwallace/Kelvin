@@ -470,63 +470,6 @@ case "similar-map":
         }
     } catch { fail("\(error)") }
 
-case "dust-map":
-    // Does this shoot have sensor dust, and where? Per-frame detection cannot answer that — it
-    // reports whatever small dark compact thing sits on a smooth field, which on a beach is kelp
-    // and on a street is a distant window. Dust is the thing that does not move between frames.
-    //
-    // Frames are grouped by ORIENTATION before the recurrence test: the same sensor position maps
-    // to different normalised image coordinates in a portrait frame than a landscape one, so
-    // mixing them would hide real dust. Aperture is reported alongside because dust is a
-    // depth-of-field effect — at f/2.8 a mote is too far out of focus to render at all, so a shoot
-    // full of wide-open frames can be perfectly clean AND perfectly dusty at the same time.
-    do {
-        let rest = Array(arguments.dropFirst())
-        guard let inDir = value(for: "--in-dir", in: rest) else { fail("dust-map requires --in-dir") }
-        let limit = value(for: "--limit", in: rest).flatMap(Int.init) ?? 40
-        let minFrames = value(for: "--min-frames", in: rest).flatMap(Int.init) ?? 3
-        var images = try BatchApply.imageFiles(in: URL(fileURLWithPath: inDir, isDirectory: true))
-        guard !images.isEmpty else { fail("no images in \(inDir)") }
-        images = Array(images.prefix(limit))
-
-        // orientation → (per-frame spot lists, apertures seen)
-        var byOrientation: [String: [[HealSpot]]] = [:]
-        var apertures: [String: [Double]] = [:]
-        var perFrame: [(String, Int, Double?)] = []
-        for url in images {
-            guard let image = try? ImageDecoder.decode(url: url) else { continue }
-            let landscape = image.extent.width >= image.extent.height
-            let key = landscape ? "landscape" : "portrait"
-            let spots = DustDetector.detect(in: image)
-            byOrientation[key, default: []].append(spots)
-            let f = ExifReader.fNumber(url: url)
-            if let f { apertures[key, default: []].append(f) }
-            perFrame.append((url.lastPathComponent, spots.count, f))
-        }
-
-        print("per-frame candidates (what the detector reports today):")
-        for (name, count, f) in perFrame {
-            print(String(format: "  %-22@ %3d  %@", name as NSString, count,
-                         (f.map { String(format: "f/%.1f", $0) } ?? "f/?") as NSString))
-        }
-
-        for (orientation, frames) in byOrientation.sorted(by: { $0.key < $1.key }) {
-            let total = frames.reduce(0) { $0 + $1.count }
-            let recurring = DustDetector.recurring(in: frames, minimumFrames: minFrames)
-            let aps = apertures[orientation] ?? []
-            let stopped = aps.filter { $0 >= 8 }.count
-            print("\n\(orientation): \(frames.count) frame(s), \(total) candidate(s), "
-                  + "\(stopped) at f/8 or smaller")
-            print("  recurring in ≥\(minFrames) frames: \(recurring.count)")
-            for s in recurring {
-                print(String(format: "    x=%.4f y=%.4f r=%.4f", s.x, s.y, s.radius))
-            }
-            if recurring.isEmpty && total > 0 {
-                print("  → every candidate was scene content: nothing held still between frames.")
-            }
-        }
-    } catch { fail("\(error)") }
-
 case "instances":
     // Debug/inspection: what SubjectInstances finds, and what it decided to call each one.
     // The naming is Vision's classifier over a crop, gated on precision and confidence, so when a
@@ -1003,7 +946,6 @@ case "bench-load":
         if only != "par" {
             _ = time("  masks (subject + sky)") { LocalMasks.measure(in: proxy) }
             _ = time("  subject instances") { SubjectInstances.detect(in: proxy) }
-            _ = time("  dust scan") { DustDetector.detect(in: proxy) }
             _ = time("  focus measure") { FocusMeasure.read(proxy) }
             _ = time("  face skin") { FaceSkin.read(in: proxy) }
         }
@@ -1018,8 +960,8 @@ case "bench-load":
         let visionSerial = { _ = LocalMasks.measure(in: proxy); _ = SubjectInstances.detect(in: proxy) }
         let jobs: [() -> Void] = unsafeAll
             ? [{ _ = LocalMasks.measure(in: proxy) }, { _ = SubjectInstances.detect(in: proxy) },
-               { _ = DustDetector.detect(in: proxy) }, { _ = FocusMeasure.read(proxy) }]
-            : [visionSerial, { _ = DustDetector.detect(in: proxy) }, { _ = FocusMeasure.read(proxy) }]
+               { _ = FocusMeasure.read(proxy) }]
+            : [visionSerial, { _ = FocusMeasure.read(proxy) }]
         let group = DispatchGroup()
         let lock = NSLock()
         var done = 0
@@ -2025,14 +1967,32 @@ case "sky-metrics":
     }
 
 case "heal":
-    // Auto-detect dust/spots and render the healed result (non-generative, non-destructive).
+    // Heal one or more spots the caller names, and render the result (non-generative,
+    // non-destructive). There is no detection any more — see `SpotHeal` for why — so the
+    // coordinates come from the caller, exactly as they come from a click in the app. This is
+    // how the heal path stays exercisable headlessly.
+    //
+    //   kelvin-cli heal --in p.jpg --out o.jpg --at 0.31,0.22 --at 0.55,0.40 [--radius 0.01]
     let rest = Array(arguments.dropFirst())
     guard let inPath = value(for: "--in", in: rest) else { fail("heal requires --in") }
     guard let outPath = value(for: "--out", in: rest) else { fail("heal requires --out") }
+    let healRadius = value(for: "--radius", in: rest).flatMap(Double.init) ?? 0.01
+    // `--at` may repeat, so this reads every occurrence rather than using `value(for:)`.
+    var healPoints: [CGPoint] = []
+    for (i, a) in rest.enumerated() where a == "--at" && i + 1 < rest.count {
+        let parts = rest[i + 1].split(separator: ",").compactMap { Double($0) }
+        guard parts.count == 2 else { fail("--at wants x,y in 0…1 (got \(rest[i + 1]))") }
+        healPoints.append(CGPoint(x: parts[0], y: parts[1]))
+    }
+    guard !healPoints.isEmpty else { fail("heal requires at least one --at x,y") }
     do {
         let image = try ImageDecoder.decode(url: URL(fileURLWithPath: inPath))
-        let spots = DustDetector.detect(in: image)
-        print("Detected \(spots.count) spot(s)")
+        let spots = healPoints.compactMap { SpotHeal.spot(in: image, at: $0, radius: healRadius) }
+        for (p, s) in zip(healPoints, spots) {
+            print(String(format: "  (%.3f, %.3f) r=%.4f → source offset (%+.4f, %+.4f)",
+                         p.x, p.y, s.radius, s.dx, s.dy))
+        }
+        print("Healed \(spots.count) of \(healPoints.count) spot(s)")
         var recipe = Recipe.neutral
         recipe.heal = spots
         try ImageWriter.write(Renderer.render(image, with: recipe), to: URL(fileURLWithPath: outPath))

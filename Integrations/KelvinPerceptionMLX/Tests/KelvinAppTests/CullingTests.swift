@@ -351,7 +351,7 @@ final class CullingTests: XCTestCase {
 
         let edit = SavedEdit(styleId: "natural", global: .neutral, userMasks: [], maskEnabled: [:],
                              maskStrength: [:], straighten: 0, hsl: [:], blackAndWhite: nil,
-                             removeDust: false, recipe: nil, savedAt: "2026-07-28T00:00:00Z",
+                             healSpots: nil, recipe: nil, savedAt: "2026-07-28T00:00:00Z",
                              contentHint: nil)
         EditStore.save(edit, for: photo)
         defer { EditStore.remove(for: photo) }

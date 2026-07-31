@@ -57,7 +57,9 @@ annotations are only about which of these Kelvin can honestly honour today.
 - Presets (`⇧P`) and profiles (`⇧B`) as panels
 - Copy / paste edit settings (`⌘C` / `⌘V`) — the batch apply redesign covers the same ground
 - Auto tone (`⇧A`), clipping view (`J`), white balance eyedropper (`W`)
-- Remove tool (`H`) and its modes — dust healing exists but has no tool mode
+- Remove tool modes (content-aware / clone / erase) — ~~`H`~~ **adopted 31 July 2026**: the heal
+  tool is a mode now, so `H` toggles it. Only the one mode, and the auto-detection it replaced is
+  gone (see `SpotHeal`)
 - Depth range masks — needs a depth source Vision does not give us
 - Slider nudge on hover with `↑`/`↓`
 

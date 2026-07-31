@@ -816,3 +816,63 @@ library that owns their files. Held because the three fixes above may make it un
 it is the one part of this that touches the promise in CLAUDE.md §3 — edits are keyed to a
 photograph, and staging changes where the photograph is. That mapping needs deciding before any code
 gets written, and it is the owner's call, not an implementation detail.
+
+---
+
+## D16 — Dust detection is deleted; healing becomes a tool you point · **Decided 31 July 2026**
+
+**Status:** done. `DustDetector` is gone, `SpotHeal` replaces it, the app has a heal tool.
+
+### What was wrong
+
+The owner's standing complaint was that dust detection "has never worked". It was measured, and it
+had not: on `2026-04-26 Cannon Beach`, four frames shot at f/11 on one body minutes apart returned
+**0, 0, 1 and 40 spots**. Sensor dust sits at a fixed position on the sensor stack, so real dust
+would have produced nearly the same list four times. That spread is proof the detector was reporting
+scene content — and the 40 was the `maxSpots` cap, hit on a portrait of a man on a beach.
+
+The UI on top of it made this worse rather than visible. One switch, "Remove dust spots", patched
+whatever the detector had found, all or nothing. At fit zoom a dust spot is a handful of pixels, so
+the user could not check the result; and the "Circle the spots on the photo" toggle that was
+supposed to let them **drew nothing at all** — `repairSpotOverlay` was written but never attached to
+the view tree. So the one control that could have exposed the detector's errors was itself dead.
+This is the failure `RegionGrow.minimumCoverage` already names: a control that appears to work and
+does nothing.
+
+### The decision
+
+Delete the detection. Keep the repair.
+
+The half of the detector that was always sound is choosing **where to clone from** — search outward
+in several directions, score each candidate on how well its colour matches the ring around the spot
+and how smooth it is. That survives as `SpotHeal.sourceOffset`. Finding the blemish, the part the
+machine was bad at, goes back to the photographer, who could already see it.
+
+**One deliberate change on the way across: smoothness became a cost, not a gate.** The detector
+could refuse a candidate it was unsure about — one less automatic fix, no harm done. A manual click
+cannot: the user pointed at something and asked for it to go. So the worst available patch still
+beats no patch, and the user judges the result.
+
+### What this does not change
+
+`HealSpot` is untouched, and so is the render path. Heals were always **references, not pixels**
+(RECIPE-SCHEMA #6) — a normalised centre, radius and source offset — so this is not a schema change
+and not generative editing (D10 stands). One click still survives a re-render at export resolution
+and still propagates across a shoot. That is what sensor dust needed all along; it just needed to be
+driven by someone's eye.
+
+### Measured / verified
+
+- Removing the per-load scan takes a Laplacian-and-integral-image pass off **every** proxy render.
+  It was part of what `bench-load` recorded as the second-biggest block.
+- `ExifReader.fNumber` went with it: its only caller was the `dust-map` diagnostic, and
+  `CaptureInfo.read` already reads the same EXIF key for everything else.
+- 562 core + 221 app tests green. Verified on the window, not just in tests: a planted blemish on
+  `_DSC6390` is removed in one click, the ring marks it, ⌥-click puts it back, and the heal survives
+  a relaunch from disk.
+
+### Left undone, deliberately
+
+No re-editing of a placed spot — no moving it, resizing it, or re-picking its source. Undo and
+delete only. This is a touch-up tool; if it turns out people want to nudge a patch, that is a
+selection model and canvas handles, and it should be asked for rather than assumed.

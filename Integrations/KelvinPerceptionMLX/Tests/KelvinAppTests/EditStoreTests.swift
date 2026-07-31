@@ -63,7 +63,9 @@ final class EditStoreTests: XCTestCase {
         let edit = SavedEdit(styleId: "warm", global: .neutral, userMasks: [mask],
                              maskEnabled: ["subject": false], maskStrength: ["subject": 60],
                              straighten: -1.4, hsl: ["blue": HSLAdjustment(h: 3, s: -12, l: 5)],
-                             blackAndWhite: nil, removeDust: true,
+                             blackAndWhite: nil,
+                             healSpots: [HealSpot(x: 0.31, y: 0.22, radius: 0.012,
+                                                  dx: 0.03, dy: -0.02)],
                              savedAt: "2026-07-24T10:00:00Z", contentHint: "abc123")
         EditStore.save(edit, for: url)
 
@@ -73,7 +75,8 @@ final class EditStoreTests: XCTestCase {
         XCTAssertEqual(restored.maskStrength, ["subject": 60])
         XCTAssertEqual(restored.straighten, -1.4, accuracy: 1e-9)
         XCTAssertEqual(restored.hsl, ["blue": HSLAdjustment(h: 3, s: -12, l: 5)])
-        XCTAssertTrue(restored.removeDust)
+        XCTAssertEqual(restored.healSpots?.count, 1, "the heal did not come back")
+        XCTAssertEqual(restored.healSpots?.first?.x ?? -1, 0.31, accuracy: 1e-9)
         XCTAssertEqual(restored.userMasks, [mask], "the mask came back changed")
     }
 
@@ -90,7 +93,7 @@ final class EditStoreTests: XCTestCase {
 
         EditStore.save(SavedEdit(styleId: nil, global: .neutral, userMasks: [], maskEnabled: [:],
                                  maskStrength: [:], straighten: 0, hsl: [:], blackAndWhite: nil,
-                                 removeDust: false, savedAt: "2026-07-24T10:00:00Z",
+                                 healSpots: nil, savedAt: "2026-07-24T10:00:00Z",
                                  contentHint: nil),
                        for: worked)
 
@@ -103,7 +106,7 @@ final class EditStoreTests: XCTestCase {
         let url = photo("/kelvin-tests/\(UUID().uuidString)/_DSC0002.ARW")
         EditStore.save(SavedEdit(styleId: nil, global: .neutral, userMasks: [], maskEnabled: [:],
                                  maskStrength: [:], straighten: 0, hsl: [:], blackAndWhite: nil,
-                                 removeDust: false, savedAt: "2026-07-24T10:00:00Z",
+                                 healSpots: nil, savedAt: "2026-07-24T10:00:00Z",
                                  contentHint: nil),
                        for: url)
         XCTAssertNotNil(EditStore.load(for: url))

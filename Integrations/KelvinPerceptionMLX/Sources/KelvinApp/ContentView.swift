@@ -480,6 +480,28 @@ final class AppState: ObservableObject {
         statusMessage = "Selected \(hit.label)."
     }
 
+    /// A click on the canvas while the heal tool is armed. `remove` is the ⌥-click path.
+    ///
+    /// Goes through the same `imageRect` / `viewToNorm` mapping as painting and the mask handles,
+    /// so healing honours zoom, pan and straighten exactly like everything else on the canvas.
+    /// The tool stays armed after a click — spot healing is a sequence of small corrections, and
+    /// disarming after each one would mean re-arming for every speck.
+    func healAt(_ loc: CGPoint, container: CGSize, pad: CGFloat = 24, remove: Bool = false) {
+        guard healToolActive else { return }
+        let rect = imageRect(in: container, pad: pad)
+        guard rect.width > 0, rect.height > 0 else { return }
+        let (nx, ny) = viewToNorm(loc, in: rect)
+        guard nx >= 0, nx <= 1, ny >= 0, ny <= 1 else { return }
+
+        if remove {
+            if !removeHealSpot(near: CGPoint(x: nx, y: ny)) {
+                statusMessage = "No patch there to remove"
+            }
+            return
+        }
+        healAt(CGPoint(x: nx, y: ny))
+    }
+
     /// Whether the brush takes coverage away instead of adding it.
     ///
     /// A mode on the tool rather than a property of the mask, because it is the same brush either
@@ -557,15 +579,76 @@ final class AppState: ObservableObject {
         brushRadius = min(0.35, max(0.02, brushRadius + delta))
     }
 
-    /// Sensor dust/spots detected once on load (normalised → resolution-independent, so the same
-    /// set heals the proxy preview, the full-res export, and every frame of a batch — dust sits at
-    /// a fixed sensor position across a whole shoot).
-    /// Readable so the canvas can ring them on hover; still only written here.
-    private(set) var healSpots: [HealSpot] = []
-    @Published var detectedSpotCount = 0
-    /// Opt-in: dust removal is off by default so a clean frame is never touched, and the user
-    /// decides when a spot is dust versus real detail.
-    @Published var removeDust = false { didSet { updateActiveRecipe() } }
+    func adjustHealRadius(by delta: Double) {
+        healRadius = min(0.08, max(0.003, healRadius + delta))
+    }
+
+    /// Heal at a normalised point. Returns false when the click could not become a spot, so the
+    /// caller can say so rather than leaving the user wondering.
+    ///
+    /// Sampled from the **proxy**, which is correct and is the whole point of the coordinates being
+    /// normalised: the source patch is chosen from the same picture the user is looking at, and the
+    /// resulting reference re-renders at export size without another search.
+    @discardableResult
+    func healAt(_ normalized: CGPoint) -> Bool {
+        guard let proxy = proxyCI else { return false }
+        guard let spot = SpotHeal.spot(in: proxy, at: normalized, radius: healRadius) else {
+            statusMessage = "Nothing to heal there — that click was outside the frame"
+            return false
+        }
+        healSpots.append(spot)
+        onDiscreteEdit()
+        statusMessage = healSpots.count == 1
+            ? "Healed 1 spot · ⌘Z to undo"
+            : "Healed \(healSpots.count) spots · ⌘Z to undo"
+        return true
+    }
+
+    /// Remove the spot nearest the click, if the click is actually on one. Used by the
+    /// alt-click-to-delete path.
+    ///
+    /// "Nearest within its own radius" rather than nearest outright, so an alt-click on empty
+    /// picture removes nothing instead of silently deleting a spot somewhere else in the frame.
+    @discardableResult
+    func removeHealSpot(near normalized: CGPoint) -> Bool {
+        var bestIndex: Int?
+        var bestDistance = Double.infinity
+        for (i, s) in healSpots.enumerated() {
+            let dx = s.x - normalized.x, dy = s.y - normalized.y
+            let d = (dx * dx + dy * dy).squareRoot()
+            // Radius is a fraction of the shorter edge while dx/dy here are fractions of each axis,
+            // so this is approximate. A generous 1.5× keeps a small spot clickable.
+            if d <= max(s.radius * 1.5, 0.01), d < bestDistance { bestDistance = d; bestIndex = i }
+        }
+        guard let i = bestIndex else { return false }
+        healSpots.remove(at: i)
+        onDiscreteEdit()
+        statusMessage = healSpots.isEmpty ? "Removed the last heal" : "Removed 1 heal"
+        return true
+    }
+
+    func clearHealSpots() {
+        guard !healSpots.isEmpty else { return }
+        healSpots.removeAll()
+        onDiscreteEdit()
+        statusMessage = "Cleared every heal"
+    }
+
+    /// Spots the user has healed, in normalised coordinates — so the same list repairs the proxy
+    /// preview, the full-res export, and every frame of a batch.
+    ///
+    /// These are placed by clicking, not detected. The detector that used to fill this array is
+    /// gone; see `SpotHeal` for the measurement that killed it.
+    @Published private(set) var healSpots: [HealSpot] = []
+
+    /// Whether the heal tool has the canvas: a click places a spot rather than doing whatever a
+    /// click normally does.
+    @Published var healToolActive = false
+
+    /// Heal size, as a fraction of the shorter edge. Small by default because this is for touch-ups
+    /// — a sensor mote, a stray hair, a bit of litter on the sand — and a too-large first click is
+    /// the one that makes the tool feel destructive.
+    @Published var healRadius = 0.012
 
     @Published var isProcessing = false
     @Published var statusMessage = "Drop a photo or a folder to read the light."
@@ -2209,7 +2292,7 @@ final class AppState: ObservableObject {
         SavedEdit(styleId: selectedCandidateId, global: edit, userMasks: userMasks,
                   maskEnabled: maskEnabled, maskStrength: maskStrength,
                   straighten: straighten, hsl: hsl, blackAndWhite: activeRecipe?.blackAndWhite,
-                  removeDust: removeDust,
+                  healSpots: healSpots.isEmpty ? nil : healSpots,
                   // The composed recipe, so this edit can be re-rendered without re-perceiving the
                   // photograph. See SavedEdit.recipe.
                   recipe: activeRecipe,
@@ -2248,7 +2331,7 @@ final class AppState: ObservableObject {
             || !userMasks.isEmpty
             || straighten != 0
             || !hsl.isEmpty
-            || removeDust
+            || !healSpots.isEmpty
             || activeLookId != nil
             || !maskAdjustments.isEmpty
             || !maskFeather.isEmpty
@@ -2272,7 +2355,7 @@ final class AppState: ObservableObject {
         maskStrength = saved.maskStrength
         straighten = saved.straighten
         hsl = saved.hsl
-        removeDust = saved.removeDust
+        healSpots = saved.healSpots ?? []
         brushCache = [:]
         updateActiveRecipe()
         resetHistory()
@@ -2299,13 +2382,13 @@ final class AppState: ObservableObject {
             candidates: candidates, proxyMaskBitmaps: proxyMaskBitmaps,
             subjectInstances: subjectInstances,
             subjectLuma: subjectLuma, subjectOrigin: subjectOrigin, skyLuma: skyLuma,
-            healSpots: healSpots, detectedSpotCount: detectedSpotCount,
+            healSpots: healSpots,
             capture: capture, activeLookId: activeLookId,
             maskAdjustments: maskAdjustments, maskFeather: maskFeather,
             maskTightness: maskTightness, maskInvert: maskInvert,
             selectedCandidateId: selectedCandidateId, edit: edit, editBaseline: editBaseline,
             baseMasks: baseMasks, maskEnabled: maskEnabled, maskStrength: maskStrength,
-            userMasks: userMasks, straighten: straighten, hsl: hsl, removeDust: removeDust)
+            userMasks: userMasks, straighten: straighten, hsl: hsl)
         sessions[url] = session
         sessionOrder.removeAll { $0 == url }
         sessionOrder.append(url)
@@ -2328,7 +2411,7 @@ final class AppState: ObservableObject {
         userMasks = []; paintingMaskId = nil; selectedMask = nil; pickingInstance = false
         subjectInstances = []; highlightedInstanceId = nil
         proxyMaskBitmaps = [:]; brushCache = [:]; subjectOrigin = nil
-        healSpots = []; detectedSpotCount = 0; removeDust = false
+        healSpots = []; healToolActive = false
         baseMasks = []; maskEnabled = [:]; maskStrength = [:]
         maskAdjustments = [:]; maskFeather = [:]; maskTightness = [:]; maskInvert = [:]
         hsl = [:]; straighten = 0; activeLookId = nil
@@ -2346,7 +2429,7 @@ final class AppState: ObservableObject {
         subjectInstances = s.subjectInstances
         highlightedInstanceId = nil
         subjectLuma = s.subjectLuma; skyLuma = s.skyLuma; subjectOrigin = s.subjectOrigin
-        healSpots = s.healSpots; detectedSpotCount = s.detectedSpotCount
+        healSpots = s.healSpots
         // Restored, not left standing. Every one of these was previously carried over from
         // whichever photo happened to be open before.
         capture = s.capture
@@ -2356,7 +2439,7 @@ final class AppState: ObservableObject {
         selectedCandidateId = s.selectedCandidateId
         edit = s.edit; editBaseline = s.editBaseline
         baseMasks = s.baseMasks; maskEnabled = s.maskEnabled; maskStrength = s.maskStrength
-        userMasks = s.userMasks; straighten = s.straighten; hsl = s.hsl; removeDust = s.removeDust
+        userMasks = s.userMasks; straighten = s.straighten; hsl = s.hsl
         brushCache = [:]; selectedMask = nil; paintingMaskId = nil; pickingInstance = false
         zoom = 1; pan = .zero; showingOriginal = false
         updateActiveRecipe()
@@ -2381,7 +2464,7 @@ final class AppState: ObservableObject {
         userMasks = []; paintingMaskId = nil; selectedMask = nil; pickingInstance = false
         subjectInstances = []; highlightedInstanceId = nil
         brushCache = [:]
-        proxyMaskBitmaps = [:]; healSpots = []; detectedSpotCount = 0
+        proxyMaskBitmaps = [:]; healSpots = []; healToolActive = false
         zoom = 1; pan = .zero; showingOriginal = false
         statusMessage = "Drop a photo or a folder to read the light."
     }
@@ -2873,14 +2956,13 @@ final class AppState: ObservableObject {
             // — reproduced at 2 crashes in 6 runs through the CLI's `bench-load --only par`, which
             // is exactly the sort of failure that reaches a user and not a test.
             //
-            // Dust and focus touch no Vision at all (integral images and a Laplacian), so they
-            // still overlap the Vision block for free. The win drops from ~28% to ~15%. A quarter
-            // of a second is not worth a segfault.
+            // The focus measure touches no Vision at all (a Laplacian), so it still overlaps the
+            // Vision block for free. The win drops from ~28% to ~15%. A quarter of a second is
+            // not worth a segfault.
             // The image every recipe decision is measured on. Named, because the difference between
             // this and `proxy` is load-bearing — see the block below.
             let measureOn = perceptionProxy
             let measurement = try await Task.detached(priority: .userInitiated) { () throws -> MeasuredPhoto in
-                async let dust = DustDetector.detect(in: proxy)
                 async let focus = FocusMeasure.read(proxy)
 
                 // MEASURED ON THE PERCEPTION PROXY, NOT THE EDIT PROXY — and this is the whole
@@ -2899,16 +2981,16 @@ final class AppState: ObservableObject {
                 // the fix is one measurement, not a better one. 768 wins because it is what export
                 // must use anyway (it has no edit proxy) and it is 41% of the pixel work.
                 //
-                // `dust`, `focus` and `instances` deliberately stay on the 1200 px edit proxy:
-                // none of them feeds a recipe or a curation decision. They are the strip's triage
-                // and the click-to-mask targets, and they want the finer image.
+                // `focus` and `instances` deliberately stay on the 1200 px edit proxy: neither
+                // feeds a recipe or a curation decision. They are the strip's triage and the
+                // click-to-mask targets, and they want the finer image.
                 let sampleBytes = try ImageMetrics.sample(measureOn)
                 let stats = ImageStatistics.compute(from: sampleBytes)
                 // Serial, deliberately. Do not turn these into `async let`.
                 let masks = LocalMasks.measure(in: measureOn)
                 let instances = SubjectInstances.detect(in: proxy)
 
-                return await MeasuredPhoto(stats: stats, masks: masks, dust: dust,
+                return await MeasuredPhoto(stats: stats, masks: masks,
                                            focus: focus, instances: instances)
             }.value
 
@@ -2936,9 +3018,6 @@ final class AppState: ObservableObject {
             let proxyMasks = measurement.masks.bitmaps
 
             self.focus[url] = measurement.focus
-            self.healSpots = measurement.dust
-            self.detectedSpotCount = self.healSpots.count
-            self.removeDust = false
 
             statusMessage = "Composing candidates…"
             // Clean candidates straight from the engine — no cross-image "profile". The way to
@@ -3518,11 +3597,13 @@ final class AppState: ObservableObject {
 
     private func snapshot() -> EditSnapshot {
         EditSnapshot(edit: edit, userMasks: userMasks, maskEnabled: maskEnabled,
-                     maskStrength: maskStrength, straighten: straighten, hsl: hsl)
+                     maskStrength: maskStrength, straighten: straighten, hsl: hsl,
+                     healSpots: healSpots)
     }
     private func applySnapshot(_ s: EditSnapshot) {
         edit = s.edit; userMasks = s.userMasks; maskEnabled = s.maskEnabled
         maskStrength = s.maskStrength; straighten = s.straighten; hsl = s.hsl
+        healSpots = s.healSpots
         updateActiveRecipe()
     }
     /// Reset the history to the current state — call when a fresh candidate/photo becomes the base.
@@ -3556,6 +3637,34 @@ final class AppState: ObservableObject {
         }
     }
     private func refreshUndoState() { canUndo = !undoStack.isEmpty; canRedo = !redoStack.isEmpty }
+
+    /// Commit the current state as an undo step *now*, instead of when the edit burst settles.
+    ///
+    /// The 0.45 s coalescing exists so dragging a slider is one undo rather than hundreds. A
+    /// discrete click is the opposite case: two heals a quarter-second apart are two decisions, and
+    /// merging them means one ⌘Z removes a spot the user did not ask it to. Bumping `commitToken`
+    /// cancels whatever coalesced commit was already pending.
+    private func commitNow() {
+        commitToken += 1
+        if let prev = committed, prev != snapshot() {
+            undoStack.append(prev)
+            if undoStack.count > 60 { undoStack.removeFirst() }
+            redoStack.removeAll()
+        }
+        committed = snapshot()
+        refreshUndoState()
+        if let url = imageURL {
+            if isTouched { editedURLs.insert(url) } else { editedURLs.remove(url) }
+            persistEdit(for: url)
+        }
+    }
+
+    /// Re-render and record one undo step, for edits that arrive as discrete clicks rather than
+    /// as a drag. See `commitNow`.
+    func onDiscreteEdit() {
+        updateActiveRecipe()
+        commitNow()
+    }
 
     func undo() {
         guard let prev = undoStack.popLast() else { return }
@@ -4133,7 +4242,7 @@ final class AppState: ObservableObject {
         var finalRecipe = candidate.baseRecipe
         finalRecipe.global = edit                       // absolute manual values
         finalRecipe.masks = activeMasks()
-        finalRecipe.heal = removeDust && !healSpots.isEmpty ? healSpots : nil
+        finalRecipe.heal = healSpots.isEmpty ? nil : healSpots
         finalRecipe.geometry = straighten != 0
             ? Geometry(rotateDeg: straighten, crop: nil, lensCorrection: false) : nil
         finalRecipe.hsl = hsl.isEmpty ? candidate.baseRecipe.hsl : hsl
@@ -5026,12 +5135,11 @@ final class AppState: ObservableObject {
         let originalPreview: NSImage?
     }
 
-    /// What measuring the proxy yields: histogram statistics, the local mask stack, and the dust
-    /// scan. Vision segmentation and the statistics pass are both heavy enough to freeze the UI.
+    /// What measuring the proxy yields: histogram statistics, the local mask stack, and the focus
+    /// reading. Vision segmentation and the statistics pass are both heavy enough to freeze the UI.
     private struct MeasuredPhoto: @unchecked Sendable {
         let stats: ImageStatistics
         let masks: LocalMasks.Measured
-        let dust: [HealSpot]
         let focus: FocusMeasure.Reading
         /// Each separable subject in the frame, for the mask list.
         let instances: [SubjectInstances.Instance]
@@ -5234,9 +5342,22 @@ struct ContentView: View {
                         .keyboardShortcut("x", modifiers: [])
                     Button("") { appState.showMaskOverlay.toggle(); appState.onEdit() }
                         .keyboardShortcut("o", modifiers: [])
-                    Button("") { appState.adjustBrushRadius(by: -0.02) }
+                    // `H` is what Lightroom binds healing to, and SHORTCUTS-PROPOSED listed it as
+                    // unadopted only because healing had no tool mode to toggle. It has one now.
+                    Button("") { appState.healToolActive.toggle() }
+                        .keyboardShortcut("h", modifiers: [])
+                    // One pair of keys sizes whichever round tool has the canvas. The heal tool
+                    // works at a tenth the brush's scale, so it gets its own step — sharing the
+                    // brush's 0.02 would jump a heal from smallest to largest in three presses.
+                    Button("") {
+                        if appState.healToolActive { appState.adjustHealRadius(by: -0.002) }
+                        else { appState.adjustBrushRadius(by: -0.02) }
+                    }
                         .keyboardShortcut("[", modifiers: [])
-                    Button("") { appState.adjustBrushRadius(by: 0.02) }
+                    Button("") {
+                        if appState.healToolActive { appState.adjustHealRadius(by: 0.002) }
+                        else { appState.adjustBrushRadius(by: 0.02) }
+                    }
                         .keyboardShortcut("]", modifiers: [])
                     Button("") { appState.selectCandidateIndex(0) }
                         .keyboardShortcut("1", modifiers: [])
@@ -5564,6 +5685,7 @@ struct ContentView: View {
                         else if appState.paintingMaskId != nil { paintingBadge }
                         else if appState.pickingInstance { pickingBadge }
                         else if appState.seedingMaskId != nil { seedingBadge }
+                        else if appState.healToolActive { healingBadge }
                     }
                     .contentShape(Rectangle())
                     // One drag does the right thing: paint (brush armed), else pan (zoomed in).
@@ -5573,6 +5695,9 @@ struct ContentView: View {
                             // zero distance, and letting the pan branch run would slide the photo
                             // under the pointer between press and release.
                             if appState.pickingInstance || appState.seedingMaskId != nil { return }
+                            // Same reason as picking: the heal lands on release, so the drag branch
+                            // must not pan the photo out from under the pointer first.
+                            if appState.healToolActive { return }
                             if appState.paintingMaskId != nil { appState.paintAt(v.location, container: geo.size) }
                             else if appState.zoom > 1.01 {
                                 appState.pan = CGSize(width: panStart.width + v.translation.width,
@@ -5591,6 +5716,13 @@ struct ContentView: View {
                                 appState.seedWand(at: v.location, container: geo.size)
                                 return
                             }
+                            if appState.healToolActive {
+                                // ⌥ removes instead of adding, so a misjudged patch is undone
+                                // where you are already looking rather than from the panel.
+                                appState.healAt(v.location, container: geo.size,
+                                                remove: NSEvent.modifierFlags.contains(.option))
+                                return
+                            }
                             panStart = appState.pan
                         })
                     // Pinch to zoom (trackpad).
@@ -5600,6 +5732,10 @@ struct ContentView: View {
                     // Draggable handles for the selected radial / graduated mask.
                     .overlay { maskCanvasOverlay(in: geo.size) }
                     .overlay { subjectHighlightOverlay(in: geo.size) }
+                    // This was written but never attached, so the old "circle the spots" toggle
+                    // drew nothing at all — the one control that was supposed to prove the repair
+                    // had happened. Found by looking at the window instead of the tests.
+                    .overlay { repairSpotOverlay(in: geo.size) }
                     // Double-click to fit.
                     .onTapGesture(count: 2) { appState.resetZoom(); zoomStart = 1 }
                     // Escape leaves an armed mode. Best-effort by nature — it needs the canvas to
@@ -5608,6 +5744,7 @@ struct ContentView: View {
                         if appState.pickingInstance { appState.pickingInstance = false }
                         else if appState.seedingMaskId != nil { appState.seedingMaskId = nil }
                         else if appState.paintingMaskId != nil { appState.paintingMaskId = nil }
+                        else if appState.healToolActive { appState.healToolActive = false }
                     }
                 }
                 previewFooter
@@ -5903,6 +6040,18 @@ struct ContentView: View {
             .help("Cancel picking a point")
     }
 
+    /// Same contract as the other armed modes: says what to do and how to get out, and the badge
+    /// itself is the exit for when the canvas has lost focus and Escape will not fire.
+    private var healingBadge: some View {
+        Text("HEAL · click a blemish · esc or tap here to finish")
+            .font(Theme.mono(11, .semibold)).tracking(1).foregroundColor(Theme.base)
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(Capsule().fill(Theme.glow.opacity(0.9))).padding(30)
+            .contentShape(Capsule())
+            .onTapGesture { appState.healToolActive = false }
+            .help("Finish healing")
+    }
+
     /// Which subject the pointer is over in the mask list, outlined on the photo. "Person 2" names
     /// nobody until you can see which one it is, and picking the wrong row means an edit landing on
     /// the wrong face.
@@ -5916,16 +6065,20 @@ struct ContentView: View {
         }
     }
 
-    /// Every detected dust spot, ringed, while the pointer is over the Repair controls.
+    /// Every healed spot, ringed, while the heal tool has the canvas.
+    ///
+    /// Only while the tool is active: a patch that worked should be invisible the rest of the time,
+    /// and rings over a photograph are clutter for every second you are not asking where they are.
+    /// The tool being a mode is what makes that unambiguous — the old version keyed this on hover
+    /// over the controls, so the rings vanished the moment you looked at the picture.
     @ViewBuilder
     private func repairSpotOverlay(in container: CGSize) -> some View {
-        if appState.showingRepairSpots || appState.hoveringRepairControls,
-           !appState.showingOriginal, !appState.healSpots.isEmpty {
+        if appState.healToolActive, !appState.showingOriginal, !appState.healSpots.isEmpty {
             let rect = appState.imageRect(in: container)
             ZStack(alignment: .topLeading) {
                 ForEach(Array(appState.healSpots.enumerated()), id: \.offset) { _, spot in
-                    // A RING, not a disc: the point is to see the spot inside it and judge whether
-                    // it is dust or a bird. Filling it would hide the only evidence.
+                    // A RING, not a disc: the point is to see what is inside it and judge the
+                    // patch. Filling it would hide the only evidence.
                     let centre = appState.normToView(spot.x, spot.y, in: rect)
                     let radius = max(9, spot.radius * min(rect.width, rect.height) * 2.2)
                     Circle()
@@ -6826,39 +6979,44 @@ struct ContentView: View {
                 .animation(Motion.gated(Motion.quick, reduceMotion), value: appState.userMasks.count)
                 }
 
-                CollapsibleSection("Repair", icon: "bandage", trailing: appState.detectedSpotCount > 0 ? "\(appState.detectedSpotCount) spots" : nil) {
-                Toggle(isOn: $appState.removeDust) {
+                CollapsibleSection("Repair", icon: "bandage",
+                                   trailing: appState.healSpots.isEmpty ? nil
+                                           : "\(appState.healSpots.count) healed") {
+                // The tool is a mode, so it says plainly whether it has the canvas. The old control
+                // here was a switch that patched whatever a detector had found; the detector never
+                // worked (see `SpotHeal`), so the switch was the "appears to work and does nothing"
+                // failure. Pointing at the blemish yourself is the part that always worked.
+                Toggle(isOn: $appState.healToolActive) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Remove dust spots").font(Theme.ui(13, .medium)).foregroundColor(Theme.ink)
-                        Text(appState.detectedSpotCount > 0
-                             ? "Patch \(appState.detectedSpotCount) detected spot\(appState.detectedSpotCount == 1 ? "" : "s") from nearby pixels"
-                             : "No spots detected on this frame")
+                        Text("Heal tool").font(Theme.ui(13, .medium)).foregroundColor(Theme.ink)
+                        Text(appState.healToolActive
+                             ? "Click a blemish to patch it from nearby pixels"
+                             : "Touch up dust, specks and small distractions")
                             .font(Theme.mono(10)).foregroundColor(Theme.inkDim)
                     }
                 }
                 .toggleStyle(.switch).tint(Theme.glow)
-                .disabled(appState.detectedSpotCount == 0)
-                // Hovering rings every spot it would patch — a quick peek, gone when the pointer
-                // moves on. It used to be the ONLY way to see them, which failed its one job:
-                // the rings vanished the instant the pointer left for the photograph, so you
-                // could never actually inspect a spot. The latch below is the fix.
-                .onHover { appState.hoveringRepairControls = $0 && appState.detectedSpotCount > 0 }
-                // Feedback the moment it flips, because at fit zoom a patched dust spot is a
-                // handful of pixels — "did that do anything?" deserves an answer in words.
-                .onChange(of: appState.removeDust) { _, on in
-                    if on, appState.detectedSpotCount > 0 {
-                        appState.statusMessage = "Patched \(appState.detectedSpotCount) spot"
-                            + "\(appState.detectedSpotCount == 1 ? "" : "s") — hold Compare to "
-                            + "see them back, or circle them below"
-                    }
+
+                if appState.healToolActive {
+                    ToneSlider(label: "Heal size",
+                               value: Binding(get: { appState.healRadius },
+                                              set: { appState.healRadius = $0 }),
+                               range: 0.003...0.08, step: 0.001, unit: "",
+                               onChange: {}, neutral: 0.012)
+                    Text("[ and ] resize · ⌥-click a patch to remove it")
+                        .font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
                 }
-                if appState.detectedSpotCount > 0 {
-                    Toggle(isOn: $appState.showingRepairSpots) {
-                        Text("Circle the spots on the photo")
+
+                if !appState.healSpots.isEmpty {
+                    HStack {
+                        Text("\(appState.healSpots.count) spot\(appState.healSpots.count == 1 ? "" : "s") healed")
+                            .font(Theme.mono(10)).foregroundColor(Theme.inkDim)
+                        Spacer()
+                        Button("Clear all") { appState.clearHealSpots() }
+                            .buttonStyle(.plain).controlSize(.small)
                             .font(Theme.ui(11)).foregroundColor(Theme.inkDim)
                     }
-                    .toggleStyle(.switch).controlSize(.small).tint(Theme.glow)
-                    Text("Rings stay while this is on · hold Compare to see the spots back")
+                    Text("⌘Z undoes the last one · hold Compare to see them back")
                         .font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
                 }
                 }
@@ -7788,6 +7946,8 @@ struct EditSnapshot: Equatable {
     var maskStrength: [String: Double]
     var straighten: Double
     var hsl: [String: HSLAdjustment]
+    /// Heals ride in the undo history like every other edit — ⌘Z after a click removes that spot.
+    var healSpots: [HealSpot]
 }
 
 struct UserMaskVM: Identifiable, Equatable, Codable {
@@ -8569,6 +8729,10 @@ struct ShortcutsSheet: View {
         ("⌘I", "Invert the selected mask"),
         ("[ / ]", "Brush size down / up"),
         ("⇧[ / ⇧]", "Feather the selected mask in / out"),
+        ("— REPAIR —", ""),
+        ("H", "Heal tool on / off"),
+        ("[ / ]", "Heal size down / up (while healing)"),
+        ("⌥-click", "Remove the patch under the pointer"),
         ("— EDITING —", ""),
         ("⌘Z / ⌘⇧Z", "Undo / redo"),
         ("⌘R", "Reset every slider to the candidate"),

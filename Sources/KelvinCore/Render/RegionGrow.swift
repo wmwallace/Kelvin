@@ -30,7 +30,7 @@ public enum RegionGrow {
 
     /// Long edge of the working grid. Finer than `SkyMask`'s 160 because this traces an object's
     /// outline rather than classifying broad areas, and coarser than full resolution because the
-    /// result is upscaled through a blur anyway — the same reasoning as `DustDetector`'s grid.
+    /// result is upscaled through a blur anyway — the same reasoning as `SpotHeal`'s grid.
     public static let gridLongEdge = 512
 
     /// Below this, a grown region is treated as a miss rather than a selection. A handful of cells

@@ -16,7 +16,14 @@ struct SavedEdit: Codable {
     var straighten: Double
     var hsl: [String: HSLAdjustment]
     var blackAndWhite: BlackAndWhiteMix?
-    var removeDust: Bool
+    /// Spots the user healed by hand, so they come back on reopen and can still be undone or
+    /// deleted individually. The composed `recipe` below also carries them, but that copy is for
+    /// rendering — this one is the editable list.
+    ///
+    /// Optional because an edit saved before the heal tool existed has no such key, and a
+    /// non-optional field would make every one of those files fail to decode. It also replaces the
+    /// old `removeDust` flag: that key is simply absent now, which older readers ignore.
+    var healSpots: [HealSpot]?
     /// THE COMPOSED RECIPE, exactly as it was rendered.
     ///
     /// Everything above describes an edit relative to a candidate — the sliders you moved, the masks

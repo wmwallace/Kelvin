@@ -121,7 +121,6 @@ struct PhotoSession {
     let subjectOrigin: SubjectMask.Origin?
     let skyLuma: Double?
     let healSpots: [HealSpot]
-    let detectedSpotCount: Int
 
     /// What the camera recorded. Cached with the rest because `restore` puts a photo back WITHOUT
     /// re-reading it — so without this field, coming back to photo A showed A's pixels under B's
@@ -149,12 +148,12 @@ struct PhotoSession {
     var userMasks: [UserMaskVM]
     var straighten: Double
     var hsl: [String: HSLAdjustment]
-    var removeDust: Bool
 
     /// Whether the user actually changed anything from the candidate Kelvin generated — drives the
     /// "edited" dot in the strip.
     var isEdited: Bool {
-        edit != editBaseline || !userMasks.isEmpty || straighten != 0 || !hsl.isEmpty || removeDust
+        edit != editBaseline || !userMasks.isEmpty || straighten != 0 || !hsl.isEmpty
+            || !healSpots.isEmpty
             || activeLookId != nil
             || !maskAdjustments.isEmpty || !maskFeather.isEmpty
             || !maskTightness.isEmpty || !maskInvert.isEmpty
