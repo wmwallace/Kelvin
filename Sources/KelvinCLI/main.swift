@@ -37,7 +37,8 @@ func printUsage() {
       \(tool) endpoint-probe --in-dir <dir> [--reference-dir <dir>] [--perception-dir <dir>]
       \(tool) exposure-probe --in-dir <dir> --reference-dir <dir> [--perception-dir <dir>]
                      [--recipe-dir <dir>]
-      \(tool) bg-probe --in-dir <dir> --reference-dir <dir>
+      \(tool) bg-probe --in-dir <dir> --reference-dir <dir> [--perception-dir <dir>]
+      \(tool) bench-focus --in-dir <dir> [--mode old|new]
       \(tool) wb-probe --in-dir <dir> [--reference-dir <dir>] [--cost]
       \(tool) instances --in <image>
       \(tool) grow --in <image> --at <x,y> [--tolerance <t>] [--softness <s>] [--out-dir <dir>]
@@ -75,6 +76,25 @@ func printUsage() {
                  (<stem>-subject.png etc.) and <stem>-bg-dim.png — the frame with its background
                  pulled down 0.5 EV through the derived mask, so a background treatment can be
                  SEEN rather than inferred from a coverage column.
+
+    bg-probe options:
+      --in-dir          The corpus's captures. Required.
+      --reference-dir   The photographer's exports of the same frames. Required.
+      --perception-dir  Per-frame perception JSON (<stem>.json). Adds the ENGINE's subject and
+                        background ΔEV beside the photographer's: the default candidate — the one
+                        every frame opens in — composed through the app's own path
+                        (ShippedCandidates.compose) and measured under the same masks. Frames
+                        without a label keep their photographer columns and are counted on a
+                        "no label" line, so a partially labelled corpus is fine.
+
+    bench-focus options:
+      --in-dir  Folder of photographs to scan. Required.
+      --mode    new (default): the app's cold-scan arrangement — PhotoTriage.read(url:), the
+                embedded-preview fast path, several frames at once. old: sequential full decode,
+                kept as the before picture.
+
+      The figure is the app's COLD scan only. The warm path — MediaCache's verdict cache — is
+      app-layer and cannot be measured from this CLI.
 
     triage-compare options:
       --in-dir   Directory of photographs to measure. Required.
@@ -1350,10 +1370,16 @@ case "mask-coverage":
                 // The audition: the three masks painted onto the frame, and — the picture that
                 // decides whether a background treatment is worth building rules for — the frame
                 // with its background pulled down half a stop through the derived mask.
+                //
+                // The output stem keeps the source EXTENSION: a RAW+JPEG shoot has `_DSC0001.ARW`
+                // and `_DSC0001.JPG` in one folder, both get table rows, and stem-only filenames
+                // would silently leave only whichever wrote second — a table that no longer
+                // matches its own pictures.
+                let outStem = "\(name).\(url.pathExtension.lowercased())"
                 for key in ["subject", "sky", "background"] {
                     guard let mask = m.bitmaps[key] else { continue }
                     let overlay = Renderer.renderMaskOverlay(proxy, maskBitmap: mask)
-                    try ImageWriter.write(overlay, to: outDir.appendingPathComponent("\(name)-\(key).png"),
+                    try ImageWriter.write(overlay, to: outDir.appendingPathComponent("\(outStem)-\(key).png"),
                                           format: .png)
                 }
                 var recipe = Recipe.neutral
@@ -1361,7 +1387,7 @@ case "mask-coverage":
                                      invert: false, feather: 20, opacity: 1.0,
                                      adjustments: ["exposure_ev": -0.5])]
                 let dimmed = Renderer.render(proxy, with: recipe, maskBitmaps: m.bitmaps)
-                try ImageWriter.write(dimmed, to: outDir.appendingPathComponent("\(name)-bg-dim.png"),
+                try ImageWriter.write(dimmed, to: outDir.appendingPathComponent("\(outStem)-bg-dim.png"),
                                       format: .png)
             }
         }
@@ -1515,6 +1541,16 @@ case "bg-probe":
     // means the background simply rode the global edit; negative means the photographer settles
     // the background relative to the subject, which is the evidence a default treatment would
     // rest on.
+    //
+    // With --perception-dir the probe also answers the follow-on question: does the ENGINE lift
+    // the subject as much as the photographer does? A labelled frame's default candidate — the one
+    // every frame opens in, the only look whose quality is unconditionally the photographer's
+    // experience — is composed through `ShippedCandidates.compose`, because that is the one path
+    // the app ships (measure on the perception proxy, generate, render WITH bitmaps, score,
+    // curate). The eval harness once measured `RecipeEngine.recipe()`, which nothing in the app
+    // calls, and it hid months of drift; any bespoke render path here would reopen that hole.
+    // Labels arrive incrementally from a separate process, so a missing one skips the engine
+    // columns for that frame only — the photographer columns never depend on a label.
     do {
         let rest = Array(arguments.dropFirst())
         guard let inDir = value(for: "--in-dir", in: rest) else {
@@ -1523,6 +1559,7 @@ case "bg-probe":
         guard let referenceDir = value(for: "--reference-dir", in: rest) else {
             fail("bg-probe requires --reference-dir")
         }
+        let perceptionDir = value(for: "--perception-dir", in: rest)
         let paths = try FileManager.default.contentsOfDirectory(atPath: inDir)
             .filter { !$0.hasPrefix(".") }.sorted()
             .map { (inDir as NSString).appendingPathComponent($0) }
@@ -1537,11 +1574,17 @@ case "bg-probe":
             /// subject.
             let differential: Double?
             let backgroundSatDelta: Double?
+            /// The default candidate's move on the same regions, under the same masks. Nil when
+            /// the frame has no label, or when composition could not produce a default.
+            let engineSubjectEV: Double?
+            let engineBackgroundEV: Double?
         }
 
-        print("frame                                 subjΔEV   skyΔEV    bgΔEV | bg−subj  bgΔsat")
+        print("frame                                 subjΔEV   skyΔEV    bgΔEV | bg−subj  bgΔsat"
+              + (perceptionDir == nil ? "" : " |engSubj    engBg"))
         var rows: [Row] = []
         var noReference = 0, unreadable = 0, misaligned = 0
+        var noLabel = 0, engineUnmeasurable = 0
         for path in paths {
             // One pool per frame: each iteration decodes two frames and runs a segmentation, and
             // without a drain that is the same slow climb `BatchApply` measured at 60 GB over a
@@ -1549,7 +1592,20 @@ case "bg-probe":
             autoreleasepool {
                 let url = URL(fileURLWithPath: path)
                 let stem = url.deletingPathExtension().lastPathComponent
-                guard let capture = try? ImageDecoder.decode(url: url) else {
+                // `ImageDecoder.decode` does NOT apply the EXIF orientation of a non-RAW file
+                // (`CIImage(contentsOf:)` without `.applyOrientationProperty` — see
+                // `PerceptionProxy.fromFile`'s doc, which declines to assume it). The corpus's own
+                // PNGs are baked upright, but this command accepts any two folders, and a
+                // tag-rotated JPEG capture would either sample the reference's ground with the
+                // capture's sky mask or be dropped as misaligned. Orient here, so the aspect gate
+                // below compares what the masks will actually see.
+                func decodeUpright(_ u: URL) -> CIImage? {
+                    if ImageDecoder.rawExtensions.contains(u.pathExtension.lowercased()) {
+                        return try? ImageDecoder.decode(url: u)
+                    }
+                    return CIImage(contentsOf: u, options: [.applyOrientationProperty: true])
+                }
+                guard let capture = decodeUpright(url) else {
                     unreadable += 1; return
                 }
                 var refImage: CIImage?
@@ -1557,14 +1613,13 @@ case "bg-probe":
                     let refURL = URL(fileURLWithPath: referenceDir)
                         .appendingPathComponent(stem).appendingPathExtension(ext)
                     if FileManager.default.fileExists(atPath: refURL.path) {
-                        refImage = try? ImageDecoder.decode(url: refURL)
+                        refImage = decodeUpright(refURL)
                     }
                 }
                 guard let reference = refImage else { noReference += 1; return }
 
-                // Decode has already applied EXIF orientation — that is how `PairedCorpus` makes a
-                // rotated export comparable — so by here an alignable pair has the SAME aspect,
-                // not merely the same long/short ratio. A pair that still disagrees cannot share
+                // With orientation applied above, an alignable pair has the SAME aspect, not
+                // merely the same long/short ratio. A pair that still disagrees cannot share
                 // one mask honestly; skip it and say so in the summary.
                 let (cw, ch) = (capture.extent.width, capture.extent.height)
                 let (rw, rh) = (reference.extent.width, reference.extent.height)
@@ -1575,7 +1630,27 @@ case "bg-probe":
                 // Measure on the 768 px perception proxy, which is where the app decides.
                 let captureProxy = PerceptionProxy.downsample(capture, maxEdge: 768)
                 let referenceProxy = PerceptionProxy.downsample(reference, maxEdge: 768)
-                let m = LocalMasks.measure(in: captureProxy)
+
+                // A labelled frame composes the shipped candidate set once, and its masks and
+                // proxy serve the photographer columns too — one segmentation per pair, so the
+                // engine and the photographer are measured under the SAME masks. An unlabelled
+                // frame (or one whose composition fails) still gets photographer columns from a
+                // direct measurement.
+                var composition: ShippedCandidates.Composition?
+                if let perceptionDir {
+                    let pURL = URL(fileURLWithPath: perceptionDir)
+                        .appendingPathComponent(stem).appendingPathExtension("json")
+                    if let perception = try? PerceptionIO.load(from: pURL) {
+                        composition = try? ShippedCandidates.compose(
+                            for: capture, perception: perception,
+                            iso: ExifReader.iso(url: url))
+                        if composition == nil { engineUnmeasurable += 1 }
+                    } else {
+                        noLabel += 1
+                    }
+                }
+                let m = composition?.masks ?? LocalMasks.measure(in: captureProxy)
+                let measureBase = composition?.measuredOn ?? captureProxy
 
                 /// Mean HSV saturation of the pixels the mask covers — the same sampled reduction
                 /// as `SubjectMask.maskedMeanLuma`, for the one extra channel this probe reports.
@@ -1615,7 +1690,7 @@ case "bg-probe":
 
                 func regionEV(_ key: String) -> Double? {
                     guard let mask = m.bitmaps[key] else { return nil }
-                    return evDelta(SubjectMask.maskedMeanLuma(image: captureProxy, mask: mask),
+                    return evDelta(SubjectMask.maskedMeanLuma(image: measureBase, mask: mask),
                                    SubjectMask.maskedMeanLuma(image: referenceProxy, mask: mask))
                 }
                 let subjectEV = regionEV("subject")
@@ -1625,22 +1700,50 @@ case "bg-probe":
                 if let backgroundEV, let subjectEV { differential = backgroundEV - subjectEV }
                 var backgroundSatDelta: Double?
                 if let bg = m.bitmaps["background"],
-                   let srcSat = maskedMeanSaturation(image: captureProxy, mask: bg),
+                   let srcSat = maskedMeanSaturation(image: measureBase, mask: bg),
                    let refSat = maskedMeanSaturation(image: referenceProxy, mask: bg) {
                     backgroundSatDelta = refSat - srcSat
                 }
+
+                // The DEFAULT candidate's render, at measurement resolution, masks applied — what
+                // a photographer actually opens on. `chosen` nil means curation produced nothing
+                // to open in, which for an instrument is a fact worth counting, not hiding.
+                var engineSubjectEV: Double?, engineBackgroundEV: Double?
+                if let composition {
+                    if let chosen = composition.chosen,
+                       let preview = composition.candidate(styleID: chosen.recipe.id ?? "")?
+                           .preview {
+                        func engineEV(_ key: String) -> Double? {
+                            guard let mask = m.bitmaps[key] else { return nil }
+                            return evDelta(
+                                SubjectMask.maskedMeanLuma(image: measureBase, mask: mask),
+                                SubjectMask.maskedMeanLuma(image: preview, mask: mask))
+                        }
+                        engineSubjectEV = engineEV("subject")
+                        engineBackgroundEV = engineEV("background")
+                    } else {
+                        engineUnmeasurable += 1
+                    }
+                }
+
                 rows.append(Row(origin: m.subjectOrigin, skyPresent: m.bitmaps["sky"] != nil,
                                 subjectEV: subjectEV, skyEV: skyEV, backgroundEV: backgroundEV,
                                 differential: differential,
-                                backgroundSatDelta: backgroundSatDelta))
+                                backgroundSatDelta: backgroundSatDelta,
+                                engineSubjectEV: engineSubjectEV,
+                                engineBackgroundEV: engineBackgroundEV))
 
                 func cell(_ x: Double?) -> String {
                     x.map { String(format: "%+7.2f", $0) } ?? "      —"
                 }
                 let name = stem.count > 36 ? String(stem.suffix(36)) : stem
-                print(name + String(repeating: " ", count: max(1, 38 - name.count))
-                      + cell(subjectEV) + "  " + cell(skyEV) + "  " + cell(backgroundEV)
-                      + " |" + cell(differential) + "  " + cell(backgroundSatDelta))
+                var line = name + String(repeating: " ", count: max(1, 38 - name.count))
+                    + cell(subjectEV) + "  " + cell(skyEV) + "  " + cell(backgroundEV)
+                    + " |" + cell(differential) + "  " + cell(backgroundSatDelta)
+                if perceptionDir != nil {
+                    line += " |" + cell(engineSubjectEV) + "  " + cell(engineBackgroundEV)
+                }
+                print(line)
             }
         }
         guard !rows.isEmpty else { fail("no scorable pairs") }
@@ -1681,6 +1784,38 @@ case "bg-probe":
               + "background darker on \(darker), brighter on \(brighter)")
         print("\nbackground saturation (mean HSV sat under the background mask, ref − src):")
         summarise("background", rows.compactMap(\.backgroundSatDelta))
+
+        if perceptionDir != nil {
+            // Engine vs photographer is only meaningful over the SAME pairs, so the
+            // photographer's quartiles are restated here restricted to the frames the engine
+            // could be measured on — the section above keeps the full corpus.
+            let subjPairs = rows.compactMap { r -> (their: Double, engine: Double,
+                                                    origin: SubjectMask.Origin?)? in
+                guard let t = r.subjectEV, let e = r.engineSubjectEV else { return nil }
+                return (t, e, r.origin)
+            }
+            let bgGaps = rows.compactMap { r -> Double? in
+                guard let t = r.backgroundEV, let e = r.engineBackgroundEV else { return nil }
+                return t - e
+            }
+            print("\nengine (default candidate via ShippedCandidates.compose) vs photographer,"
+                  + " subject ΔEV, same pairs:")
+            summarise("photogr.  ", subjPairs.map(\.their))
+            summarise("engine    ", subjPairs.map(\.engine))
+            print("\ngap (photographer − engine; positive = the engine lifts the subject less"
+                  + " than the photographer did):")
+            summarise("subject   ", subjPairs.map { $0.their - $0.engine })
+            summarise("  person  ", subjPairs.filter { $0.origin == .person }
+                                             .map { $0.their - $0.engine })
+            summarise("  salient ", subjPairs.filter { $0.origin == .foreground }
+                                             .map { $0.their - $0.engine })
+            summarise("background", bgGaps)
+            print("no label: \(noLabel)"
+                  + (engineUnmeasurable > 0
+                     ? " · engine unmeasurable (composition failed or nothing survived "
+                       + "curation): \(engineUnmeasurable)"
+                     : ""))
+        }
     } catch {
         fail("\(error)")
     }
@@ -1918,32 +2053,33 @@ case "proxy-compare":
     } catch { fail("\(error)") }
 
 case "bench-focus":
-    // The culling focus scan, sequential vs the arrangement the app now uses. FocusMeasure touches
-    // no Vision, so unlike the per-photo measurement block this one is safe to parallelise.
+    // The culling scan, sequential-slow vs the arrangement the app now uses. Nothing here touches
+    // Vision, so unlike the per-photo measurement block this one is safe to parallelise.
+    //
+    // "new" must be `PhotoTriage.read(url:)` itself, not a re-implementation: an earlier version
+    // benchmarked `PerceptionProxy.fromFile` + `FocusMeasure.read`, and on a RAW shoot that is
+    // the slow fallback the app no longer takes (`fromFile` refuses a RAW's embedded preview;
+    // `measurementProxy` inside PhotoTriage accepts it) and only part of the work — so its
+    // ms/photo described a path with no caller. The warm path, MediaCache's verdict cache, is
+    // app-layer and out of reach from this CLI; this figure is the cold scan only.
     do {
         let rest = Array(arguments.dropFirst())
         guard let dir = value(for: "--in-dir", in: rest) else { fail("bench-focus requires --in-dir") }
         let files = try BatchApply.imageFiles(in: URL(fileURLWithPath: dir)).sorted { $0.path < $1.path }
         guard !files.isEmpty else { fail("no readable images in \(dir)") }
-        // @Sendable, because this is called from a global-queue closure below. Top-level code is
-        // main-actor isolated, so a plain local function inherits that isolation and the call is a
-        // hard error on the SDK CI builds against. It reads nothing shared — a URL in, a struct out.
-        @Sendable func read(_ url: URL) -> FocusMeasure.Reading? {
-            if let fast = PerceptionProxy.fromFile(url, maxEdge: 1200) { return FocusMeasure.read(fast) }
-            guard let full = try? ImageDecoder.decode(url: url) else { return nil }
-            let lazy = PerceptionProxy.downsample(full, maxEdge: 1200)
-            let ctx = CIContext(options: [.cacheIntermediates: false])
-            guard let cg = ctx.createCGImage(lazy, from: lazy.extent) else { return nil }
-            return FocusMeasure.read(CIImage(cgImage: cg))
-        }
         func slowRead(_ url: URL) -> FocusMeasure.Reading? {
-            guard let full = try? ImageDecoder.decode(url: url) else { return nil }
-            let lazy = PerceptionProxy.downsample(full, maxEdge: 1200)
-            let ctx = CIContext(options: [.cacheIntermediates: false])
-            guard let cg = ctx.createCGImage(lazy, from: lazy.extent) else { return nil }
-            return FocusMeasure.read(CIImage(cgImage: cg))
+            // Pool per frame: this path fully decodes the original, and a shoot-length loop of
+            // full decodes without a drain is the 60 GB climb BatchApply measured.
+            autoreleasepool {
+                guard let full = try? ImageDecoder.decode(url: url) else { return nil }
+                let lazy = PerceptionProxy.downsample(full, maxEdge: 1200)
+                let ctx = CIContext(options: [.cacheIntermediates: false])
+                guard let cg = ctx.createCGImage(lazy, from: lazy.extent) else { return nil }
+                return FocusMeasure.read(CIImage(cgImage: cg))
+            }
         }
-        print("Focus scan over \(files.count) photos")
+        print("Triage scan over \(files.count) photos (cold; the app's warm verdict cache is"
+              + " not reachable from the CLI)")
         let mode = value(for: "--mode", in: rest) ?? "new"
         let start = Date()
         if mode == "old" {
@@ -1954,7 +2090,10 @@ case "bench-focus":
             for f in files {
                 group.enter()
                 DispatchQueue.global(qos: .utility).async {
-                    sem.wait(); _ = read(f); sem.signal(); group.leave()
+                    // The app's cold-scan unit of work, exactly: embedded-preview fast path,
+                    // histogram + focus + fingerprint, own per-frame pool. Safe concurrent —
+                    // PhotoTriage documents it as Vision-free.
+                    sem.wait(); _ = PhotoTriage.read(url: f); sem.signal(); group.leave()
                 }
             }
             group.wait()

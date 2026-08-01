@@ -298,6 +298,24 @@ salient-object frames the differential collapses to −0.06, straddling zero.
 background darken would contradict the photographer's own edits. Separation is subject-relative,
 and the levers that produce it already exist. Re-run this before wiring any background rule.
 
+With `--perception-dir` it adds the ENGINE's columns — the default candidate (composed through
+`ShippedCandidates.compose`, the path the app ships, rendered with the same masks the
+photographer columns are measured under) — so the photographer's lift and the engine's are read
+side by side. Measured over the 77 pairs (1 Aug 2026):
+
+| subject ΔEV | p25 | median | p75 |
+|---|---|---|---|
+| photographer | +0.12 | **+0.40** | +0.58 |
+| engine | +0.06 | **+0.14** | +0.33 |
+
+The gap (photographer − engine) splits cleanly: **+0.08 EV median on person frames** — inside
+the territory prior probes ruled "not a defect" — and **+0.36 EV on salient-object frames**,
+where the engine is deliberately cautious because of the measured halo dead-end (no threshold
+separates a good salient mask from a landscape; see the halo work). Background gap +0.01.
+So the person-frame lift is calibrated; the salient shortfall is a robustness-vs-taste
+tradeoff, not a constant to sweep, and the frames to eyeball are the opposite-direction cases
+(photographer lifted, engine darkened: `_DSC6763`, `_DSC6835`).
+
 ## Which illuminant estimate is right
 
 `ablate` says *which lever* is wrong. When the answer is white balance — it has been, twice — the
