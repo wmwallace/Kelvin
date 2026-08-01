@@ -15,6 +15,175 @@
     <link>https://usekelvin.app</link>
     <description>Updates for Kelvin, the local-AI photo editor for macOS.</description>
     <item>
+      <title>Kelvin 0.5.0 — point at the blemish, and colour that leaves the light alone</title>
+      <pubDate>Fri, 31 Jul 2026 17:30:00 -0700</pubDate>
+      <sparkle:version>276</sparkle:version>
+      <sparkle:shortVersionString>0.5.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <link>https://github.com/wmwallace/Kelvin/releases/tag/v0.5.0</link>
+      <description><![CDATA[
+        <style>
+          /* Kelvin update notes. Self-contained: no external fonts, images or scripts — Sparkle
+             renders this offline, mid-install, in a narrow pane. */
+          :root {
+            color-scheme: light dark;
+            --ink: #1c1a17;
+            --dim: #6b6660;
+            --faint: #928c84;
+            --bg: #faf8f5;
+            --rule: rgba(0,0,0,0.10);
+            --glow: #b4661a;
+          }
+          @media (prefers-color-scheme: dark) {
+            :root {
+              --ink: #e8e3dc;
+              --dim: #9a938a;
+              --faint: #6f6862;
+              --bg: #131211;
+              --rule: rgba(255,255,255,0.11);
+              --glow: #e9a44c;
+            }
+          }
+          body {
+            margin: 0;
+            padding: 18px 20px 26px;
+            background: var(--bg);
+            color: var(--ink);
+            font: 13px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+            -webkit-font-smoothing: antialiased;
+          }
+          /* The blackbody rail: amber through daylight to blue, which is what the app is named after
+             and the one piece of decoration here that means something. It separates sections the way
+             the temperature rail runs under the canvas in the app itself. */
+          .rail {
+            height: 2px;
+            border: 0;
+            margin: 20px 0 16px;
+            background: linear-gradient(90deg, #e9a44c 0%, #f2ead9 42%, #cfd8e6 68%, #7fa2cc 100%);
+            opacity: 0.85;
+          }
+          .lede {
+            margin: 0;
+            font-size: 15px;
+            line-height: 1.45;
+            letter-spacing: -0.005em;
+          }
+          .version {
+            font: 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--faint);
+            margin: 0 0 9px;
+          }
+          /* Mono, tracked, uppercase — the same label treatment the app uses over its own panel
+             sections, so the notes read in the app's voice rather than a changelog's. */
+          h2 {
+            font: 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+            color: var(--glow);
+            margin: 22px 0 7px;
+          }
+          h2:first-of-type { margin-top: 0; }
+          p { margin: 0 0 9px; }
+          p.note { color: var(--dim); }
+          ul { margin: 0 0 9px; padding-left: 17px; }
+          li { margin-bottom: 4px; }
+          strong { font-weight: 600; }
+          .limit {
+            border-left: 2px solid var(--rule);
+            padding-left: 11px;
+            margin: 12px 0 0;
+            color: var(--dim);
+          }
+          .closing {
+            margin-top: 22px;
+            padding-top: 14px;
+            border-top: 1px solid var(--rule);
+            color: var(--faint);
+            font-size: 12px;
+          }
+        </style>
+
+        <p class="version">Kelvin 0.5.0</p>
+        <p class="lede">A heal tool you aim yourself, and white balance that corrects the light instead of the picture.</p>
+
+        <hr class="rail">
+
+        <h2>A heal tool, in place of a detector that found sand</h2>
+        <p>0.4.0&rsquo;s notes said it plainly: <em>dust detection finds sand, not dust.</em> This release
+        stops trying.</p>
+        <p>It was measured before it was deleted. Four frames from one shoot, same camera, same f/11, taken
+        minutes apart, returned <strong>0, 0, 1 and 40 spots</strong>. Dust sits at a fixed place on the
+        sensor and lands in the same spot in every frame — real dust would have given nearly the same list
+        four times. That spread is proof it was finding scene content.</p>
+        <p>So finding the blemish goes back to you, which is the part you were always better at. Press
+        <strong>H</strong>, click the speck, and Kelvin patches it from a clean piece of the same photograph.
+        <code>[</code> and <code>]</code> resize, &#8997;-click removes a patch, &#8984;Z undoes.</p>
+        <p class="note">Patches are stored as a position and a radius rather than as pixels, so one click
+        survives a full-resolution export and travels to the rest of the shoot.</p>
+
+        <h2>White balance corrects the light, not the picture</h2>
+        <p>On a finished frame of blue water under a blue sky, Kelvin applied a <strong>3920 K warm
+        shift</strong> and turned the sky beige. It had seen a blue scene and corrected the blue out of it.</p>
+        <p>Averaging the whole frame cannot tell <em>the light was yellow</em> from <em>the picture is mostly
+        sea</em>. Kelvin now reads the least chromatic parts of the frame to decide whether there is a cast,
+        and local colour differences to decide how much to take out.</p>
+        <p class="note">Across 47 finished photographs, the share correctly left alone went from
+        <strong>23% to 81%</strong> — and casts are now fully removed rather than half removed.</p>
+
+        <h2>Whites stop asking for everything</h2>
+        <p>Kelvin aimed every frame&rsquo;s white point at 0.965. Over 38 finished photographs, exactly one
+        reached it — so the rule handed out its maximum lift on 25 of them and could not tell a frame needing
+        a little from one needing a lot. The target is now 0.88, where real finished work actually sits.</p>
+
+        <h2>What still does not work</h2>
+        <p class="limit"><strong>Healing is place-and-delete.</strong> You can add a patch, remove it or undo
+        it — you cannot drag or resize one after the fact. <strong>A heal into busy texture blends rather
+        than refuses</strong>: Kelvin always patches where you click, even where nothing nearby matches well,
+        so on detailed ground the patch can be visible at 100%. <strong>The canvas is softer than the
+        exported file</strong> — it draws a scaled-up preview rather than re-rendering at the size you are
+        looking at. <strong>Deliberately dark photographs get lifted</strong>; turn Exposure back down.</p>
+
+        <p class="closing">Everything runs on your Mac. No account, no upload, and nothing leaves the
+        machine except this update check — which you can switch off in Settings.</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/wmwallace/Kelvin/releases/download/v0.5.0/Kelvin-0.5.0.dmg"
+        sparkle:edSignature="tYt6i2JWzfAUuAeIdp4V2CdagAuzn0m6t3KV7qfbCdZFWaPfiGgFqLpuV0JB11Brdo4HAcabfKNfhbEO2VoNAQ=="
+        length="1515965712"
+        type="application/octet-stream"/>
+      <!-- One delta per shipped predecessor: a patch is a pair of builds, not a version, so a user
+           several releases behind matches nothing and would take the full 1.4 GB. All four are keyed
+           on CFBundleVersion, which is what Sparkle looks a delta up by. -->
+      <sparkle:deltas>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.5.0/Kelvin-0.5.0-from-258.delta"
+          sparkle:deltaFrom="258"
+          sparkle:edSignature="LbyBSEeGrmjsxzgSFu8V5hdfuvuVg7qQ6AXGjfrHnLX5697oQWtK1RqSsMHCVMVDFM7GNdJ+Z3kOYVP3lKjyBw=="
+          length="1721766"
+          type="application/octet-stream"/>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.5.0/Kelvin-0.5.0-from-247.delta"
+          sparkle:deltaFrom="247"
+          sparkle:edSignature="Xeh+WI0YVCrwe0srkP59qMc+zaegEA/iRMY4a8YPriVXtlPBqQbANJUnVvfpkY6mVc9FWDcwE90ENnLQ2RjUDg=="
+          length="2334462"
+          type="application/octet-stream"/>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.5.0/Kelvin-0.5.0-from-202.delta"
+          sparkle:deltaFrom="202"
+          sparkle:edSignature="L+CwPb39V1HVHDa2RqaPi+p0x0xzicUSyc3S9cR5qqcfY2IbNlL1LBiLB4UigzottQ6/49zCHop8Oa3d3z1wDw=="
+          length="2581718"
+          type="application/octet-stream"/>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.5.0/Kelvin-0.5.0-from-191.delta"
+          sparkle:deltaFrom="191"
+          sparkle:edSignature="vdq0D0jOnQ3S8xbLjA9WyJeoRKLI19c/8NEVwGdjeqDkuNk4YjMctMU/RIGYwfBEzJ3vjxR5gsLTPA4qf9hGBA=="
+          length="2652614"
+          type="application/octet-stream"/>
+      </sparkle:deltas>
+    </item>
+    <item>
       <title>Kelvin 0.4.0 — quicker to open, truer to the photograph</title>
       <pubDate>Wed, 29 Jul 2026 21:03:14 -0700</pubDate>
       <sparkle:version>258</sparkle:version>
