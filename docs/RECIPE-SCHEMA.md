@@ -24,7 +24,8 @@ The VLM emits **only** this. Categorical judgments, no numbers, no adjustments.
     "present": true,
     "type": "person",
     "count": "single",
-    "placement": "center-left"
+    "placement": "center-left",
+    "label": "bride"
   },
   "lighting": {
     "condition": "golden-hour",
@@ -48,9 +49,10 @@ Keep these closed. An open vocabulary makes the recipe engine untestable.
 | Field | Allowed values |
 |---|---|
 | `scene` | `portrait`, `landscape`, `street`, `interior`, `macro`, `night`, `event`, `still-life`, `document`, `other` |
-| `subject.type` | `person`, `animal`, `object`, `none` |
+| `subject.type` | `person`, `animal`, `object`, `natural-feature`, `none` — `natural-feature` is a landscape's dominant natural feature (sea stack, waterfall, lone tree); added by owner decision, 1 Aug 2026 |
 | `subject.count` | `none`, `single`, `few`, `crowd` |
 | `subject.placement` | 9-grid: `upper-left` … `center` … `lower-right`, or `distributed` |
+| `subject.label` | **Free text, the one exception** — one or two words naming the subject in the model's own language ("sea stack", "bride"). Display only: nothing in the engine may branch on it, the same rule as `notes`. Trimmed, capped at 40 characters, absent when no subject. |
 | `lighting.condition` | `golden-hour`, `blue-hour`, `overcast`, `harsh-sun`, `open-shade`, `indoor-tungsten`, `indoor-mixed`, `indoor-daylight`, `night-ambient`, `flash`, `backlit` |
 | `lighting.direction` | `front`, `side`, `back`, `top`, `diffuse` |
 | `lighting.contrast_range` | `low`, `normal`, `high`, `extreme` |

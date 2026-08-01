@@ -37,9 +37,15 @@ public enum PerceptionPrompt {
           "scene": one of [\(list(Scene.self))],
           "subject": {
             "present": true or false,
-            "type": one of [\(list(SubjectType.self))],
+            "type": one of [\(list(SubjectType.self))] — natural-feature means a landscape's \
+        dominant natural feature (a sea stack, a waterfall, a lone tree); use it instead of \
+        "object" for such features, and only when one feature clearly dominates the frame. \
+        A living creature is always animal, never natural-feature, even when it is small in \
+        the frame,
             "count": one of [\(list(SubjectCount.self))],
-            "placement": one of [\(list(Placement.self))]
+            "placement": one of [\(list(Placement.self))],
+            "label": one or two words naming the subject in plain language, like "sea stack" \
+        or "dog" or "bride"; omit if no subject
           },
           "lighting": {
             "condition": one of [\(list(Condition.self))],

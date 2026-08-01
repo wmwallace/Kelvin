@@ -88,13 +88,21 @@ public struct Perception: Codable, Equatable, Sendable {
         public var type: SubjectType
         public var count: SubjectCount
         public var placement: Placement
+        /// A short name for the subject in the model's own words — "sea stack", "dog", "bride".
+        /// **Display only, and that is a rule, not a preference**: free text from a small model
+        /// is where hallucinations live, so nothing in the engine may branch on it — the same
+        /// discipline as "the model never emits numbers", applied to names. The closed `type`
+        /// vocabulary remains the only subject field a decision may read.
+        public var label: String?
 
         public static let absent = Subject(
             present: false, type: .none, count: .none, placement: .center
         )
 
-        public init(present: Bool, type: SubjectType, count: SubjectCount, placement: Placement) {
+        public init(present: Bool, type: SubjectType, count: SubjectCount, placement: Placement,
+                    label: String? = nil) {
             self.present = present; self.type = type; self.count = count; self.placement = placement
+            self.label = label
         }
 
         public init(from decoder: Decoder) throws {
@@ -103,6 +111,11 @@ public struct Perception: Codable, Equatable, Sendable {
             type = try c.decodeIfPresent(SubjectType.self, forKey: .type) ?? .none
             count = Self.decodeCount(c)
             placement = try c.decodeIfPresent(Placement.self, forKey: .placement) ?? .center
+            // Trimmed and capped, then emptied to nil: a blank label should read as "no label",
+            // and a runaway generation must not become a paragraph in a UI card.
+            let raw = try c.decodeIfPresent(String.self, forKey: .label)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            label = raw.flatMap { $0.isEmpty ? nil : String($0.prefix(40)) }
         }
 
         /// The VLM is asked for a `count` *word* (none/single/few/crowd) but a small model will
@@ -124,7 +137,7 @@ public struct Perception: Codable, Equatable, Sendable {
             }
         }
 
-        enum CodingKeys: String, CodingKey { case present, type, count, placement }
+        enum CodingKeys: String, CodingKey { case present, type, count, placement, label }
     }
 
     public struct Lighting: Codable, Equatable, Sendable {
@@ -182,6 +195,13 @@ public enum Scene: String, LenientEnum {
 
 public enum SubjectType: String, LenientEnum {
     case person, animal, object, none
+    /// A landscape's dominant natural feature — a sea stack, a waterfall, a lone tree. Added by
+    /// owner decision (1 Aug 2026) after the paired corpus showed the model *seeing* sea stacks
+    /// ("Dark silhouette of sea stacks…") and reporting no subject because the vocabulary had no
+    /// word for them — it split identical rock formations between `object` and `none`. A frame
+    /// read this way is eligible for the subject lift like `animal` (riding the salient-fallback
+    /// mask), and is deliberately NOT a warm subject: rock and water have no skin-hue claim.
+    case naturalFeature = "natural-feature"
     public static let fallback = SubjectType.none
 }
 

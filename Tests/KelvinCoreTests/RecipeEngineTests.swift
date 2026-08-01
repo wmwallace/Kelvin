@@ -156,6 +156,40 @@ final class RecipeEngineTests: XCTestCase {
         XCTAssertLessThanOrEqual(r.global.vibrance, 10)
     }
 
+    // MARK: - The natural-feature subject (owner decision, 1 Aug 2026)
+
+    /// A sea stack read as the subject gets the corrective lift an animal would — riding the
+    /// salient fallback — while a mere `object` read still does not: "there is an object" is not
+    /// "this frame is about one thing".
+    func testANaturalFeatureIsEligibleForTheSubjectLiftAndAnObjectIsNot() {
+        let s = neutralStats(medianLuma: 0.5)
+        // Subject 0.25 against scene 0.5: a 0.25 deficit, comfortably past the backlit trigger.
+        let feature = RecipeEngine.subjectMask(
+            perception(scene: .landscape, subjectType: .naturalFeature), s,
+            subjectLuma: 0.25, subjectOrigin: .foreground)
+        XCTAssertNotNil(feature, "a dominant natural feature is a subject; the lift should fire")
+        XCTAssertEqual(feature?.type, "subject")
+
+        let object = RecipeEngine.subjectMask(
+            perception(scene: .landscape, subjectType: .object), s,
+            subjectLuma: 0.25, subjectOrigin: .foreground)
+        XCTAssertNil(object, "the object read must stay outside the lift gate")
+    }
+
+    /// Rock and water have no skin-hue claim: the warm-subject colour caps stay person/animal
+    /// only, so a dramatic natural-feature frame keeps its full vibrance headroom.
+    func testANaturalFeatureIsNotAWarmSubject() {
+        let s = neutralStats()
+        let person = RecipeEngine.recipe(
+            perception: perception(scene: .portrait, subjectType: .person,
+                                   problems: [.flat], intent: .dramatic), statistics: s)
+        let feature = RecipeEngine.recipe(
+            perception: perception(scene: .landscape, subjectType: .naturalFeature,
+                                   problems: [.flat], intent: .dramatic), statistics: s)
+        XCTAssertGreaterThan(feature.global.vibrance, person.global.vibrance,
+                             "a natural feature must not inherit the skin-hue vibrance cap")
+    }
+
     // MARK: - Near-neutral input stays near-neutral
 
     func testNeutralInputProducesNearNeutralRecipe() {

@@ -18,7 +18,7 @@ import Foundation
 public enum RecipeEngine {
     /// Engine version, recorded in provenance so a recipe on disk can be traced to the rules
     /// that made it. Bump on any change that moves the numbers.
-    public static let version = "0.3.0"
+    public static let version = "0.4.0"
 
     /// Below this confidence the engine drops all *stylistic* moves (contrast shaping,
     /// vibrance, point placement) and keeps only *corrective* ones justified purely by
@@ -266,8 +266,14 @@ public enum RecipeEngine {
     ///   description of a photograph of an animal in a way it is not of a landscape with people in it.
     static func subjectMask(_ p: Perception, _ s: ImageStatistics, subjectLuma: Double?,
                             subjectOrigin: SubjectMask.Origin? = nil) -> Mask? {
+        // `naturalFeature` is admitted by owner decision (1 Aug 2026): a sea stack read as the
+        // subject is eligible for the same corrective lift as an animal, riding the salient
+        // fallback. It is NOT a warm subject (no skin-hue claim) — `warmSubject` stays
+        // person/animal only. `object` stays out: "there is an object" is not "this frame is
+        // about one thing".
         guard let luma = subjectLuma, p.subject.present,
-              p.subject.type == .person || p.subject.type == .animal else { return nil }
+              p.subject.type == .person || p.subject.type == .animal
+              || p.subject.type == .naturalFeature else { return nil }
         // The read says "person"; the mask has to agree that it found one.
         if p.subject.type == .person, let subjectOrigin, subjectOrigin != .person { return nil }
 

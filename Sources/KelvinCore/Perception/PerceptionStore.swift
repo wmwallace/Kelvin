@@ -84,9 +84,22 @@ public enum PerceptionStore {
         let name = photo.lastPathComponent
         let identity = contentHint(for: photo).map { "\(name)-\($0)" }
             ?? photo.standardizedFileURL.path
-        let digest = SHA256.hash(data: Data(identity.utf8))
+        let digest = SHA256.hash(data: Data("\(identity)-\(promptSignature)".utf8))
         return digest.compactMap { String(format: "%02x", $0) }.joined()
     }
+
+    /// The instruction the model was read WITH is part of what the read means: change the
+    /// vocabulary or the rules and a cached answer is for a question nobody asks any more. When
+    /// the subject vocabulary gained `natural-feature`, every prior read of a sea-stack frame
+    /// said `object` or nothing — and with no prompt component in the key, those answers would
+    /// have been served forever (the store checks file bytes and model id only). Folding a hash
+    /// of the generated prompt into the key strands stale entries automatically on ANY prompt
+    /// or vocabulary change, the same move `ResolvedRecipeStore` makes with `tuningSignature`;
+    /// nobody has to remember to bump anything, because the prompt is derived from the enums.
+    static let promptSignature: String = {
+        let digest = SHA256.hash(data: Data(PerceptionPrompt.instruction().utf8))
+        return digest.prefix(4).map { String(format: "%02x", $0) }.joined()
+    }()
 
     public static func url(for photo: URL) -> URL {
         directory.appendingPathComponent(key(for: photo)).appendingPathExtension("json")

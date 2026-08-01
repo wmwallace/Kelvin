@@ -119,6 +119,30 @@ final class PerceptionSeamTests: XCTestCase {
         XCTAssertThrowsError(try PerceptionParser.parse("I cannot analyze this image."))
     }
 
+    /// The category added by owner decision (1 Aug 2026): a landscape's dominant natural feature
+    /// is a subject. Before it existed the model split identical sea stacks between `object` and
+    /// `none` — the closed vocabulary had no word for the thing its own notes were naming.
+    func testNaturalFeatureIsAVocabularyWord() throws {
+        let raw = #"{"scene":"landscape","subject":{"present":true,"type":"natural-feature","count":"single","placement":"center","label":"sea stack"},"lighting":{"condition":"overcast","direction":"back","contrast_range":"high"},"problems":[],"intent":"documentary","confidence":0.8}"#
+        let p = try PerceptionParser.parse(raw)
+        XCTAssertEqual(p.subject.type, .naturalFeature)
+        XCTAssertEqual(p.subject.label, "sea stack")
+    }
+
+    /// The label is free text from a small model, so it gets the lenience the schema gives
+    /// everything else: trimmed, capped, and emptied to nil — never a reason to fail the read.
+    func testSubjectLabelIsTrimmedCappedAndEmptiedToNil() throws {
+        func subject(labelJSON: String) throws -> Perception.Subject {
+            try PerceptionParser.parse(
+                #"{"scene":"landscape","subject":{"present":true,"type":"object","count":"single","placement":"center","label":"# + labelJSON + #"},"lighting":{"condition":"overcast","direction":"front","contrast_range":"normal"},"problems":[],"intent":"natural","confidence":0.8}"#
+            ).subject
+        }
+        XCTAssertEqual(try subject(labelJSON: #""  sea stack \n""#).label, "sea stack")
+        XCTAssertNil(try subject(labelJSON: #""   ""#).label, "whitespace should read as no label")
+        let runaway = String(repeating: "very ", count: 30) + "long"
+        XCTAssertEqual(try subject(labelJSON: "\"\(runaway)\"").label?.count, 40)
+    }
+
     // MARK: - Proxy
 
     func testProxyCapsLongEdgeAndPreservesAspect() {

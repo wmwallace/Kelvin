@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 @testable import KelvinCore
 
@@ -162,5 +163,32 @@ final class PerceptionStoreTests: XCTestCase {
         PerceptionStore.save(read(.portrait, notes: sentence), for: photo, modelId: "model-a")
         let back = try XCTUnwrap(PerceptionStore.load(for: photo, modelId: "model-a"))
         XCTAssertEqual(back.notes, sentence)
+    }
+
+    /// A read answers the QUESTION it was asked. When the subject vocabulary gained
+    /// `natural-feature`, every earlier read of a sea-stack frame said `object` or nothing, and a
+    /// key without a prompt component would have served those answers forever. So the prompt's
+    /// hash is folded into the key: an entry written under any other instruction is simply
+    /// unreachable — stranded, not migrated, exactly like `ResolvedRecipeStore` under a changed
+    /// `tuningSignature`.
+    func testAReadFromAnotherPromptIsUnreachable() throws {
+        // An entry at the identity-only key — where every pre-vocabulary-change entry lives.
+        let hint = try XCTUnwrap(PerceptionStore.contentHint(for: photo))
+        let identity = "\(photo.lastPathComponent)-\(hint)"
+        let oldKey = SHA256.hash(data: Data(identity.utf8))
+            .compactMap { String(format: "%02x", $0) }.joined()
+        let record = ["modelId": "model-a"]  // shape is irrelevant; reachability is the test
+        try JSONSerialization.data(withJSONObject: record).write(
+            to: PerceptionStore.directory.appendingPathComponent(oldKey)
+                .appendingPathExtension("json"))
+        defer { try? FileManager.default.removeItem(
+            at: PerceptionStore.directory.appendingPathComponent(oldKey)
+                .appendingPathExtension("json")) }
+
+        XCTAssertNil(PerceptionStore.load(for: photo, modelId: "model-a"),
+                     "an entry keyed without the prompt signature was served")
+        // And the current-format round trip still works beside it.
+        PerceptionStore.save(read(.landscape), for: photo, modelId: "model-a")
+        XCTAssertNotNil(PerceptionStore.load(for: photo, modelId: "model-a"))
     }
 }
