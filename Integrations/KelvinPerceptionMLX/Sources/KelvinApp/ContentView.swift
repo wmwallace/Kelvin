@@ -1798,26 +1798,47 @@ final class AppState: ObservableObject {
                     }
                 }
                 for _ in 0..<min(limit, pending.count) { start() }
+
+                // Published in BATCHES, not per completion. Every arriving frame used to publish
+                // three times — `triage`, `focus`, progress — and with the `Best` filter active
+                // each publish re-evaluates `visiblePhotos`, which sorts and regroups the whole
+                // shoot; the Similar lens pays for `stripGroups` again on top. On a 437-frame
+                // folder that is ~1300 SwiftUI invalidations each dragging an O(n log n) pass
+                // across the main thread while the scan is trying to use it. Eight completions
+                // per flush is one strip window's worth: the strip still fills in visibly, at a
+                // fraction of the invalidations.
+                let flushEvery = 8
+                var batch: [(URL, PhotoTriage.Verdict)] = []
+                @MainActor func flush(into state: AppState) {
+                    for (url, verdict) in batch {
+                        state.triage[url] = verdict
+                        // The focus reading rides INSIDE the verdict — same 1200 px proxy, same
+                        // `FocusMeasure.read`. Published separately as well because `softCount`,
+                        // the Focus filter and the strip's soft badge all key off this dictionary,
+                        // and a measurement moving house is not a reason to make three working
+                        // things reach through a verdict for it.
+                        state.focus[url] = verdict.focus
+                    }
+                    batch.removeAll(keepingCapacity: true)
+                    state.focusScanProgress = Double(done) / Double(pending.count)
+                }
+
                 for await (url, verdict) in group {
                     guard let self else { return }
                     // Cancellation is checked where the work is HANDED OUT as well as where it
                     // lands: `group.cancelAll()` stops the queue from issuing more decodes, which is
                     // the expensive half. The already-measured frames are kept — a verdict is a
-                    // verdict whether or not you stayed to watch it arrive.
+                    // verdict whether or not you stayed to watch it arrive — which is why the
+                    // trailing flush below runs on this path too.
                     if Task.isCancelled { group.cancelAll(); break }
-                    if let verdict {
-                        self.triage[url] = verdict
-                        // The focus reading rides INSIDE the verdict — same 1200 px proxy, same
-                        // `FocusMeasure.read`. Published separately as well because `softCount`, the
-                        // Focus filter and the strip's soft badge all key off this dictionary, and a
-                        // measurement moving house is not a reason to make three working things
-                        // reach through a verdict for it.
-                        self.focus[url] = verdict.focus
-                    }
+                    if let verdict { batch.append((url, verdict)) }
                     done += 1
-                    self.focusScanProgress = Double(done) / Double(pending.count)
+                    if done % flushEvery == 0 { flush(into: self) }
                     start()          // keep `limit` in flight until the queue is empty
                 }
+                // The final partial batch: the last `pending.count % flushEvery` frames on a
+                // normal finish, or whatever had already landed when the scan was cancelled.
+                if let self { flush(into: self) }
             }
             self?.focusScanProgress = nil
         }

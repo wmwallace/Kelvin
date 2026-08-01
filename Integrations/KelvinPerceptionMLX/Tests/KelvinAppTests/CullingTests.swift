@@ -191,6 +191,43 @@ final class CullingTests: XCTestCase {
                        + "the filter reads an empty triage and shows everything, and no scan is coming")
     }
 
+    /// The scan lands its results in BATCHES of eight rather than one publish per frame, so a big
+    /// shoot no longer re-sorts the strip a thousand-odd times while measuring. What must not
+    /// change is where everything ends up: every measured frame in BOTH `triage` and `focus`, the
+    /// focus reading equal to the one riding inside its verdict, and the progress guard armed
+    /// immediately and nil at the end. Ten frames, so the test exercises both the cadence flush
+    /// (at eight) and the trailing partial flush (the last two).
+    func testScanPublishesInBatchesButEveryFrameStillLands() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kelvin-scan-batch-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        var photos: [URL] = []
+        for i in 0..<10 {
+            let u = dir.appendingPathComponent(String(format: "_DSC%04d.jpg", i + 1))
+            try writeJPEG(to: u, seed: UInt8(20 + i * 20))
+            photos.append(u)
+        }
+
+        let s = AppState()
+        s.folderPhotos = photos
+        s.scanFocus()
+        XCTAssertNotNil(s.focusScanProgress,
+                        "the re-entry guard must arm the moment the scan is asked for, "
+                        + "not on the first batch")
+        for _ in 0..<600 where s.focusScanProgress != nil {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertNil(s.focusScanProgress, "the scan should finish and clear its own guard")
+        XCTAssertEqual(s.triage.count, photos.count, "a batched frame went missing from triage")
+        XCTAssertEqual(s.focus.count, photos.count, "a batched frame went missing from focus")
+        for u in photos {
+            XCTAssertEqual(s.focus[u], s.triage[u]?.focus,
+                           "the two dictionaries disagree about \(u.lastPathComponent) — "
+                           + "batching published one without the other")
+        }
+    }
+
     /// A small real JPEG, so the triage scan has something it can actually decode and record.
     private func writeJPEG(to url: URL, seed: UInt8) throws {
         let w = 64, h = 64, bpr = w * 4
