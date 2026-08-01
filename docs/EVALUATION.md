@@ -316,6 +316,24 @@ So the person-frame lift is calibrated; the salient shortfall is a robustness-vs
 tradeoff, not a constant to sweep, and the frames to eyeball are the opposite-direction cases
 (photographer lifted, engine darkened: `_DSC6763`, `_DSC6835`).
 
+⛔ **The salient gap was then chased to ground, and no engine constant closes it.** Two levers
+were built and swept (`KELVIN_SALIENT_LIFT`, which remains as an instrument, and a trigger-band
+"slack" for animal reads, which was reverted):
+
+- **Strength is not the lever.** The lift fires on only 2 of the 14 salient frames, and both
+  are already at or past the photographer at 1.0×. Raising the scale to 4× moves the salient
+  median not at all (+0.36 at every arm) and only overshoots the two firing frames.
+- **The gates are not the lever either.** Fully admitting the silhouetted-birds frame
+  (`_DSC6835`) moved it +0.12 EV against its +0.51 gap — the photographer brightened that
+  frame's *background* +0.20 too. These are whole-frame lifts of deliberately dark captures:
+  §7.3c's standing owner ruling, reached through the mask instrument.
+- **What the gap actually is**, frame by frame: perception holes (`subject.present: false` on
+  `_DSC6763`; type neither person nor animal on others) — a perception-category question,
+  which CLAUDE.md says to ask about, not code around; the person-origin halo gate blocking
+  salient-mask lifts on person-labelled frames the photographer lifted hardest
+  (`_DSC6307`/`_DSC6308`, +0.80/+0.33) — re-opening that needs a discriminator sharper than
+  coverage, which measurement already ruled out once; and the deliberately-dark family above.
+
 ## Which illuminant estimate is right
 
 `ablate` says *which lever* is wrong. When the answer is white balance — it has been, twice — the

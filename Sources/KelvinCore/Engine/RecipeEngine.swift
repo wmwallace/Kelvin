@@ -49,6 +49,7 @@ public enum RecipeEngine {
             "maskFloor:\(SkyMask.brightFloor)",
             "maskRamp:\(SkyMask.brightRamp)",
             "whiteTarget:\(whitePointTarget)",
+            "salientLift:\(SalientLift.scale)",
             "wbEstimator:\(estimator.rawValue)",
             "wbEdgeP:\(ImageStatistics.edgeMinkowskiP)",
             "wbDeadband:\(castDeadband)"
@@ -145,6 +146,32 @@ public enum RecipeEngine {
         /// note at the use site — this is a fraction of the FRAME, not of the mask's resolution.
         public static let feather = ProcessInfo.processInfo.environment["KELVIN_SKY_FEATHER"]
             .flatMap(Double.init).map { min(100.0, max(0.0, $0)) } ?? 16
+    }
+
+    /// Strength of the subject lift when the mask came from the SALIENT-OBJECT FALLBACK
+    /// (`SubjectMask.Origin.foreground`) — in practice, animal subjects, which person
+    /// segmentation never finds and which are deliberately allowed to ride the fallback
+    /// (see `subjectMask`). A multiple of the shipped behaviour: 1.0 is exactly what ships
+    /// today; 2.0 doubles the computed lift and stretches the caps with it.
+    ///
+    /// Sweepable for the same reason `SkyLever` and `whitePointTarget` are. Measured with
+    /// `bg-probe --perception-dir` over 77 real capture/edit pairs, the photographer lifts the
+    /// subject a median +0.36 EV MORE than the engine does on salient-fallback frames (n=14),
+    /// against +0.08 on person-segmented frames — the person path is calibrated, the fallback
+    /// path is not, and this lever exists so the fallback can be re-measured without touching
+    /// the person path (the scale is applied only when the mask origin is `.foreground`).
+    ///
+    /// In `tuningSignature`, so a cached resolved recipe from another arm cannot poison a sweep.
+    public enum SalientLift {
+        public static let scale = ProcessInfo.processInfo.environment["KELVIN_SALIENT_LIFT"]
+            .flatMap(Double.init).map { min(4.0, max(0.0, $0)) } ?? 1.0
+
+        // A trigger-band widening for animal reads ("slack") was also tried and REVERTED —
+        // measured on the 77 pairs, the bands miss the silhouetted-birds frame by 0.04–0.08 in
+        // the shipped compose path (not the ~0.01 a first debug suggested), and admitting it
+        // outright bought +0.12 EV against a +0.51 gap: the photographer brightens the WHOLE of
+        // such a frame (+0.20 on its background too), which is the deliberately-dark ruling's
+        // territory, not a mask-gate defect. Do not re-add slack without new evidence.
     }
 
     public static func recipe(
@@ -258,7 +285,15 @@ public enum RecipeEngine {
         } else {
             lift = log2(max(luma + 0.08, 0.24) / max(0.06, luma)) * 0.6
         }
-        let ev = roundedClamp(lift, to: 0...0.85, step: 0.01)
+        // The salient-fallback path only: person-origin masks keep the calibrated behaviour
+        // exactly (scale pinned to 1.0, and `lift * 1.0 == lift` bit-for-bit), and so do legacy
+        // callers that pass no origin. The caps stretch with the scale — at 2× a cap that stayed
+        // at 0.6 would swallow most of the doubling and the sweep would flatline against the
+        // clamp, not against the picture. They never shrink below the shipped values, so a
+        // sub-1.0 arm scales the lift without also tightening its ceiling.
+        let scale = subjectOrigin == .foreground ? SalientLift.scale : 1.0
+        let cap = max(1.0, scale)
+        let ev = roundedClamp(lift * scale, to: 0...(0.85 * cap), step: 0.01)
         guard ev > 0.05 else { return nil }
 
         return Mask(
@@ -284,8 +319,8 @@ public enum RecipeEngine {
             // which is why the shared `0.06` constant in the renderer is left alone.
             feather: 6, opacity: 1.0,
             // Shadows (detail recovery) weighted over raw exposure — kinder to skin at any tone.
-            adjustments: ["exposure_ev": roundedClamp(ev * 0.7, to: 0...0.6, step: 0.01),
-                          "shadows": roundedClamp(ev * 45, to: 0...35, step: 1)]
+            adjustments: ["exposure_ev": roundedClamp(ev * 0.7, to: 0...(0.6 * cap), step: 0.01),
+                          "shadows": roundedClamp(ev * 45, to: 0...min(100, 35 * cap), step: 1)]
         )
     }
 
