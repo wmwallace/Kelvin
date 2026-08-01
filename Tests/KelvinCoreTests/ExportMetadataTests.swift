@@ -52,6 +52,20 @@ final class ExportMetadataTests: XCTestCase {
             kCGImagePropertyTIFFDictionary as String: [
                 kCGImagePropertyTIFFMake as String: "SONY",
                 kCGImagePropertyTIFFModel as String: "ILCE-7M4"
+            ],
+            // The AUX spellings differ from the EXIF ones — that difference is the leak an audit
+            // caught, so the fixture carries both, the way a Canon body does.
+            kCGImagePropertyExifAuxDictionary as String: [
+                kCGImagePropertyExifAuxSerialNumber as String: "AUXSERIAL999",
+                kCGImagePropertyExifAuxOwnerName as String: "W. Wallace",
+                kCGImagePropertyExifAuxLensModel as String: "RF 24-70mm"
+            ],
+            // Place names with no GPS at all is exactly how a Lightroom export can arrive.
+            kCGImagePropertyIPTCDictionary as String: [
+                kCGImagePropertyIPTCCity as String: "Olympia",
+                kCGImagePropertyIPTCProvinceState as String: "WA",
+                kCGImagePropertyIPTCCountryPrimaryLocationName as String: "United States",
+                kCGImagePropertyIPTCObjectName as String: "Lakeside"
             ]
         ]
         CGImageDestinationAddImage(destination, cg, properties as CFDictionary)
@@ -130,6 +144,32 @@ final class ExportMetadataTests: XCTestCase {
 
         let written = try properties(of: out)
         XCTAssertNil(written[kCGImagePropertyGPSDictionary as String])
+    }
+
+    /// The audit findings, pinned. {ExifAux} names the same facts differently — `SerialNumber`,
+    /// `OwnerName` — and the first scrub list removed only the EXIF spellings, so a Canon body's
+    /// serial travelled through "location off". And place NAMES are location: IPTC City/State/
+    /// Country must go with the coordinates, while the caption-side IPTC fields travel.
+    func testRemovingLocationScrubsTheAuxSerialAndThePlaceNames() throws {
+        let source = try makeSourceFile()
+        let edited = Renderer.render(try XCTUnwrap(CIImage(contentsOf: source)), with: lifted)
+        let out = directory.appendingPathComponent("scrubbed-aux.jpg")
+        try ImageWriter.write(edited, to: out, metadata: .withoutLocation)
+
+        let written = try properties(of: out)
+        let aux = written[kCGImagePropertyExifAuxDictionary as String] as? [String: Any]
+        XCTAssertNil(aux?[kCGImagePropertyExifAuxSerialNumber as String],
+                     "the AUX spelling of the body serial must go too")
+        XCTAssertNil(aux?[kCGImagePropertyExifAuxOwnerName as String])
+        XCTAssertEqual(aux?[kCGImagePropertyExifAuxLensModel as String] as? String, "RF 24-70mm",
+                       "the lens is photography, not identity")
+        let iptc = written[kCGImagePropertyIPTCDictionary as String] as? [String: Any]
+        XCTAssertNil(iptc?[kCGImagePropertyIPTCCity as String],
+                     "a place name is location as surely as a coordinate")
+        XCTAssertNil(iptc?[kCGImagePropertyIPTCProvinceState as String])
+        XCTAssertNil(iptc?[kCGImagePropertyIPTCCountryPrimaryLocationName as String])
+        XCTAssertEqual(iptc?[kCGImagePropertyIPTCObjectName as String] as? String, "Lakeside",
+                       "the caption side of IPTC travels")
     }
 
     /// Scrubbing is metadata-only. It must not touch a single pixel — the whole point of doing it on

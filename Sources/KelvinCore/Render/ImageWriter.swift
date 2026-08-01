@@ -253,14 +253,35 @@ public enum ImageWriter {
         var properties = image.properties
         properties.removeValue(forKey: kCGImagePropertyGPSDictionary as String)
 
+        // The AUX dictionary names the same facts DIFFERENTLY — `SerialNumber` and `OwnerName`,
+        // not `BodySerialNumber` and `CameraOwnerName`. An audit caught the first version of this
+        // list removing the EXIF spellings from both dictionaries, which left a Canon body's
+        // serial travelling through "location off" in {ExifAux} while the doc comment promised it
+        // was gone. Both spellings go from both dictionaries; an absent key removes nothing.
         let identityKeys = [kCGImagePropertyExifBodySerialNumber as String,
                             kCGImagePropertyExifCameraOwnerName as String,
-                            kCGImagePropertyExifLensSerialNumber as String]
+                            kCGImagePropertyExifLensSerialNumber as String,
+                            kCGImagePropertyExifAuxSerialNumber as String,   // "SerialNumber"
+                            kCGImagePropertyExifAuxOwnerName as String]      // "OwnerName"
         for dictionaryKey in [kCGImagePropertyExifDictionary as String,
                               kCGImagePropertyExifAuxDictionary as String] {
             guard var exif = properties[dictionaryKey] as? [String: Any] else { continue }
             for key in identityKeys { exif.removeValue(forKey: key) }
             properties[dictionaryKey] = exif
+        }
+        // Place NAMES are location too. A Lightroom export can carry City / Sub-location /
+        // Province-State / Country in {IPTC} (ImageIO also synthesises these from XMP on read)
+        // with no GPS dictionary at all — and "not where it was taken" must mean the words as
+        // well as the coordinates. The rest of IPTC (caption, keywords, credit) travels.
+        if var iptc = properties[kCGImagePropertyIPTCDictionary as String] as? [String: Any] {
+            for key in [kCGImagePropertyIPTCCity as String,
+                        kCGImagePropertyIPTCSubLocation as String,
+                        kCGImagePropertyIPTCProvinceState as String,
+                        kCGImagePropertyIPTCCountryPrimaryLocationName as String,
+                        kCGImagePropertyIPTCCountryPrimaryLocationCode as String] {
+                iptc.removeValue(forKey: key)
+            }
+            properties[kCGImagePropertyIPTCDictionary as String] = iptc
         }
         // TIFF carries Make and Model, which stay — "shot on a Sony A7" is a photographic fact, not
         // an identifier. It can also carry a copy of the artist/copyright fields, which stay for the
