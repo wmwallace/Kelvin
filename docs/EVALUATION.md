@@ -316,6 +316,20 @@ So the person-frame lift is calibrated; the salient shortfall is a robustness-vs
 tradeoff, not a constant to sweep, and the frames to eyeball are the opposite-direction cases
 (photographer lifted, engine darkened: `_DSC6763`, `_DSC6835`).
 
+⛔ **A ninth candidate style ("Separation") was prototyped and died in the harness — read this
+before proposing a mask-led style again.** Built on the measured signature (a style-scoped
+`subjectLiftBiasEV`), swept at 0.35/0.25/0.15/0.10 over the 77 pairs: every column improved
+monotonically as the bias SHRANK (the sky pull carries the value, not the lift), the all-9 oracle
+floor genuinely dropped (6.9563 → 6.7907, closest style on 20/77), **and the curated engine-best
+never moved a byte** — the style was curated 0/77. Root cause is ORDER, not distance: the curated
+four fill from the first styles in engine order (natural/soft/vivid/dramatic are mutually ≥12
+apart on 75/77 frames), so a ninth appended style is unreachable whatever the distance function
+says. The curator's mask-blindness (its distance read globals only — any mask-led candidate was
+invisible) was a real latent bug and IS fixed and kept; the fix flips no current decision. The
+unlock paths are all product calls: reorder the roster (displaces an incumbent on ~every frame),
+five slots, or the preference loop's rank step once the style can be shown at all. Sweep JSONs in
+the ninth session's scratchpad (`eval-pairs-sep-*`, `eval-pairs-cur-*`).
+
 ⛔ **The salient gap was then chased to ground, and no engine constant closes it.** Two levers
 were built and swept (`KELVIN_SALIENT_LIFT`, which remains as an instrument, and a trigger-band
 "slack" for animal reads, which was reverted):

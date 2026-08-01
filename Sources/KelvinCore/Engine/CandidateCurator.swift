@@ -135,6 +135,14 @@ public enum CandidateCurator {
     /// How far apart two candidates look, in the units the recipe is written in. Contrast and
     /// colour dominate what the eye reads as "a different look", so they carry the most weight;
     /// exposure is scaled up because a stop is a much bigger visual step than a point of contrast.
+    ///
+    /// **Masks count.** They didn't, and that made every mask-led look invisible: a style whose
+    /// entire character is local — a subject lift, a grad-ND sky pull — measured as distance 0
+    /// from Natural and was dropped as a near-duplicate on every frame, unreachable by any
+    /// photographer. The same blindness understated Dramatic-vs-Airy (their skies differ by 2 EV
+    /// of `skyDepth`). The mask term below is the same weighted-absolute-difference scheme as the
+    /// global term, over the union of the two recipes' masks by id — a mask only one side carries
+    /// compares against no-edit, exactly as `nil` temperature compares as 6500.
     public static func distance(_ a: Recipe, _ b: Recipe) -> Double {
         let x = a.global, y = b.global
         var d = 0.0
@@ -155,6 +163,46 @@ public enum CandidateCurator {
         let ta = x.temperatureK ?? 6500
         let tb = y.temperatureK ?? 6500
         d += abs(ta - tb) / 300.0 * 6.0
+        d += maskDistance(a.masks, b.masks)
+        return d
+    }
+
+    /// The masked half of `distance`: per-adjustment absolute differences across the union of the
+    /// two recipes' masks, keyed by mask id (the engine's ids are stable — "subject", "sky").
+    ///
+    /// **Weights are the global weights, halved, in each adjustment's own units.** Halved because
+    /// a masked adjustment reaches only the pixels under its alpha, and the measured attenuation
+    /// sits near a half: the sky mask's mean alpha is 0.55 on real coastal frames (see `skyMask`),
+    /// and a subject mask covers a fraction of frame at full alpha. So a 0.25 EV mask lift scores
+    /// 3.75 against exposure's global 30/EV — a real contribution toward `minimumSeparation` (12)
+    /// without letting a local edit outweigh the whole-frame move the eye reads first. `shadows`
+    /// and `highlights` take the endpoint weight (`whites`/`blacks`, 0.5) halved, the nearest
+    /// global unit to a tonal-band move. Deterministic, allocation-light, and zero for any recipe
+    /// pair without masks — every existing globals-only comparison is unchanged.
+    static func maskDistance(_ a: [Mask]?, _ b: [Mask]?) -> Double {
+        // Both nil (the overwhelmingly common indoor case) costs one comparison and no work.
+        guard a != nil || b != nil else { return 0 }
+        let weights: [String: Double] = [
+            "exposure_ev": 15,     // global exposureEV: 30
+            "contrast": 0.5,       // global contrast: 1.0
+            "saturation": 0.4,     // global saturation: 0.8
+            "vibrance": 0.4,       // global vibrance: 0.8
+            "shadows": 0.25,       // global whites/blacks (endpoint): 0.5
+            "highlights": 0.25
+        ]
+        func byID(_ ms: [Mask]?) -> [String: [String: Double]] {
+            var t: [String: [String: Double]] = [:]
+            for m in ms ?? [] { t[m.id] = m.adjustments }
+            return t
+        }
+        let ma = byID(a), mb = byID(b)
+        var d = 0.0
+        for id in Set(ma.keys).union(mb.keys) {
+            let aa = ma[id] ?? [:], bb = mb[id] ?? [:]
+            for key in Set(aa.keys).union(bb.keys) {
+                d += abs((aa[key] ?? 0) - (bb[key] ?? 0)) * (weights[key] ?? 0.25)
+            }
+        }
         return d
     }
 }

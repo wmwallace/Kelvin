@@ -186,3 +186,50 @@ final class CuratorTemperatureDistanceTests: XCTestCase {
         XCTAssertEqual(CandidateCurator.distance(implicitNeutral, explicitNeutral), 0, accuracy: 0.001)
     }
 }
+
+/// Divergence has to be able to see a MASK difference too, or a look whose whole character is
+/// local — the Separation style's subject lift, Dramatic's grad-ND sky — measures as identical to
+/// the faithful rendering and is dropped as a near-duplicate on every frame. That is not
+/// hypothetical: with globals-only distance, Separation was curated on 0 of 77 corpus frames.
+final class CuratorMaskDistanceTests: XCTestCase {
+
+    private func recipe(id: String, masks: [Mask]?) -> Recipe {
+        Recipe(schemaVersion: 1, id: id, label: id, provenance: nil,
+               global: .neutral, curve: nil, hsl: nil, masks: masks, detail: nil, geometry: nil)
+    }
+
+    private func subjectLift(_ ev: Double) -> Mask {
+        Mask(id: "subject", type: "subject", source: "segmentation", invert: false,
+             feather: 6, opacity: 1.0,
+             adjustments: ["exposure_ev": ev * 0.7, "shadows": (ev * 45).rounded()])
+    }
+
+    /// A mask only one side carries compares against no-edit — the Separation-vs-Natural case.
+    func testAMaskOnlyOneSideCarriesRegistersAsDistance() {
+        let natural = recipe(id: "natural", masks: nil)
+        let separation = recipe(id: "separation", masks: [subjectLift(0.25)])
+        XCTAssertGreaterThan(CandidateCurator.distance(natural, separation), 0,
+                             "a subject lift the other candidate lacks must count as a difference")
+    }
+
+    /// Identical masks contribute nothing, and no masks at all still measures 0 — the globals-only
+    /// comparisons that decided every curation before this term are unchanged.
+    func testIdenticalOrAbsentMasksContributeNothing() {
+        let a = recipe(id: "a", masks: [subjectLift(0.3)])
+        let b = recipe(id: "b", masks: [subjectLift(0.3)])
+        XCTAssertEqual(CandidateCurator.distance(a, b), 0, accuracy: 0.001)
+        XCTAssertEqual(CandidateCurator.distance(recipe(id: "c", masks: nil),
+                                                 recipe(id: "d", masks: nil)), 0, accuracy: 0.001)
+    }
+
+    /// The weight calibration in one number: a masked EV counts half a global EV, so a 0.25 EV
+    /// subject lift (exposure 0.175, shadows 11) lands well short of `minimumSeparation` on its
+    /// own but is no longer invisible. Sky masks differing by real depth (Dramatic vs Airy carry
+    /// opposite-signed pulls) separate further.
+    func testMaskedEVWeighsHalfAGlobalEV() {
+        let lift = 0.25
+        let d = CandidateCurator.maskDistance([subjectLift(lift)], nil)
+        let expected = lift * 0.7 * 15 + (lift * 45).rounded() * 0.25
+        XCTAssertEqual(d, expected, accuracy: 0.001)
+    }
+}
