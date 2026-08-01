@@ -471,7 +471,7 @@ final class AppState: ObservableObject {
                                                   in: subjectInstances) else {
             // Stay armed: a miss is usually an aim problem, and disarming would make the user
             // re-arm the tool to try the same object half an inch to the left.
-            statusMessage = "Nothing detected there — Kelvin only finds subjects that stand out. "
+            statusMessage = "Nothing detected there — \(Branding.displayName) only finds subjects that stand out. "
                 + "Try the middle of the object, or use a brush mask."
             return
         }
@@ -6838,7 +6838,7 @@ struct ContentView: View {
                                          icon: "hand.point.up.left")
                         }
                         .buttonStyle(.plain)
-                        .help("Click something in the picture to mask it. Kelvin only finds "
+                        .help("Click something in the picture to mask it. \(Branding.displayName) only finds "
                               + "subjects that stand out from their background.")
                     }
                     // Auto-detected masks (subject / sky): toggle + strength.
@@ -8494,7 +8494,7 @@ struct UserMaskEditor: View {
                 // because the card had promised a person.
                 Text(subjectIsPerson
                      ? "The detected person — lift, model, or recover them without touching the scene."
-                     : "The main object Kelvin could isolate — not a person in this frame, so lift it gently: a large exposure change through a soft edge shows as a halo.")
+                     : "The main object \(Branding.displayName) could isolate — not a person in this frame, so lift it gently: a large exposure change through a soft edge shows as a halo.")
                     .font(Theme.mono(9)).foregroundColor(Theme.inkDim).fixedSize(horizontal: false, vertical: true)
             case .instance:
                 Text("Just this one — everything else in the frame is untouched.")

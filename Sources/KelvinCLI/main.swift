@@ -1307,9 +1307,11 @@ case "mask-coverage":
         print("  sky mask:     \(haveSky) (\(pct(haveSky)))")
         print("  NEITHER:      \(haveNeither) (\(pct(haveNeither))) — global-only edits on these")
         let sorted = unmasked.sorted()
-        print(String(format: "  fraction of the frame no mask touches: median %.0f%%, "
-                     + "best %.0f%%, worst %.0f%%",
-                     sorted[sorted.count / 2] * 100, sorted.first! * 100, sorted.last! * 100))
+        if let best = sorted.first, let worst = sorted.last {
+            print(String(format: "  fraction of the frame no mask touches: median %.0f%%, "
+                         + "best %.0f%%, worst %.0f%%",
+                         sorted[sorted.count / 2] * 100, best * 100, worst * 100))
+        }
     } catch {
         fail("\(error)")
     }

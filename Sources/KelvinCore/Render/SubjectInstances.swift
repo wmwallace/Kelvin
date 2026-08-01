@@ -334,8 +334,9 @@ public enum SubjectInstances {
         var seen: [String: Int] = [:]
         return items.map { item in
             guard (counts[item.label] ?? 0) > 1 else { return item }
-            seen[item.label, default: 0] += 1
-            return Instance(id: item.id, label: "\(item.label) \(seen[item.label]!)",
+            let ordinal = seen[item.label, default: 0] + 1
+            seen[item.label] = ordinal
+            return Instance(id: item.id, label: "\(item.label) \(ordinal)",
                             kind: item.kind, mask: item.mask, coverage: item.coverage,
                             boundingBox: item.boundingBox)
         }
