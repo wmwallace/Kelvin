@@ -4204,6 +4204,29 @@ final class AppState: ObservableObject {
         onEdit()
     }
 
+    /// The Binding a mask card edits through — by IDENTITY, never by position.
+    ///
+    /// `ForEach($userMasks)`'s element bindings are index-backed, and a TextField flushing a
+    /// pending rename in the same layout pass that removed its mask read `userMasks[i]` out of
+    /// bounds — an EXC_BREAKPOINT in the owner's first minutes with the build (SystemTextField's
+    /// value action fires during NSHostingView.layout, after the delete has landed). By identity,
+    /// a read of a departed mask serves the caller's fallback copy — harmless, the card is on its
+    /// way out — and a write to one is dropped rather than trapped on.
+    ///
+    /// `assumeIsolated`, not a hop: Bindings are only ever touched on the main thread, and the
+    /// closures themselves are nonisolated — the same shape, for the same reason, as the save
+    /// panel's name correction.
+    nonisolated func userMaskBinding(fallback m: UserMaskVM) -> Binding<UserMaskVM> {
+        Binding(
+            get: { MainActor.assumeIsolated {
+                self.userMasks.first(where: { $0.id == m.id }) ?? m
+            } },
+            set: { new in MainActor.assumeIsolated {
+                guard let i = self.userMasks.firstIndex(where: { $0.id == m.id }) else { return }
+                self.userMasks[i] = new
+            } })
+    }
+
     func clearStrokes(_ id: UUID) {
         guard let i = userMasks.firstIndex(where: { $0.id == id }) else { return }
         userMasks[i].stamps = []; onEdit()
@@ -7275,9 +7298,11 @@ struct ContentView: View {
                             onAdjustEnd: { appState.isAdjustingMaskTone = false; appState.onEdit() })
                     }
                     // Hand-drawn masks: gradient geometry or brush strokes + local adjustments.
-                    ForEach($appState.userMasks) { $m in
+                    // Identity bindings, not `ForEach($appState.userMasks)` — see
+                    // `userMaskBinding(fallback:)` for the crash the element bindings caused.
+                    ForEach(appState.userMasks) { m in
                         UserMaskEditor(
-                            mask: $m, onChange: appState.onEdit,
+                            mask: appState.userMaskBinding(fallback: m), onChange: appState.onEdit,
                             onDelete: { appState.removeUserMask(m.id) },
                             isSelected: appState.selectedUserMaskId == m.id,
                             // `onEdit()` is what rebuilds the render, and the render is what

@@ -275,4 +275,34 @@ final class UserMaskTests: XCTestCase {
         vm.instanceLabel = "Person 2"
         XCTAssertEqual(vm.displayName, "Person 2")
     }
+
+    /// The crash this pins: `ForEach($userMasks)` element bindings are index-backed, and a
+    /// TextField flushing a pending rename in the same layout pass that deleted its mask read
+    /// `userMasks[i]` out of bounds — EXC_BREAKPOINT, main thread, first minutes of use. The
+    /// identity binding must survive both halves of that race: reading a departed mask serves
+    /// the fallback instead of trapping, and writing one is dropped instead of landing on
+    /// whatever mask slid into the old position.
+    @MainActor
+    func testAMaskBindingSurvivesItsMaskBeingDeleted() {
+        let s = AppState()
+        var first = UserMaskVM(kind: .radial); first.name = "Sky corner"
+        let second = UserMaskVM(kind: .brush)
+        s.userMasks = [first, second]
+
+        let binding = s.userMaskBinding(fallback: first)
+        s.removeUserMask(first.id)
+
+        XCTAssertEqual(binding.wrappedValue.id, first.id, "a departed mask reads as its fallback")
+        var stale = binding.wrappedValue; stale.name = "renamed after death"
+        binding.wrappedValue = stale
+        XCTAssertEqual(s.userMasks.count, 1)
+        XCTAssertEqual(s.userMasks[0].id, second.id,
+                       "a write through a dead binding must not land on the survivor")
+
+        // And the surviving mask's binding still writes through.
+        let alive = s.userMaskBinding(fallback: second)
+        var renamed = alive.wrappedValue; renamed.name = "Dust"
+        alive.wrappedValue = renamed
+        XCTAssertEqual(s.userMasks[0].name, "Dust")
+    }
 }
