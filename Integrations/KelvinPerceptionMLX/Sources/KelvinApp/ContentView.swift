@@ -894,6 +894,10 @@ final class AppState: ObservableObject {
     private var seedTask: Task<Void, Never>?
 
     var isReadingShoot: Bool { shootReadTotal > 0 && shootReadDone < shootReadTotal }
+    /// Whether the current read is the whole-shoot sweep (Apply) rather than the browsing
+    /// neighborhood — the toolbar words them differently, because "Reading 5/16" over a
+    /// 110-frame folder made the owner ask what the 16 was.
+    var isSweepingShoot: Bool { readQueue.mode == .sweep }
 
     /// Read every frame the look covers that has not been read yet, in the background.
     ///
@@ -6851,14 +6855,24 @@ struct ContentView: View {
                         .help("Clear the strip selection — actions go back to covering the whole shoot")
                     }
                     // A background read is someone's fans spinning up. It says so, and it stops.
+                    // Two wordings, because they are two promises: the sweep is "your whole shoot,
+                    // because you pressed Apply"; the neighborhood is "the frames around where you
+                    // are, so the next arrow key doesn't wait" — and its total re-baselines as you
+                    // move, which without the words "ahead" read as a broken counter.
                     if appState.isReadingShoot {
                         Button(action: { appState.stopReadingShoot() }) {
-                            toolbarLabel("Reading \(appState.shootReadDone)/\(appState.shootReadTotal) — stop",
+                            toolbarLabel(appState.isSweepingShoot
+                                ? "Reading the shoot \(appState.shootReadDone)/\(appState.shootReadTotal) — stop"
+                                : "Reading ahead \(appState.shootReadDone)/\(appState.shootReadTotal) — stop",
                                          filled: false)
                         }
                         .buttonStyle(.plain)
-                        .help("Reading each frame now so export doesn't have to. Safe to stop — "
-                              + "anything unread is simply read at export instead.")
+                        .help(appState.isSweepingShoot
+                              ? "Reading each frame now so export doesn't have to. Safe to stop — "
+                                + "anything unread is simply read at export instead."
+                              : "Reading the \(ReadAheadQueue.neighborhoodSize) frames around this one "
+                                + "so the next arrow key doesn't wait. Safe to stop — a stopped "
+                                + "read-ahead stays stopped until you Apply or change shoots.")
                     }
                 }
                 // Press and hold to see the untouched original. DragGesture(minimumDistance:0) is
