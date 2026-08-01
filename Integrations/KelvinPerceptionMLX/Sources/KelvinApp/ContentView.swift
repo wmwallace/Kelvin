@@ -909,10 +909,20 @@ final class AppState: ObservableObject {
     func readShootAhead() {
         seedTask?.cancel()
         let modelId = perceptionProvider.activeModelID
-        let targets = applyScope().filter { PerceptionStore.load(for: $0, modelId: modelId) == nil }
-        readQueue.seedSweep(targets)
-        publishReadProgress()
-        ensureReadLoop()
+        let scope = applyScope()
+        seedTask = Task { [weak self] in
+            // The unread filter is a `stat` and a JSON decode per frame OF THE WHOLE SCOPE, at
+            // the moment Apply was clicked — off the main actor, like the neighborhood seed and
+            // every other per-file pass in this file. Same pattern, previously applied to one
+            // seeder and not the other.
+            let targets = await Task.detached(priority: .userInitiated) {
+                scope.filter { PerceptionStore.load(for: $0, modelId: modelId) == nil }
+            }.value
+            guard let self, !Task.isCancelled else { return }
+            self.readQueue.seedSweep(targets)
+            self.publishReadProgress()
+            self.ensureReadLoop()
+        }
     }
 
     /// Read the frames AROUND the photo on screen while nobody is waiting — so arrowing on to the
@@ -988,6 +998,15 @@ final class AppState: ObservableObject {
             }
             if Task.isCancelled { break }
             guard let url = readQueue.next() else { break }
+            // Re-check the store at CLAIM time, not just at seed time: during a sweep the
+            // foreground may have read and saved this exact frame (a sweep is never re-seeded),
+            // and a six-second generation for an answer already on disk is the one duplicate an
+            // audit found this loop could still spend.
+            if PerceptionStore.load(for: url, modelId: perceptionProvider.activeModelID) != nil {
+                readQueue.markDone()
+                publishReadProgress()
+                continue
+            }
             publishReadProgress()
             let modelId = perceptionProvider.activeModelID
             do {
@@ -1021,25 +1040,34 @@ final class AppState: ObservableObject {
                 do {
                     let read = try await job.value
                     backgroundReadTask = nil
-                    // Saved only on a COMPLETED read — a cancelled generation throws before this
-                    // line, so a partial perception can never reach the store.
+                    // Saved only on a COMPLETED read. The provider re-checks cancellation after
+                    // the generation returns — a cancelled stream finishes NORMALLY with partial
+                    // text rather than throwing — so a preempted read leaves `job` as
+                    // `CancellationError`, never as a parseable-looking partial.
                     PerceptionStore.save(read, for: url, modelId: modelId)
                     readQueue.markDone()
-                } catch is CancellationError {
-                    backgroundReadTask = nil
-                    // The whole read-ahead was torn down (stop button, shoot change) — go. The
-                    // queue was cleared by the teardown, so there is nothing to put back.
-                    if Task.isCancelled { break }
-                    // The foreground took the model back mid-generation. Put the frame back at
-                    // the head — nothing was saved — and wait out the load at the top of the
-                    // loop; the retry reuses the proxy held above.
-                    preempted = (url, proxy)
-                    readQueue.requeue()
                 } catch {
                     backgroundReadTask = nil
-                    // The model failed on this frame. Same rule as a failed decode below:
-                    // swallowed, counted, and the sweep moves on.
-                    readQueue.markDone()
+                    // Preemption arrives two ways and BOTH must requeue, not skip: as
+                    // `CancellationError` (the provider's post-generation check), or — if any
+                    // future path swallows that — as whatever error a half-generated read
+                    // produced while `job` stood cancelled. The job's own flag is the truth;
+                    // an audit found the error-type test alone silently dropping preempted
+                    // frames from a sweep, each one a six-second cost at export time.
+                    if error is CancellationError || job.isCancelled {
+                        // The whole read-ahead being torn down (stop button, shoot change)
+                        // cancels THIS loop too — go; the queue was cleared by the teardown.
+                        if Task.isCancelled { break }
+                        // The foreground took the model back mid-generation. Put the frame
+                        // back at the head — nothing was saved — and wait out the load at the
+                        // top of the loop; the retry reuses the proxy held above.
+                        preempted = (url, proxy)
+                        readQueue.requeue()
+                    } else {
+                        // The model genuinely failed on this frame. Same rule as a failed
+                        // decode below: swallowed, counted, and the sweep moves on.
+                        readQueue.markDone()
+                    }
                 }
             } catch {
                 // A frame that will not decode is not a failure of the sweep — export reports
@@ -1314,6 +1342,7 @@ final class AppState: ObservableObject {
         // thumbnail cache is ~68 KB a frame, so five shoots is ~150 MB of 160 px previews for
         // folders nobody has open, and it was never cleared anywhere.
         scanTask?.cancel()
+        scanEpoch += 1        // the cancelled scan's epilogue must not touch the next folder's state
         focusScanProgress = nil
         focusScanETA = nil
         let keep = Set(photos)
@@ -1901,6 +1930,11 @@ final class AppState: ObservableObject {
 
     /// The scan, held so leaving the folder can stop it. See `scanFocus` for why that matters.
     private var scanTask: Task<Void, Never>?
+    /// Which scan is CURRENT. A cancelled scan's task group can take seconds to drain its
+    /// in-flight decodes, and its trailing flush and epilogue run after that — by which time the
+    /// next folder's scan may own the dictionaries and the progress flag. Bumped on every start
+    /// and every external cancel; a task whose captured epoch no longer matches publishes nothing.
+    private var scanEpoch = 0
 
     /// Measure every frame in the folder, newest results published as they arrive so the strip
     /// fills in progressively rather than freezing until the end.
@@ -1933,6 +1967,8 @@ final class AppState: ObservableObject {
         // the re-entry guard, so the new folder's scan (and the Similar lens, which asks for one)
         // silently did nothing until the abandoned one drained.
         scanTask?.cancel()
+        scanEpoch += 1
+        let epoch = scanEpoch
         scanTask = Task { [weak self] in
             var done = 0
             // Fed per COMPLETION, below, not per flush — the batching of publishes is a SwiftUI
@@ -2012,11 +2048,19 @@ final class AppState: ObservableObject {
                     start()          // keep `limit` in flight until the queue is empty
                 }
                 // The final partial batch: the last `pending.count % flushEvery` frames on a
-                // normal finish, or whatever had already landed when the scan was cancelled.
-                if let self { flush(into: self) }
+                // normal finish, or whatever had already landed when the scan was cancelled —
+                // but ONLY while this scan is still the current one. A cancelled scan's group can
+                // take seconds to drain its in-flight decodes, and by then the next folder's scan
+                // may own the dictionaries: an audit found this trailing flush re-publishing the
+                // OLD folder's just-evicted triage entries over the new folder's, and the
+                // epilogue below nil-ing the NEW scan's progress — which is also the re-entry
+                // guard, so a third call in that window would have started a second concurrent
+                // scan. The epoch is bumped on every start and every external cancel.
+                if let self, self.scanEpoch == epoch { flush(into: self) }
             }
-            self?.focusScanProgress = nil
-            self?.focusScanETA = nil
+            guard let self, self.scanEpoch == epoch else { return }
+            self.focusScanProgress = nil
+            self.focusScanETA = nil
         }
     }
 
@@ -2052,6 +2096,9 @@ final class AppState: ObservableObject {
     /// re-ticking a box, the rare cost there is a leak, so the box resets. Same reasoning as
     /// `exportLabel`.
     @Published var shareIncludeLocation = false
+    /// The photograph whose share render is (or was last) in the picker — what
+    /// `SharePresenter.onDidChoose` checks before logging the pick. Not published; nothing draws it.
+    var pendingSharePickURL: URL?
 
     /// True from share press to file-on-disk — the Share button's re-entry guard and spinner.
     /// Separate from `isProcessing`, which belongs to the status line and is set by half a dozen
@@ -2646,6 +2693,10 @@ final class AppState: ObservableObject {
         maskAdjustments = [:]; maskFeather = [:]; maskTightness = [:]; maskInvert = [:]
         hsl = [:]; straighten = 0; activeLookId = nil
         showingOriginal = false; showingRepairSpots = false; hoveringRepairControls = false
+        // Per-PHOTOGRAPH, not per-shoot: an audit found the folder-change reset alone let a tick
+        // survive a cached-session hop into a different shoot, and linger invisibly on frames
+        // whose checkbox is hidden. Including a location is a decision about one photograph.
+        shareIncludeLocation = false
     }
 
     /// Put a previously-edited photo back exactly as it was.
@@ -2813,10 +2864,16 @@ final class AppState: ObservableObject {
         guard url != imageURL || loadedURL != url else { return }
         stashCurrentSession()
         if let cached = sessions[url] {
+            // The cached path never reaches `loadPhoto`, so the shoot-change housekeeping that
+            // lives there has to happen here too: a halted (or still-sweeping) read queue from
+            // folder A must not govern folder B — an audit found a 400-frame sweep still burning
+            // GPU under another folder's cached frames, with the old folder's counts in the
+            // toolbar. Same folder, nothing changes.
+            let folder = url.deletingLastPathComponent()
+            if shootLookFolder != nil, shootLookFolder != folder { resetReadAhead() }
             restore(cached)
             sessionOrder.removeAll { $0 == url }; sessionOrder.append(url)
-            // The cached path never reaches `loadPhoto`, but the anchor still moved — the
-            // neighborhood re-seeds around the frame now on screen.
+            // The anchor still moved — the neighborhood re-seeds around the frame now on screen.
             seedNeighborhoodRead()
             return
         }
@@ -3446,8 +3503,15 @@ final class AppState: ObservableObject {
                 }
             }
         } catch {
+            // Only if this load is still THE load. Arrow off an unreadable frame and its decode
+            // fails after the next photo's load has begun — without the guard, this error
+            // stamped itself over the successor's "Decoding…" and dropped `isProcessing`
+            // mid-load, briefly unpausing the read-ahead loop. Every other early-out in this
+            // method already guards the same way; the catch was the one that didn't.
+            guard imageURL == url else { return }
             statusMessage = "Couldn't read that photo — \(error.localizedDescription)"
         }
+        guard imageURL == url else { return }
         isProcessing = false
         // The photo is on screen and nobody is waiting: read its neighbors, so the next arrow
         // key meets a frame that is already read. Bounded and re-seeded per move — see
@@ -4893,6 +4957,10 @@ final class AppState: ObservableObject {
         // already: thumbnails decoding whole RAWs during view layout, and decode on the MainActor.
         // The pattern is always the same and always looks like correct code.
         //
+        // Same navigation race as the share path: the render takes seconds, the filmstrip stays
+        // live, and the pick log reads live state — so record only if this is still the same
+        // photograph when the render lands.
+        let renderedURL = imageURL
         let result = await renderCurrentPhoto(fullRes, recipe: recipe, to: exportURL,
                                               metadata: exportMetadata)
 
@@ -4912,7 +4980,7 @@ final class AppState: ObservableObject {
             // way to reuse an edit is Batch apply, not a cross-image average). The log exists so
             // that decision can be revisited with real data; it is not a live learning loop, and
             // the UI must not claim otherwise.
-            recordCurrentPick()
+            if imageURL == renderedURL { recordCurrentPick() }
         case .failure(let error):
             statusMessage = "Export failed — \(error)"
         }
@@ -4999,9 +5067,18 @@ final class AppState: ObservableObject {
         }
         // OPPOSITE default to Export. An export is a deliberate delivery with a panel in the
         // way; a share is three clicks into a message thread, so the position stays out unless
-        // this photograph's toggle was set. Camera and exposure EXIF ride along either way —
-        // `.withoutLocation` drops the GPS dictionary and the serial numbers, nothing else.
-        let metadata: ImageWriter.MetadataPolicy = shareIncludeLocation ? .asShot : .withoutLocation
+        // this photograph's toggle was set — AND this photograph verifiably has a position. The
+        // second half matters: the flag can be true while the checkbox is hidden (set, then the
+        // capture info was still loading), and a hidden control must never be the thing deciding
+        // what leaves the machine. No location, no `asShot` by accident.
+        let metadata: ImageWriter.MetadataPolicy =
+            (shareIncludeLocation && capture.location != nil) ? .asShot : .withoutLocation
+        // The photograph this render belongs to. The render takes seconds and nothing freezes
+        // the filmstrip — nor should it — so by completion the user may be looking at another
+        // frame entirely. The FILE is safe (everything above was captured before the await); the
+        // pick log is not, and a "chosen" record for a photo the user never picked is exactly
+        // the fake signal the preference store must not learn from.
+        let renderedURL = imageURL
         switch await renderCurrentPhoto(fullRes, recipe: recipe, to: out, metadata: metadata) {
         case .success(let lost):
             if lost.isEmpty {
@@ -5011,9 +5088,10 @@ final class AppState: ObservableObject {
                 statusMessage = "Sharing \(out.lastPathComponent) — but \(names) "
                     + "couldn't be found again at full size, so that edit is not in the file"
             }
-            // A share is an export by another door — the same unambiguous "this is the one I
-            // wanted" that `exportFullResolution` logs, and the same caveats apply.
-            recordCurrentPick()
+            // A share is an export by another door — but the pick is logged only when a service
+            // is actually CHOSEN (see `SharePresenter.onDidChoose`), and only if this is still
+            // the same photograph; the URL here is what the chooser callback checks against.
+            pendingSharePickURL = renderedURL
             return out
         case .failure(let error):
             statusMessage = "Couldn't render for sharing — \(error)"
@@ -5030,6 +5108,11 @@ final class AppState: ObservableObject {
     /// Masks are re-measured per photograph, exactly as batch does: a subject mask is measured on
     /// the proxy and must be re-found at full resolution, and the frames differ.
     func exportEdited(to directory: URL) async {
+        // The batch's first perceive must not queue behind a background read-ahead generation —
+        // the loop only yields BETWEEN frames, so without this the person watching the export
+        // waits up to a whole generation before frame one starts. Same preemption `loadPhoto`
+        // does; the cancelled frame goes back to the head of the queue for later.
+        backgroundReadTask?.cancel()
         // `exportScope`, not `exportTargets`: a selection is the scope, the same rule Apply already
         // follows. The button's label is computed from the same call, so what it says and what this
         // writes cannot drift apart.
@@ -5611,16 +5694,30 @@ struct TemperatureRail: View {
 /// deallocate under the open menu. The previous picker is released when the next share replaces
 /// it, which is as precise as it needs to be for one small object.
 @MainActor
-final class SharePresenter {
+final class SharePresenter: NSObject, NSSharingServicePickerDelegate {
     /// The AppKit view under the SwiftUI button, planted by `ShareAnchor`.
     weak var anchor: NSView?
     private var picker: NSSharingServicePicker?
+    /// Runs when the user actually PICKS a service — not when the menu opens, and not when it is
+    /// dismissed. The pick log rides on this: a share menu cancelled with Escape is not "this is
+    /// the one I wanted", and recording at file-ready time was logging preference signals for
+    /// shares that never happened.
+    var onDidChoose: (() -> Void)?
 
     func present(_ items: [Any]) {
         guard let anchor, anchor.window != nil else { return }
         let picker = NSSharingServicePicker(items: items)
+        picker.delegate = self
         self.picker = picker
         picker.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+    }
+
+    // Delegate calls arrive on the main thread; the protocol requirement is nonisolated, so this
+    // is the save-panel shape again: `assumeIsolated`, true by construction.
+    nonisolated func sharingServicePicker(_ picker: NSSharingServicePicker,
+                                          didChoose service: NSSharingService?) {
+        guard service != nil else { return }   // nil is the menu being dismissed
+        MainActor.assumeIsolated { onDidChoose?() }
     }
 }
 
@@ -6815,8 +6912,14 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(appState.isPreparingShare)
-                .help("Render this photo with its edit and hand it to Messages, AirDrop or Mail. "
-                      + "The file is written to a temporary folder, never beside your originals.")
+                // The size/format confession Export earned (its label reads "Export 2048 px" when
+                // capped) extends to Share here: the shared file honours the SAME persisted export
+                // settings, and a user who once exported small must not text small forever without
+                // being told. Same fact, same place the eye goes for it.
+                .help("Render this photo with its edit and hand it to Messages, AirDrop or Mail — "
+                      + "as a \(appState.exportLongEdge > 0 ? "\(appState.exportLongEdge) px" : "full-resolution")"
+                      + " .\(appState.exportFormat.fileExtension), the same file Export would write. "
+                      + "The file goes to a temporary folder, never beside your originals.")
                 Button(action: openExportPanel) {
                     toolbarLabel(appState.exportOneButtonLabel, filled: true)
                 }
@@ -7549,6 +7652,12 @@ struct ContentView: View {
     private func shareCurrentPhoto() {
         Task {
             if let url = await appState.renderCurrentPhotoForSharing() {
+                // Wired per share, so the callback always closes over the CURRENT app state.
+                sharePresenter.onDidChoose = { [weak appState] in
+                    guard let appState,
+                          appState.imageURL == appState.pendingSharePickURL else { return }
+                    appState.recordCurrentPick()
+                }
                 sharePresenter.present([url])
             }
         }

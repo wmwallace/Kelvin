@@ -209,6 +209,14 @@ public actor MLXPerceptionProvider: @preconcurrency PerceptionProvider {
             to: PerceptionPrompt.instruction(),
             image: .ciImage(proxy)
         )
+        // A cancelled generation does NOT throw out of `respond` — the stream's producer observes
+        // the cancellation, finishes the stream NORMALLY, and `respond` returns whatever partial
+        // text had been generated. Without this check the partial output flows into the parser,
+        // which throws a generic parse error, and a caller distinguishing "preempted, retry
+        // later" from "failed, skip" reads every preemption as a failure — an audit found the
+        // read-ahead loop silently dropping preempted frames from a sweep because of exactly
+        // that. Cancellation must leave this function AS cancellation.
+        try Task.checkCancellation()
         timing.generate = Date().timeIntervalSince(generateStart)
         timing.outputCharacters = raw.count
 
