@@ -316,9 +316,15 @@ struct MediaCache: Sendable {
     /// Concerns are re-derived from the current thresholds on every load.
     func verdict(for url: URL, fastRAW: Bool = true) -> PhotoTriage.Verdict? {
         if let cached = storedVerdict(for: url, fastRAW: fastRAW) { return cached }
-        guard let fresh = PhotoTriage.read(url: url, fastRAW: fastRAW) else { return nil }
-        storeVerdict(fresh, for: url, fastRAW: fastRAW)
-        return fresh
+        guard let fresh = PhotoTriage.readTracingPath(url: url, fastRAW: fastRAW)
+        else { return nil }
+        // A fallback reading is never cached. The fast path can fail transiently (a network
+        // volume mid-hiccup) while the full decode then succeeds, and the two paths can rasterise
+        // differently — stored under the fast variant, that one frame's acuity would answer for
+        // the wrong decode until the file next changed, quietly mis-ranking its burst. Uncached,
+        // it self-heals on the next scan exactly as it did before the cache existed.
+        if !fresh.viaFallback { storeVerdict(fresh.verdict, for: url, fastRAW: fastRAW) }
+        return fresh.verdict
     }
 
     /// The stored verdict alone, never measuring. Split from `verdict(for:)` because nothing else

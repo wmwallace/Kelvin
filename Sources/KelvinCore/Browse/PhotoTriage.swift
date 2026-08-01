@@ -186,6 +186,15 @@ public enum PhotoTriage {
     public static let measurementGeometry =
         "p\(proxyEdge)-f\(FocusMeasure.grid)-s\(ImageMetrics.sampleEdge)"
         + "-h\(hashColumns)x\(hashRows)x\(hashOversample)"
+        + "-e\(ImageStatistics.edgeMinkowskiP)-r\(readingsVersion)"
+
+    /// Bumped by hand when a readings-defining constant *inside* `ImageStatistics.compute` moves —
+    /// shadowMass's 0.08, shadowRegion's 0.20, the saturation-clip bands, the neutral sample
+    /// fraction. Those change what the stored numbers MEAN without appearing in any signature the
+    /// token above can read, which is the one hole "derived from the constants themselves" cannot
+    /// close. (`edgeMinkowskiP` is different: it is env-overridable per process, so the token reads
+    /// it directly — a WB sweep in one terminal must not poison the cache every other launch reads.)
+    public static let readingsVersion = 1
 
     /// Triage one already-decoded proxy. Pure apart from rasterising the sample grids.
     ///
@@ -215,6 +224,16 @@ public enum PhotoTriage {
     ///
     /// Safe to run several at once: nothing in this path touches Vision.
     public static func read(url: URL, fastRAW: Bool = true) -> Verdict? {
+        readTracingPath(url: url, fastRAW: fastRAW)?.verdict
+    }
+
+    /// The same read, also answering WHICH decode path produced it. A caller that stores verdicts
+    /// keyed by decode path needs this: `measurementProxy` can fail transiently (a network volume
+    /// mid-hiccup, ImageIO under memory pressure) while the full-decode fallback then succeeds —
+    /// and the two paths can rasterise differently, so a fallback reading written into a
+    /// fast-variant cache entry would pin the wrong measurement until the file next changes.
+    public static func readTracingPath(url: URL, fastRAW: Bool = true)
+        -> (verdict: Verdict, viaFallback: Bool)? {
         // One pool per frame, and it is load-bearing — the same shape as the BatchApply fix (see
         // "A 400-frame batch no longer eats 60 GB getting there"): ImageIO and Core Image
         // autorelease full-frame temporaries, and the fallback below fully decodes the original —
@@ -232,13 +251,13 @@ public enum PhotoTriage {
             // uses as its reference.
             if let fast = fastRAW ? PerceptionProxy.measurementProxy(url, maxEdge: proxyEdge)
                                   : PerceptionProxy.fromFile(url, maxEdge: proxyEdge) {
-                return read(fast)
+                return read(fast).map { ($0, false) }
             }
             guard let full = try? ImageDecoder.decode(url: url) else { return nil }
             let scaled = PerceptionProxy.downsample(full, maxEdge: proxyEdge)
             guard let cg = ImageWriter.exportContext.createCGImage(scaled, from: scaled.extent)
-            else { return read(scaled) }
-            return read(CIImage(cgImage: cg))
+            else { return read(scaled).map { ($0, true) } }
+            return read(CIImage(cgImage: cg)).map { ($0, true) }
         }
     }
 
