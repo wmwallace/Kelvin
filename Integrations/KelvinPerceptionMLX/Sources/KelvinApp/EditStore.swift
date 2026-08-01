@@ -16,6 +16,13 @@ struct SavedEdit: Codable {
     var straighten: Double
     var hsl: [String: HSLAdjustment]
     var blackAndWhite: BlackAndWhiteMix?
+    /// Which look was active, so reopening restores it. This was the missing half of a shipped
+    /// bug: `blackAndWhite` below was written but never read back, and the look id was not
+    /// stored at all — so a mono-looked photo reopened in a new session silently returned to
+    /// colour, and the next save then overwrote the sidecar's mono with nothing. Optional so
+    /// every sidecar written before the field existed still decodes (and `apply` can usually
+    /// recover the look for those from the mix itself).
+    var lookId: String?
     /// Spots the user healed by hand, so they come back on reopen and can still be undone or
     /// deleted individually. The composed `recipe` below also carries them, but that copy is for
     /// rendering — this one is the editable list.

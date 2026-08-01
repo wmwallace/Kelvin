@@ -31,6 +31,12 @@ public struct LookPreset: Sendable, Equatable, Identifiable {
     public var texture: Double = 0
     public var whites: Double = 0
     public var blacks: Double = 0
+    /// Deltas on the recovery levers, in the same sign as the recipe's own sliders: positive
+    /// `highlightsBias` raises the highlights slider (lifts them — film's soft, bloomy top end),
+    /// negative recovers them; positive `shadowsBias` opens the shadows. These are what give a
+    /// look film-like rolloff without touching exposure, which stays the engine's.
+    public var highlightsBias: Double = 0
+    public var shadowsBias: Double = 0
     /// Warmth shift — **positive warms, negative cools**, the direction every photographer's
     /// temperature slider moves. Applied only if the recipe has a temperature.
     ///
@@ -43,23 +49,71 @@ public struct LookPreset: Sendable, Equatable, Identifiable {
     /// before, in the Warm and Cool candidate styles. Twice now: any new code touching
     /// `temperatureK` must state which way is warm and point at the direction tests.
     public var temperatureShift: Double = 0
+    /// Green–magenta shift — **positive pushes magenta, negative pushes green**, the direction
+    /// every photographer's tint slider moves. Unlike `temperatureShift` this applies
+    /// unconditionally: the recipe's `tint` neutral is 0, not "as shot", so there is always a
+    /// value to shift. Unlocks green/magenta film character (tungsten stock, cross process).
+    ///
+    /// `apply` SUBTRACTS this from `global.tint`, the same inversion `temperatureShift`
+    /// documents above and for the same reason: the renderer's `tint` is the target-neutral y of
+    /// `CITemperatureAndTint`, where a POSITIVE value renders GREENER — measured in
+    /// `LookPresetTests.testRendererTintDirectionIsPositiveGreen`, and consistent with the
+    /// `.skinHue` audit, where negative renderer tint moved a skin patch red-ward. Any new code
+    /// touching `tint` must state which way is green and point at that test.
+    public var tintShift: Double = 0
     public var mono: BlackAndWhiteMix?
     public var hsl: [String: HSLAdjustment]?
+    /// ABSOLUTE, like `mono` and `hsl` — when set it REPLACES the recipe's curve rather than
+    /// stacking on it. A look that carries a curve is a look that owns the tone character: the
+    /// candidate's S-curve yields, because two tone curves composed is neither author's shape.
+    /// This is the split-tone/matte lever — per-channel red/green/blue control-point lists in
+    /// 0…255 (see `Curve` and `Renderer.channelCurvesData`).
+    ///
+    /// Renderer order caveat, measured and deliberate to note here: curves apply BEFORE the
+    /// black-and-white cube, so on a mono look a per-channel curve re-weights *which grey each
+    /// colour becomes* — it cannot tint the grey print itself. A colour-toned mono (true
+    /// selenium/sepia) needs a pipeline-order decision that is the owner's to make.
+    public var curve: Curve? = nil
 
     /// Apply this look's deltas to a candidate's global adjustments.
     public func apply(to g: inout GlobalAdjustments) {
         func c(_ v: Double, _ r: ClosedRange<Double>) -> Double { min(r.upperBound, max(r.lowerBound, v)) }
-        g.contrast = c(g.contrast + contrast, -100...100)
-        g.vibrance = c(g.vibrance + vibrance, -100...100)
-        g.saturation = c(g.saturation + saturation, -100...100)
-        g.clarity = c(g.clarity + clarity, -100...100)
-        g.texture = c(g.texture + texture, -100...100)
-        g.whites = c(g.whites + whites, -100...100)
-        g.blacks = c(g.blacks + blacks, -100...100)
+        g.contrast = c(g.contrast + contrast, Ranges.signed100)
+        g.vibrance = c(g.vibrance + vibrance, Ranges.signed100)
+        g.saturation = c(g.saturation + saturation, Ranges.signed100)
+        g.clarity = c(g.clarity + clarity, Ranges.signed100)
+        g.texture = c(g.texture + texture, Ranges.signed100)
+        g.whites = c(g.whites + whites, Ranges.signed100)
+        g.blacks = c(g.blacks + blacks, Ranges.signed100)
+        g.highlights = c(g.highlights + highlightsBias, Ranges.signed100)
+        g.shadows = c(g.shadows + shadowsBias, Ranges.signed100)
+        if tintShift != 0 {
+            // Same inversion as temperature below: positive shift = magenta = LOWER renderer tint.
+            g.tint = c(g.tint - tintShift, Ranges.tint)
+        }
         if temperatureShift != 0, let t = g.temperatureK {
             // Subtraction is the fix, not a quirk: positive shift = warmer = LOWER Kelvin target.
-            g.temperatureK = c(t - temperatureShift, 2000...11000)
+            // Clamped to Ranges.temperatureK — a hardcoded 11000 here once disagreed with the
+            // schema's 12000, silently capping cooling looks a stop short of the slider.
+            g.temperatureK = c(t - temperatureShift, Ranges.temperatureK)
         }
+    }
+
+    /// The whole composition rule in one place: this look, on top of a finished recipe.
+    ///
+    /// Scalar limbs are deltas (`apply(to:)`) — a look seasons the development rather than
+    /// replacing it. The structured limbs are absolute: `hsl`, `mono` and `curve` each REPLACE
+    /// the recipe's own when the look carries one, and leave the recipe's alone when it doesn't.
+    /// The CLI's `--look` composes through this; the app applies the same limbs piecewise
+    /// (`applyLook` / `updateActiveRecipe`) because its `hsl` becomes user-editable state after
+    /// the look lands — the rule itself lives here.
+    public func applied(to recipe: Recipe) -> Recipe {
+        var out = recipe
+        apply(to: &out.global)
+        if let hsl { out.hsl = hsl }
+        if let mono { out.blackAndWhite = mono }
+        if let curve { out.curve = curve }
+        return out
     }
 }
 
@@ -93,6 +147,20 @@ public extension LookPreset {
                    contrast: 26, clarity: 14, whites: 10, blacks: -18,
                    mono: BlackAndWhiteMix(bands: ["blue": -30, "orange": 10])),
 
+        // The first mono with a curve. NOTE the `curve` caveat above: applied before the B&W
+        // cube, the blue lift re-weights the conversion (cool subjects render lighter through
+        // the mids) rather than tinting the print — a true colour-toned selenium needs a
+        // renderer-order decision. Named for the darkroom bath it leans toward, honestly short
+        // of it.
+        LookPreset(id: "selenium", name: "Selenium", group: .blackAndWhite,
+                   blurb: "A near-plain conversion with a cool, silvery midtone response.",
+                   contrast: 6,
+                   mono: BlackAndWhiteMix(bands: ["orange": 8, "blue": -20]),
+                   curve: Curve(luma: nil,
+                                red: nil,
+                                green: nil,
+                                blue: [[0, 4], [128, 138], [255, 252]])),
+
         // — Creative colour. Only looks the candidate set doesn't already reach.
         LookPreset(id: "faded", name: "Faded film", group: .creative,
                    blurb: "Lifted blacks and muted colour — the matte print look.",
@@ -112,6 +180,47 @@ public extension LookPreset {
                    hsl: ["aqua": HSLAdjustment(h: -10, s: 26, l: -4),
                          "blue": HSLAdjustment(h: -14, s: 20, l: -6),
                          "yellow": HSLAdjustment(h: 8, s: 16, l: 6)]),
+
+        // — Film stocks and grades. Each names the material it studies rather than a mood word,
+        //   and each stays a seasoning: the saturation moves here are all gentler than bleach's
+        //   −35, and none of them touches exposure. The craft floor is deliberately NOT applied
+        //   to looks (CandidateCurator gates candidates only) — restraint is enforced by taste
+        //   and by the audition renders, not by a gate.
+        LookPreset(id: "portra", name: "Portrait film", group: .creative,
+                   blurb: "Portra's manners — gentle warmth, soft contrast, skin lifted and true.",
+                   contrast: -4, vibrance: -4, blacks: 6,
+                   highlightsBias: 6, temperatureShift: 150,
+                   hsl: ["red": HSLAdjustment(h: 0, s: 6, l: 2),
+                         "orange": HSLAdjustment(h: 0, s: 8, l: 4)]),
+
+        LookPreset(id: "cinema", name: "Teal & orange", group: .creative,
+                   blurb: "Teal shadows under warm highlights, with a shallow matte toe. Hollywood, quietly.",
+                   contrast: 8, saturation: -4,
+                   curve: Curve(luma: [[0, 8], [96, 96], [255, 252]],
+                                red: [[0, 0], [72, 64], [176, 184], [255, 255]],
+                                green: nil,
+                                blue: [[0, 12], [72, 80], [176, 168], [255, 246]])),
+
+        LookPreset(id: "matte", name: "Matte", group: .creative,
+                   blurb: "Lifted toe, softened shoulder — the matte finish with the colour left alone.",
+                   contrast: -6, vibrance: -4, whites: -6,
+                   // Tone-only, which is exactly the split from `faded`: that look shifts colour
+                   // (muted blues and greens); this one is the paper surface with no opinions
+                   // about hue.
+                   curve: Curve(luma: [[0, 14], [64, 68], [192, 190], [255, 246]],
+                                red: nil, green: nil, blue: nil)),
+
+        LookPreset(id: "tungsten", name: "Tungsten night", group: .creative,
+                   blurb: "CineStill's blue-biased night — cool cast, open shadows, glowing blues.",
+                   blacks: -4, shadowsBias: 8,
+                   temperatureShift: -380, tintShift: -8,
+                   hsl: ["blue": HSLAdjustment(h: 0, s: 10, l: 0)]),
+
+        LookPreset(id: "ektar", name: "Ektar", group: .creative,
+                   blurb: "Landscape film — saturated greens and blues under crisp contrast.",
+                   contrast: 8, vibrance: 12, clarity: 4,
+                   hsl: ["green": HSLAdjustment(h: 4, s: 14, l: 0),
+                         "blue": HSLAdjustment(h: 0, s: 12, l: -4)]),
 
         // — Retro. Each one names the artefact it imitates, because "vintage" alone promises
         //   nothing. Kept apart from Faded film: that is the matte PRINT; these are the

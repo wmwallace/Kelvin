@@ -116,6 +116,9 @@ func printUsage() {
       --in       Path to the source image (RAW, JPEG, or PNG). Required.
       --recipe   Path to a recipe JSON sidecar. Required.
       --out      Output path. Extension picks the format (.png or .jpg). Required.
+      --look     Compose a look preset onto the recipe before rendering
+                 (LookPreset.applied(to:)). A look id, or "all" to write the base render
+                 plus one <out-stem>-<look-id> file per library look.
 
     engine options:
       --in          Path to the source image (RAW, JPEG, or PNG). Required.
@@ -202,9 +205,32 @@ case "render":
         // Supply subject/sky bitmaps so any local masks the recipe references are applied; the
         // renderer ignores masks it has no bitmap for, so measuring unconditionally is safe.
         let measured = LocalMasks.measure(in: image)
-        let rendered = Renderer.render(image, with: recipe, maskBitmaps: measured.bitmaps)
-        try ImageWriter.write(rendered, to: outURL)
-        print("Wrote \(outURL.path)")
+        func render(_ r: Recipe, to url: URL) throws {
+            let rendered = Renderer.render(image, with: r, maskBitmaps: measured.bitmaps)
+            try ImageWriter.write(rendered, to: url)
+            print("Wrote \(url.path)")
+        }
+        switch value(for: "--look", in: rest) {
+        case nil:
+            try render(recipe, to: outURL)
+        case "all":
+            // The audition set: the recipe as picked, then every library look composed on it —
+            // one file per look, named <out-stem>-<look-id>.<ext>.
+            try render(recipe, to: outURL)
+            let stem = outURL.deletingPathExtension()
+            let ext = outURL.pathExtension.isEmpty ? "png" : outURL.pathExtension
+            for look in LookPreset.library {
+                let url = URL(fileURLWithPath: stem.path + "-\(look.id)")
+                    .appendingPathExtension(ext)
+                try render(look.applied(to: recipe), to: url)
+            }
+        case let id?:
+            guard let look = LookPreset.named(id) else {
+                fail("unknown look '\(id)'. known: "
+                     + LookPreset.library.map(\.id).joined(separator: ", ") + ", all")
+            }
+            try render(look.applied(to: recipe), to: outURL)
+        }
     } catch {
         fail("\(error)")
     }

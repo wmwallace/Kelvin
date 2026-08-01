@@ -2568,11 +2568,13 @@ final class AppState: ObservableObject {
     /// how long the first one takes.
     private var hasReadAPhoto = false
 
-    /// The current edit, in the form that goes to disk.
-    private func currentSavedEdit() -> SavedEdit {
+    /// The current edit, in the form that goes to disk. Internal rather than private so the
+    /// round-trip test can save exactly what the app saves.
+    func currentSavedEdit() -> SavedEdit {
         SavedEdit(styleId: selectedCandidateId, global: edit, userMasks: userMasks,
                   maskEnabled: maskEnabled, maskStrength: maskStrength,
                   straighten: straighten, hsl: hsl, blackAndWhite: activeRecipe?.blackAndWhite,
+                  lookId: activeLookId,
                   healSpots: healSpots.isEmpty ? nil : healSpots,
                   // The composed recipe, so this edit can be re-rendered without re-perceiving the
                   // photograph. See SavedEdit.recipe.
@@ -2624,8 +2626,9 @@ final class AppState: ObservableObject {
             || !maskStrength.isEmpty
     }
 
-    /// Restore a saved edit onto the freshly-generated candidates.
-    private func apply(_ saved: SavedEdit) {
+    /// Restore a saved edit onto the freshly-generated candidates. Internal rather than private
+    /// so the round-trip test can reopen exactly the way a new session does.
+    func apply(_ saved: SavedEdit) {
         if let styleId = saved.styleId, candidates.contains(where: { $0.id == styleId }) {
             selectCandidate(id: styleId)      // sets the baseline for this style first
         }
@@ -2636,6 +2639,16 @@ final class AppState: ObservableObject {
         maskStrength = saved.maskStrength
         straighten = saved.straighten
         hsl = saved.hsl
+        // The look comes back BEFORE the recipe is rebuilt: `updateActiveRecipe` derives the
+        // mono conversion and the look's curve from `activeLookId`, so restoring it after (or
+        // never, which is what shipped) rebuilt the recipe with the conversion stripped — a
+        // mono-looked photo reopened in colour, and the next save persisted the loss. The
+        // globals need no such step; they were saved as absolutes and arrived with `edit` above.
+        //
+        // A sidecar from before `lookId` existed can still name its look: the only source of a
+        // `blackAndWhite` mix IS a look, so the mix identifies it in the library.
+        activeLookId = saved.lookId
+            ?? saved.blackAndWhite.flatMap { mix in LookPreset.library.first { $0.mono == mix }?.id }
         healSpots = saved.healSpots ?? []
         brushCache = [:]
         updateActiveRecipe()
@@ -3859,9 +3872,10 @@ final class AppState: ObservableObject {
         onEdit()
     }
 
-    /// The black-and-white mix of the active look, folded into the rendered recipe.
-    private var activeLookMono: BlackAndWhiteMix? {
-        activeLookId.flatMap { LookPreset.named($0) }?.mono
+    /// The active look, resolved from the library. Its structured limbs (mono, curve) are
+    /// folded into the rendered recipe by `updateActiveRecipe`.
+    private var activeLook: LookPreset? {
+        activeLookId.flatMap { LookPreset.named($0) }
     }
 
     /// Level the horizon automatically (Vision). No-op if no clear horizon is found.
@@ -4583,7 +4597,13 @@ final class AppState: ObservableObject {
         finalRecipe.geometry = straighten != 0
             ? Geometry(rotateDeg: straighten, crop: nil, lensCorrection: false) : nil
         finalRecipe.hsl = hsl.isEmpty ? candidate.baseRecipe.hsl : hsl
-        finalRecipe.blackAndWhite = activeLookMono
+        // The look's structured limbs, by the same absolute-if-present rule as
+        // `LookPreset.applied(to:)`. Mono is the active look's or none — a look is the only
+        // source of a conversion. The curve replaces the candidate's only when the look owns
+        // the tone character. The look's `hsl` is deliberately NOT read here: `applyLook`
+        // copied it into the editable `hsl` state above, which the user may have tuned since.
+        finalRecipe.blackAndWhite = activeLook?.mono
+        if let lookCurve = activeLook?.curve { finalRecipe.curve = lookCurve }
         self.activeRecipe = finalRecipe
 
         if renderInFlight { renderDirty = true; return }
