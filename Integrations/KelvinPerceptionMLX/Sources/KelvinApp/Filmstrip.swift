@@ -190,6 +190,8 @@ struct FilmstripView: View {
     var softURLs: Set<URL> = []
     var softCount: Int = 0
     var scanProgress: Double? = nil
+    /// Time remaining, already phrased by `ProgressETA`. nil while the pace is still unknown.
+    var scanETA: String? = nil
     var onScanFocus: () -> Void = {}
     /// The sharpest frame of each run of more than one, when the strip is grouped into bursts or
     /// near-duplicates. Advisory: it marks, it never decides.
@@ -358,6 +360,14 @@ struct FilmstripView: View {
                     ProgressView(value: progress).controlSize(.small).frame(width: 54)
                     Text("\(Int(progress * 100))%")
                         .font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
+                    // One line, and it may truncate before the Spacer takes the row: this header
+                    // is already at the pane's width floor, and an estimate is the first thing
+                    // worth losing.
+                    if let scanETA {
+                        Text(scanETA)
+                            .font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
+                            .lineLimit(1)
+                    }
                 }
             } else if softCount > 0 {
                 Button { filter = .soft } label: {
