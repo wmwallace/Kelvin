@@ -15,6 +15,188 @@
     <link>https://usekelvin.app</link>
     <description>Updates for Kelvin, the local-AI photo editor for macOS.</description>
     <item>
+      <title>Kelvin 0.6.0 — it reads ahead of you, and it learned to share</title>
+      <pubDate>Fri, 01 Aug 2026 16:30:00 -0700</pubDate>
+      <sparkle:version>297</sparkle:version>
+      <sparkle:shortVersionString>0.6.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <link>https://github.com/wmwallace/Kelvin/releases/tag/v0.6.0</link>
+      <description><![CDATA[
+        <style>
+          /* Kelvin update notes. Self-contained: no external fonts, images or scripts — Sparkle
+             renders this offline, mid-install, in a narrow pane. */
+          :root {
+            color-scheme: light dark;
+            --ink: #1c1a17;
+            --dim: #6b6660;
+            --faint: #928c84;
+            --bg: #faf8f5;
+            --rule: rgba(0,0,0,0.10);
+            --glow: #b4661a;
+          }
+          @media (prefers-color-scheme: dark) {
+            :root {
+              --ink: #e8e3dc;
+              --dim: #9a938a;
+              --faint: #6f6862;
+              --bg: #131211;
+              --rule: rgba(255,255,255,0.11);
+              --glow: #e9a44c;
+            }
+          }
+          body {
+            margin: 0;
+            padding: 18px 20px 26px;
+            background: var(--bg);
+            color: var(--ink);
+            font: 13px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+            -webkit-font-smoothing: antialiased;
+          }
+          /* The blackbody rail: amber through daylight to blue, which is what the app is named after
+             and the one piece of decoration here that means something. It separates sections the way
+             the temperature rail runs under the canvas in the app itself. */
+          .rail {
+            height: 2px;
+            border: 0;
+            margin: 20px 0 16px;
+            background: linear-gradient(90deg, #e9a44c 0%, #f2ead9 42%, #cfd8e6 68%, #7fa2cc 100%);
+            opacity: 0.85;
+          }
+          .lede {
+            margin: 0;
+            font-size: 15px;
+            line-height: 1.45;
+            letter-spacing: -0.005em;
+          }
+          .version {
+            font: 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--faint);
+            margin: 0 0 9px;
+          }
+          /* Mono, tracked, uppercase — the same label treatment the app uses over its own panel
+             sections, so the notes read in the app's voice rather than a changelog's. */
+          h2 {
+            font: 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+            color: var(--glow);
+            margin: 22px 0 7px;
+          }
+          h2:first-of-type { margin-top: 0; }
+          p { margin: 0 0 9px; }
+          p.note { color: var(--dim); }
+          ul { margin: 0 0 9px; padding-left: 17px; }
+          li { margin-bottom: 4px; }
+          strong { font-weight: 600; }
+          .limit {
+            border-left: 2px solid var(--rule);
+            padding-left: 11px;
+            margin: 12px 0 0;
+            color: var(--dim);
+          }
+          .closing {
+            margin-top: 22px;
+            padding-top: 14px;
+            border-top: 1px solid var(--rule);
+            color: var(--faint);
+            font-size: 12px;
+          }
+        </style>
+
+        <p class="version">Kelvin 0.6.0</p>
+        <p class="lede">Kelvin reads ahead of you now, and it learned to share.</p>
+
+        <hr class="rail">
+
+        <h2>Send a photo from your Mac</h2>
+        <p>A Share button sits next to Export. It renders the photo you are looking at through the
+        exact pipeline Export uses, then hands the file to Messages, AirDrop or Mail.
+        <strong>Location is stripped by default</strong> &mdash; texting someone a photo should not
+        text them where your house is. When the frame carries a GPS position, an &ldquo;Include
+        location&rdquo; checkbox appears beside the button, so including it is a choice you make each
+        time, never a setting that silently remembers.</p>
+
+        <h2>The scene reading works ahead of your browsing</h2>
+        <p>Whenever you open a photo, Kelvin quietly reads the sixteen frames around it, in the order
+        you are most likely to reach them &mdash; so arrowing through a shoot increasingly lands on
+        frames whose reading is already done. Your click still comes first: opening a photo cancels
+        the background read mid-thought and starts yours immediately.</p>
+        <p class="note">Sixteen is deliberate. Browsing should not commit your laptop&rsquo;s GPU to a
+        four-hundred-frame folder you opened by accident; &ldquo;Apply to shoot&rdquo; still reads
+        everything, and now says how long it will take.</p>
+
+        <h2>Time remaining, where waiting happens</h2>
+        <p>The folder scan and batch export now say &ldquo;about 4 minutes left&rdquo; &mdash;
+        coarsely on purpose, so the number never jitters like a countdown. And reopening a shoot you
+        have scanned before is no longer minutes: measurements are kept on disk, so the Best, Focus
+        and Flagged filters come back in about a second on a folder measured once.</p>
+
+        <h2>The model can name what it sees</h2>
+        <p>The scene line now says what the subject is in plain words &mdash; &ldquo;sea stack&rdquo;,
+        &ldquo;starfish&rdquo;, &ldquo;bride&rdquo; &mdash; and a landscape with one dominant natural
+        feature finally counts as having a subject at all. Kelvin could describe a frame as
+        &ldquo;dark silhouette of sea stacks&rdquo; and still report nothing to edit; now the sea
+        stacks get the same corrective attention a backlit face would.</p>
+        <p class="note">The names are the model&rsquo;s own words, and they are display-only — no
+        edit is ever decided by free text.</p>
+
+        <h2>Fixed</h2>
+        <ul>
+          <li>Renaming a mask in the same moment it was deleted could crash the app. It no longer can.</li>
+          <li>A large batch export grew its memory without bound &mdash; about 60&nbsp;GB over a
+          400-frame RAW shoot. It now stays flat near 5&nbsp;GB and finishes sooner.</li>
+          <li>The folder scan re-sorted the whole shoot once per frame; big folders no longer make
+          the window feel thick while scanning.</li>
+        </ul>
+
+        <h2>One honest cost</h2>
+        <p class="note">The scene reading&rsquo;s vocabulary changed, so readings cached by earlier
+        versions answer a question Kelvin no longer asks. The first time you open an already-read
+        shoot, Kelvin re-reads those scenes once, in the background. Your edits are untouched.</p>
+
+        <h2>What still does not work</h2>
+        <p class="limit"><strong>Healing is place-and-delete.</strong> You can add a patch, remove it
+        or undo it &mdash; you cannot drag or resize one after the fact. <strong>A heal into busy
+        texture blends rather than refuses</strong>; look at it at 100%. <strong>The canvas is softer
+        than the exported file</strong> &mdash; export and open at 100% to judge sharpness.
+        <strong>The wand walks into anything touching its target that is the same colour</strong>;
+        the brush&rsquo;s Erase mode takes the spill back off. <strong>Deliberately dark photographs
+        get lifted</strong>; turn Exposure back down.</p>
+
+        <p class="closing">Everything runs on your Mac. No account, no upload, and nothing leaves the
+        machine except this update check &mdash; which you can switch off in Settings. Sharing a
+        photo sends it where you send it, with location stripped unless you tick the box.</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/wmwallace/Kelvin/releases/download/v0.6.0/Kelvin-0.6.0.dmg"
+        sparkle:edSignature="mA0XKbP7KT0lSlCT8x21oSYSlZ56+SjwWwYdxhFRjFrPhZ6UXW1hXhBtyXYlQzbz6BtwzZmznMZPYBVxVScCBQ=="
+        length="1516037270"
+        type="application/octet-stream"/>
+      <!-- One delta per shipped predecessor, keyed on CFBundleVersion. -->
+      <sparkle:deltas>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.6.0/Kelvin-0.6.0-from-276.delta"
+          sparkle:deltaFrom="276"
+          sparkle:edSignature="XpVmPL9VA3n0C1kqMZlfCMUGfaIUvEinL/XGx6rWDu+C8y2TjyCC1IB68U+BodzIIsP/OGmpKauObSwCPe8pCA=="
+          length="2099790"
+          type="application/octet-stream"/>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.6.0/Kelvin-0.6.0-from-258.delta"
+          sparkle:deltaFrom="258"
+          sparkle:edSignature="c4zB1xM8EL9tRiP9WHZ29nMRVSrX4oHE9LnPU8vwiyaBHZGCufi4KWCgMzjN6y3sf3zLlSSW8y/hyzlI4HCiCg=="
+          length="2172150"
+          type="application/octet-stream"/>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.6.0/Kelvin-0.6.0-from-247.delta"
+          sparkle:deltaFrom="247"
+          sparkle:edSignature="6ggsFs88GsfyK92fKnOfZewn1l2hnV5nPukp3N7XPr151XnKxktt6gllqBWMmsboYak7koF8gpyij4q7E/sDAA=="
+          length="2461154"
+          type="application/octet-stream"/>
+      </sparkle:deltas>
+    </item>
+    <item>
       <title>Kelvin 0.5.0 — point at the blemish, and colour that leaves the light alone</title>
       <pubDate>Fri, 31 Jul 2026 17:30:00 -0700</pubDate>
       <sparkle:version>276</sparkle:version>
