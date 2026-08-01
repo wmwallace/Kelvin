@@ -98,4 +98,28 @@ final class FeatherEdgeTests: XCTestCase {
         XCTAssertLessThan(highest, 0.03,
                           "the border lifted an inverted mask to \(highest)")
     }
+
+    /// The derived background (`LocalMasks.background`) runs to all four frame borders by
+    /// construction — it is the complement of whatever was segmented — so the clamp above is
+    /// load-bearing for it more than for any other mask. Feathering a background must soften
+    /// only its edge against the subject, never fade it at the frame's border.
+    func testAFeatheredDerivedBackgroundKeepsItsStrengthAtTheBorder() throws {
+        // A subject in the middle of the frame: its background touches every border and corner.
+        let subject = TestSupport.pixels(size: 64) { x, y in
+            (x >= 24 && x < 40 && y >= 24 && y < 40) ? (255, 255, 255) : (0, 0, 0)
+        }
+        let bg = LocalMasks.background(subject: subject, sky: nil,
+                                       extent: CGRect(x: 0, y: 0, width: 64, height: 64))
+        let grid = try rows(Renderer.prepareMask(bg, feather: 100))
+        let last = grid.count - 1
+        for corner in [grid[0][0], grid[0][last], grid[last][0], grid[last][last]] {
+            XCTAssertGreaterThan(corner, 0.97,
+                                 "a feathered background faded to \(corner) at a frame corner — "
+                                 + "the border is being treated as an edge of the mask")
+        }
+        // And the feather still did its job at the mask's REAL edge, around the subject: a
+        // transition band of intermediate values must exist there.
+        let band = grid.flatMap { $0 }.filter { $0 > 0.08 && $0 < 0.92 }.count
+        XCTAssertGreaterThan(band, 0, "feathering a background no longer softens its subject edge")
+    }
 }

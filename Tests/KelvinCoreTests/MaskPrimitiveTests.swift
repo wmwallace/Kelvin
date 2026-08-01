@@ -85,6 +85,10 @@ final class MaskPrimitiveTests: XCTestCase {
 
     // MARK: - The kinds that collapse into modifiers
 
+    /// This pins the UI's "Background" preset: a subject mask with `invert: true`, which selects
+    /// everything-but-subject INCLUDING any sky. The DERIVED background mask (`LocalMasks`,
+    /// keyed "background") is a different, smaller region — the frame minus subject minus sky —
+    /// pinned by the partition test below. Both are legitimate; they are not the same pixels.
     func testBackgroundIsTheSubjectInverted() throws {
         let base = render(subject([:]))
         let inside = render(subject(["exposure_ev": -1.0]))
@@ -94,6 +98,57 @@ final class MaskPrimitiveTests: XCTestCase {
         // Different pixels, so `invert` genuinely expresses "everything else".
         XCTAssertGreaterThan(try differs(inside, outside), 1.0,
                              "invert must select the complement, not the same region")
+    }
+
+    // MARK: - The derived background
+
+    /// Read a mask back as 0…1 luma on a grid that divides the 120 px fixtures evenly.
+    private func grid(_ mask: CIImage, size: Int = 24) throws -> [Double] {
+        let data = try ImageWriter.rgba8Sampled(mask, width: size, height: size)
+        var out: [Double] = []
+        data.withUnsafeBytes { rp in
+            let px = rp.bindMemory(to: UInt8.self)
+            for i in stride(from: 0, to: data.count, by: 4) { out.append(Double(px[i]) / 255.0) }
+        }
+        return out
+    }
+
+    /// THE INVARIANT the derived background rests on: with a subject and a (disjoint) sky present,
+    /// subject + sky + background ≈ 1 at every point — the three masks partition the frame. In
+    /// particular the derived background EXCLUDES the sky, which `invert: true` on a subject mask
+    /// does not.
+    func testSubjectSkyAndDerivedBackgroundPartitionTheFrame() throws {
+        let extent = CGRect(x: 0, y: 0, width: 120, height: 120)
+        // Disjoint by construction, the shape `LocalMasks.measure` guarantees — it subtracts the
+        // subject from the sky before deriving the background.
+        let subjectMask = TestSupport.pixels(size: 120) { x, y in
+            (x >= 40 && x < 80 && y >= 50 && y < 90) ? (255, 255, 255) : (0, 0, 0)
+        }
+        let skyMask = TestSupport.pixels(size: 120) { _, y in y < 30 ? (255, 255, 255) : (0, 0, 0) }
+        let background = LocalMasks.background(subject: subjectMask, sky: skyMask, extent: extent)
+
+        let s = try grid(subjectMask), k = try grid(skyMask), b = try grid(background)
+        for i in s.indices {
+            XCTAssertEqual(s[i] + k[i] + b[i], 1.0, accuracy: 0.06,
+                           "at sample \(i) the three masks sum to \(s[i] + k[i] + b[i]) — "
+                           + "they no longer partition the frame")
+        }
+        // Spot-check the exclusion in words: where the sky is, the background is not.
+        let skySamples = zip(k, b).filter { $0.0 > 0.9 }
+        XCTAssertFalse(skySamples.isEmpty)
+        for (_, bg) in skySamples {
+            XCTAssertLessThan(bg, 0.1, "the derived background reached into the sky")
+        }
+    }
+
+    /// With nothing segmented, "everything no other mask claims" is the whole picture — the
+    /// derived background must be full white, not absent and not black.
+    func testWithNothingSegmentedTheBackgroundIsTheWholeFrame() throws {
+        let extent = CGRect(x: 0, y: 0, width: 120, height: 120)
+        let bg = LocalMasks.background(subject: nil, sky: nil, extent: extent)
+        let lowest = try XCTUnwrap(grid(bg).min())
+        XCTAssertGreaterThan(lowest, 0.99)
+        XCTAssertEqual(bg.extent, extent)
     }
 
     func testSkinIsTheSubjectRefinedByColour() throws {

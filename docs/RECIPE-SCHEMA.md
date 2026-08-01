@@ -180,7 +180,8 @@ caller supplies for that `id`/`type`).
 
 | Kind | Field | How coverage is produced |
 |---|---|---|
-| `subject`, `sky` | *(none)* | Caller supplies a segmentation bitmap (Vision person seg / sky detection). `"invert": true` on a subject mask gives **background**. |
+| `subject`, `sky` | *(none)* | Caller supplies a segmentation bitmap (Vision person seg / sky detection). `"invert": true` on a subject mask gives everything-but-subject **including any sky** — a different region than `background` below. |
+| `background` | *(none)* | Derived complement of subject and sky — the frame minus both; caller supplies the bitmap (`LocalMasks` produces it, disjoint from the other two, so the three partition the frame). Full frame when nothing was segmented. |
 | `skin` | `selection` | Skin *hue* ∩ the person segmentation. Requires the segmentation — without it the mask does nothing rather than degrading into a hue selection that would grab skin-toned scenery. Keys on hue, never brightness, so it's fair across complexions. |
 | `radial`, `linear` | `shape` | `{kind, cx, cy, radius, angle, softness}` — a soft ellipse or a graduated edge. Normalised, top-left origin. |
 | `brush` | `stamps` | `[{x, y, radius, hardness}]` — the union of soft circular dabs along a stroke. A caller may supply a pre-baked stroke under the mask's `id` to avoid recompositing every frame; it must render identically. |

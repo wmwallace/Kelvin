@@ -33,7 +33,7 @@ func printUsage() {
       \(tool) sky-metrics --in-dir <dir> [--limit <n>] [--perception <p.json>] [--dump-dir <dir>]
       \(tool) corpus-pairs --root <shoots> --out-dir <dir> [--long-edge <n>]
       \(tool) faces --in-dir <dir>
-      \(tool) mask-coverage --in-dir <dir>
+      \(tool) mask-coverage --in-dir <dir> [--out-dir <dir>]
       \(tool) endpoint-probe --in-dir <dir> [--reference-dir <dir>] [--perception-dir <dir>]
       \(tool) exposure-probe --in-dir <dir> --reference-dir <dir> [--perception-dir <dir>]
                      [--recipe-dir <dir>]
@@ -67,6 +67,13 @@ func printUsage() {
       inside one object and a jump once it bursts out into the sky. Ship a number from the flat
       part. LOOK at the preview before believing the table — the same warning `sky-metrics
       --dump-dir` carries, and for the same reason.
+
+    mask-coverage options:
+      --in-dir   Directory of photographs to measure. Required.
+      --out-dir  Write, per frame, the subject/sky/background masks painted onto the picture
+                 (<stem>-subject.png etc.) and <stem>-bg-dim.png — the frame with its background
+                 pulled down 0.5 EV through the derived mask, so a background treatment can be
+                 SEEN rather than inferred from a coverage column.
 
     triage-compare options:
       --in-dir   Directory of photographs to measure. Required.
@@ -1261,43 +1268,101 @@ case "mask-coverage":
         }
         let paths = try BatchApply.imageFiles(in: URL(fileURLWithPath: inDir, isDirectory: true))
         guard !paths.isEmpty else { fail("no images in \(inDir)") }
+        let outDir = value(for: "--out-dir", in: rest).map { URL(fileURLWithPath: $0, isDirectory: true) }
+        if let outDir { try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true) }
 
-        print("frame                                 subject          sky      unmasked")
+        print("frame                                 subject          sky   background   unmasked")
         var haveSubject = 0, havePerson = 0, haveSky = 0, haveNeither = 0, total = 0
         var unmasked: [Double] = []
+        var backgrounds: [Double] = []
+        var worstDrift = 0.0
         for url in paths {
-            guard let image = try? ImageDecoder.decode(url: url) else { continue }
-            // Measure on the perception proxy, which is where the app decides.
-            let proxy = PerceptionProxy.downsample(image, maxEdge: 768)
-            let m = LocalMasks.measure(in: proxy)
-            total += 1
+            // One pool per frame: with --out-dir each iteration renders and writes four images,
+            // and without a drain that is the same slow climb `BatchApply` measured at 60 GB
+            // over a 400-frame batch.
+            try autoreleasepool {
+                guard let image = try? ImageDecoder.decode(url: url) else { return }
+                // Measure on the perception proxy, which is where the app decides.
+                let proxy = PerceptionProxy.downsample(image, maxEdge: 768)
+                let m = LocalMasks.measure(in: proxy)
+                total += 1
 
-            func coverage(_ key: String) -> Double {
-                guard let mask = m.bitmaps[key],
-                      let stats = try? ImageStatistics.compute(mask) else { return 0 }
-                // A mask is white where it applies; its mean luma IS its coverage fraction.
-                return stats.meanLuma
+                func coverage(_ key: String) -> Double {
+                    guard let mask = m.bitmaps[key],
+                          let stats = try? ImageStatistics.compute(mask) else { return 0 }
+                    // A mask is white where it applies; its mean luma IS its coverage fraction.
+                    return stats.meanLuma
+                }
+                let subject = coverage("subject"), sky = coverage("sky")
+                let background = coverage("background")
+                // The masks are disjoint by construction — `LocalMasks` subtracts the subject from
+                // the sky and derives background as the complement of both — so the covered
+                // fraction is their sum rather than a union that needs computing.
+                let covered = min(1.0, subject + sky)
+                unmasked.append(1 - covered)
+                backgrounds.append(background)
+
+                // VERIFY the partition — in linear mask units, which is where it actually holds.
+                // The columns above read sRGB-encoded bytes (their historical unit), and a soft
+                // mask — the sky is a confidence map, mostly midtones — encodes brighter in sRGB
+                // than it blends, so the three COLUMNS legitimately sum past 100% on a soft sky.
+                // Linearised, subject + sky + background = 1 pointwise by construction, and a
+                // drift here means the derivation or the disjointness broke upstream.
+                func linearCoverage(_ key: String) -> Double {
+                    guard let mask = m.bitmaps[key],
+                          let data = try? ImageWriter.rgba8Sampled(mask, width: 96, height: 96)
+                    else { return 0 }
+                    var sum = 0.0, n = 0.0
+                    data.withUnsafeBytes { rp in
+                        let px = rp.bindMemory(to: UInt8.self)
+                        for i in stride(from: 0, to: data.count, by: 4) {
+                            let c = Double(px[i]) / 255.0
+                            sum += c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+                            n += 1
+                        }
+                    }
+                    return n > 0 ? sum / n : 0
+                }
+                let linearSum = linearCoverage("subject") + linearCoverage("sky")
+                              + linearCoverage("background")
+                worstDrift = max(worstDrift, abs(linearSum - 1))
+
+                if m.bitmaps["subject"] != nil { haveSubject += 1 }
+                if m.subjectOrigin == .person { havePerson += 1 }
+                if m.bitmaps["sky"] != nil { haveSky += 1 }
+                // "Neither" means no SEGMENTED mask — the derived background always exists, so an
+                // emptiness check on `bitmaps` would never fire again.
+                if m.bitmaps["subject"] == nil && m.bitmaps["sky"] == nil { haveNeither += 1 }
+
+                let name = url.deletingPathExtension().lastPathComponent
+                let shown = name.count > 34 ? String(name.suffix(34)) : name
+                // No `%s` here: it takes a C string, and handing it a Swift String passes a pointer
+                // into a temporary that is already gone. It does not warn, it segfaults — and with the
+                // output redirected that reads as a command that produced nothing.
+                let origin = m.subjectOrigin.map { $0 == .person ? "(person) " : "(salient)" } ?? "         "
+                print(shown + String(repeating: " ", count: max(1, 36 - shown.count))
+                      + String(format: "%5.1f%% ", subject * 100) + origin
+                      + String(format: " %5.1f%%      %5.1f%%      %5.1f%%",
+                               sky * 100, background * 100, (1 - covered) * 100))
+
+                guard let outDir else { return }
+                // The audition: the three masks painted onto the frame, and — the picture that
+                // decides whether a background treatment is worth building rules for — the frame
+                // with its background pulled down half a stop through the derived mask.
+                for key in ["subject", "sky", "background"] {
+                    guard let mask = m.bitmaps[key] else { continue }
+                    let overlay = Renderer.renderMaskOverlay(proxy, maskBitmap: mask)
+                    try ImageWriter.write(overlay, to: outDir.appendingPathComponent("\(name)-\(key).png"),
+                                          format: .png)
+                }
+                var recipe = Recipe.neutral
+                recipe.masks = [Mask(id: "bg", type: "background", source: "segmentation",
+                                     invert: false, feather: 20, opacity: 1.0,
+                                     adjustments: ["exposure_ev": -0.5])]
+                let dimmed = Renderer.render(proxy, with: recipe, maskBitmaps: m.bitmaps)
+                try ImageWriter.write(dimmed, to: outDir.appendingPathComponent("\(name)-bg-dim.png"),
+                                      format: .png)
             }
-            let subject = coverage("subject"), sky = coverage("sky")
-            // The two masks are already disjoint — `LocalMasks` subtracts the subject from the sky —
-            // so the covered fraction is their sum rather than a union that needs computing.
-            let covered = min(1.0, subject + sky)
-            unmasked.append(1 - covered)
-
-            if m.bitmaps["subject"] != nil { haveSubject += 1 }
-            if m.subjectOrigin == .person { havePerson += 1 }
-            if m.bitmaps["sky"] != nil { haveSky += 1 }
-            if m.bitmaps.isEmpty { haveNeither += 1 }
-
-            let name = url.deletingPathExtension().lastPathComponent
-            let shown = name.count > 34 ? String(name.suffix(34)) : name
-            // No `%s` here: it takes a C string, and handing it a Swift String passes a pointer
-            // into a temporary that is already gone. It does not warn, it segfaults — and with the
-            // output redirected that reads as a command that produced nothing.
-            let origin = m.subjectOrigin.map { $0 == .person ? "(person) " : "(salient)" } ?? "         "
-            print(shown + String(repeating: " ", count: max(1, 36 - shown.count))
-                  + String(format: "%5.1f%% ", subject * 100) + origin
-                  + String(format: " %5.1f%%      %5.1f%%", sky * 100, (1 - covered) * 100))
         }
         guard total > 0 else { fail("nothing decodable") }
         func pct(_ n: Int) -> String { String(format: "%3.0f%%", 100.0 * Double(n) / Double(total)) }
@@ -1305,13 +1370,22 @@ case "mask-coverage":
         print("  subject mask: \(haveSubject) (\(pct(haveSubject))) — of which person-segmented: "
               + "\(havePerson), salient-object fallback: \(haveSubject - havePerson)")
         print("  sky mask:     \(haveSky) (\(pct(haveSky)))")
-        print("  NEITHER:      \(haveNeither) (\(pct(haveNeither))) — global-only edits on these")
+        print("  NEITHER:      \(haveNeither) (\(pct(haveNeither))) — background is the whole frame there")
         let sorted = unmasked.sorted()
         if let best = sorted.first, let worst = sorted.last {
             print(String(format: "  fraction of the frame no mask touches: median %.0f%%, "
                          + "best %.0f%%, worst %.0f%%",
                          sorted[sorted.count / 2] * 100, best * 100, worst * 100))
         }
+        let bgSorted = backgrounds.sorted()
+        print(String(format: "  measured background coverage: median %.0f%% — "
+                     + "worst partition drift (linear |s+k+b − 1|): %.1f points",
+                     bgSorted[bgSorted.count / 2] * 100, worstDrift * 100))
+        if worstDrift > 0.05 {
+            print("  WARNING: subject + sky + background should sum to 1 everywhere; a drift this "
+                  + "size means the masks no longer partition the frame")
+        }
+        if let outDir { print("wrote per-frame mask overlays and a bg-dim preview to \(outDir.path)") }
     } catch {
         fail("\(error)")
     }

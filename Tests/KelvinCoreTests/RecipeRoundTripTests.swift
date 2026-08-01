@@ -79,7 +79,11 @@ final class RecipeRoundTripTests: XCTestCase {
                  shape: MaskShape(kind: .radial, cx: 0.4, cy: 0.6, radius: 0.3, angle: 0, softness: 0.2)),
             Mask(id: "c", type: "color", source: "selection", invert: false, feather: 0, opacity: 1,
                  adjustments: ["saturation": -20],
-                 selection: MaskSelection(kind: .color, center: 0.33, range: 0.1, softness: 0.05))
+                 selection: MaskSelection(kind: .color, center: 0.33, range: 0.1, softness: 0.05)),
+            // The derived background: a segmentation kind like subject/sky — no shape, no stamps,
+            // no selection; the bitmap comes from `LocalMasks.measure` under the key "background".
+            Mask(id: "bg", type: "background", source: "segmentation", invert: false, feather: 20,
+                 opacity: 1, adjustments: ["exposure_ev": -0.5])
         ]
         let back = try roundTrip(original)
         XCTAssertEqual(back.blackAndWhite, original.blackAndWhite)
