@@ -52,7 +52,7 @@ jobs:
         run: make build
 
       - name: Test
-        # ~390 tests, ~18s locally. No fixtures, no network, no GPU requirement.
+        # ~560 tests, ~35s locally. No fixtures, no network, no GPU requirement.
         run: make test
 
   app:

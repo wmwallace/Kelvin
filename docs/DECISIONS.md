@@ -376,7 +376,9 @@ positions, exactly as decided. The four decisions the build had to make on top o
   Place always carry a heading: a day with one frame in it is still that day.
 - **Place is headed with coordinates** ("50.4°N, 4.1°W"), not a place name. Reverse geocoding is a
   network call and this app makes none. One decimal is ~11 km — enough to tell two venues apart
-  without pretending to precision the heading is not for.
+  without pretending to precision the heading is not for. *(Overtaken by D14, 28 July 2026: the
+  owner reversed the no-lookup stance, so Place now carries a name when the switch is on. The
+  coordinate heading survives as the fallback when it is off or the lookup has not answered.)*
 - **Similar holds unmeasured frames back** in a trailing "Not measured yet" run rather than
   scattering them as singletons, because "no fingerprint yet" is not the claim "this frame is
   unique". Choosing the lens starts the triage scan that produces the fingerprints, since asking for

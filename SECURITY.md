@@ -21,10 +21,14 @@ removes most of the usual categories. What remains is worth reporting:
 - **Malformed-input crashes or memory-safety problems** reachable by opening a crafted image file.
   RAW decoding goes through Apple's Core Image, so many such issues belong to Apple; report them
   anyway and they will be forwarded.
-- **Any network activity beyond the update check.** Releases ship the perception weights inside
-  the app. The one outbound request a release is allowed is Sparkle's update check against
-  `https://usekelvin.app/appcast.xml` — on by default, turned off in Settings ▸ General, and it
-  fetches the appcast and nothing else. Any other packet leaving a release build is a bug by definition, and
+- **Any network activity beyond the update check and place names.** Releases ship the perception
+  weights inside the app. A release build is allowed exactly two kinds of outbound traffic:
+  Sparkle's update check against `https://usekelvin.app/appcast.xml` — on by default, turned off in
+  Settings ▸ General, and it fetches the appcast and nothing else — and, for a photograph that
+  carries GPS coordinates, Apple's geocoding and map-snapshot services, which receive that
+  coordinate rounded to about 110 m so the filmstrip can name and map the place (on by default,
+  turned off in Settings ▸ Scene reading, and the coordinate is all that goes — never pixels, a
+  filename, or an identifier). Any other packet leaving a release build is a bug by definition, and
   a serious one given what the project claims. (A build from source, without `make stage-model`,
   fetches the weights once from Hugging Face at a pinned revision — that one is expected and
   documented.)

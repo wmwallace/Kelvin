@@ -47,11 +47,11 @@ The repository is two packages, deliberately:
 | `Integrations/KelvinPerceptionMLX` | The SwiftUI app and the on-device vision model backend | minutes |
 
 ```sh
-make build && make test      # the core package: 390 tests, ~15s
+make build && make test      # the core package: 564 tests, ~35s
 make app                     # launch the editor
 make open PHOTO=~/path/to/photo.ARW    # launch it on one frame
 
-cd Integrations/KelvinPerceptionMLX && swift build && swift test    # the app package: 89 tests
+cd Integrations/KelvinPerceptionMLX && swift build && swift test    # the app package: 221 tests
 ```
 
 `make` builds into `$TMPDIR` rather than `.build`. That is not a preference — this repository may sit
