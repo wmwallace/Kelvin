@@ -39,4 +39,36 @@ final class PreferenceStoreTests: XCTestCase {
         XCTAssertEqual(loaded[1].chosen, "soft")
         XCTAssertEqual(loaded[1].perceptionHash, "hash456")
     }
+
+    /// The append in `record` is not atomic, so a crash mid-write leaves a truncated line.
+    /// This log is the product's training signal and is append-forever: one bad line must
+    /// cost one pick, never the whole history.
+    func testACorruptLineCostsOnePickNotTheHistory() async throws {
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent("kelvin-pref-\(UUID().uuidString)")
+        try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempDir) }
+
+        let logURL = tempDir.appendingPathComponent("preferences.jsonl")
+        let store = PreferenceStore(logFileURL: logURL)
+
+        try await store.record(pick: PreferencePick(imageId: "sha256:aaa", shown: ["a", "b"], chosen: "a"))
+        // A power loss mid-append: half a JSON object, no trailing newline.
+        let handle = try FileHandle(forWritingTo: logURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("{\"schema_version\": 1, \"image_id\": \"sha256:trunc".utf8))
+        try handle.close()
+
+        // The next launch appends past the damage, then reads everything back.
+        // (The truncated line absorbs the next line's start — both are lost, and that
+        // is the accepted cost; the line after survives.)
+        try await store.record(pick: PreferencePick(imageId: "sha256:bbb", shown: ["a", "b"], chosen: "b"))
+        try await store.record(pick: PreferencePick(imageId: "sha256:ccc", shown: ["a", "b"], chosen: "a"))
+
+        let report = try await store.loadAllReport()
+        XCTAssertEqual(report.picks.map(\.imageId), ["sha256:aaa", "sha256:ccc"])
+        XCTAssertEqual(report.skippedLines, 1)
+        let survivors = try await store.loadAll()
+        XCTAssertEqual(survivors.count, 2, "loadAll must not throw on damage")
+    }
 }

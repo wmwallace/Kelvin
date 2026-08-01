@@ -82,22 +82,35 @@ public actor PreferenceStore {
     }
 
     /// Reads all recorded preference picks from the log file.
+    ///
+    /// A line that will not decode is skipped, not fatal. The append in `record` is not
+    /// atomic, so a crash mid-write can leave one truncated line — and this log is
+    /// append-forever training signal, so one bad line must never make years of picks
+    /// unreadable. The skip count is returned to the caller's judgment via
+    /// `loadAllReport` below; this convenience keeps the original signature.
     public func loadAll() throws -> [PreferencePick] {
+        try loadAllReport().picks
+    }
+
+    public func loadAllReport() throws -> (picks: [PreferencePick], skippedLines: Int) {
         let fm = FileManager.default
-        guard fm.fileExists(atPath: logFileURL.path) else { return [] }
+        guard fm.fileExists(atPath: logFileURL.path) else { return ([], 0) }
 
         let content = try String(contentsOf: logFileURL, encoding: .utf8)
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
 
         var picks: [PreferencePick] = []
+        var skipped = 0
         let lines = content.components(separatedBy: .newlines)
         for line in lines where !line.trimmingCharacters(in: .whitespaces).isEmpty {
-            if let data = line.data(using: .utf8) {
-                let pick = try decoder.decode(PreferencePick.self, from: data)
-                picks.append(pick)
+            guard let data = line.data(using: .utf8),
+                  let pick = try? decoder.decode(PreferencePick.self, from: data) else {
+                skipped += 1
+                continue
             }
+            picks.append(pick)
         }
-        return picks
+        return (picks, skipped)
     }
 }
