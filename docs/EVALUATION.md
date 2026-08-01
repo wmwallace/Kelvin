@@ -276,6 +276,28 @@ lever removed, so two levers that fight each other can both look harmless. Rank,
 renderer skips every local edit and the mask layer's row reads as harmless — the same trap
 that made the whole corpus score the global half of a recipe for months.
 
+## What the photographer does to each region
+
+```
+kelvin-cli bg-probe --in-dir <corpus>/source --reference-dir <corpus>/reference
+```
+
+The per-region companion to `exposure-probe`, built for the background-mask taste call. Per pair it
+segments the **capture** (subject, sky, and the derived background), then measures mean luma under
+each mask on both the capture and the photographer's finished edit, printing each region's ΔEV and
+the differential `backgroundΔEV − subjectΔEV` — how much separation the edit created, and by which
+mechanism.
+
+What it showed on the 77 real pairs (1 Aug 2026), and the reading matters more than the medians:
+the photographer's separation on person frames is **−0.37 EV of differential, made almost entirely
+by lifting the subject (+0.40 median) and pulling the sky (−0.19), while the background itself
+stays put (+0.04 median, quartiles −0.08…+0.18)**. Background saturation is a wash (+0.01). On
+salient-object frames the differential collapses to −0.06, straddling zero.
+
+⚠️ So the probe *refuted* the obvious default it was built to evaluate: an unconditional
+background darken would contradict the photographer's own edits. Separation is subject-relative,
+and the levers that produce it already exist. Re-run this before wiring any background rule.
+
 ## Which illuminant estimate is right
 
 `ablate` says *which lever* is wrong. When the answer is white balance — it has been, twice — the

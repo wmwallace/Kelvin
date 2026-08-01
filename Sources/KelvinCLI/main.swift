@@ -37,6 +37,7 @@ func printUsage() {
       \(tool) endpoint-probe --in-dir <dir> [--reference-dir <dir>] [--perception-dir <dir>]
       \(tool) exposure-probe --in-dir <dir> --reference-dir <dir> [--perception-dir <dir>]
                      [--recipe-dir <dir>]
+      \(tool) bg-probe --in-dir <dir> --reference-dir <dir>
       \(tool) wb-probe --in-dir <dir> [--reference-dir <dir>] [--cost]
       \(tool) instances --in <image>
       \(tool) grow --in <image> --at <x,y> [--tolerance <t>] [--softness <s>] [--out-dir <dir>]
@@ -1492,6 +1493,194 @@ case "exposure-probe":
             "error (engine − photographer): mean %+.2f EV, median %+.2f, |error| > 0.5 EV on %d",
             mean(errors), median(errors), errors.filter { abs($0) > 0.5 }.count))
         print("moved the frame the OPPOSITE way from its photographer: \(wrongWay) of \(scored)")
+    } catch {
+        fail("\(error)")
+    }
+
+case "bg-probe":
+    // DOES THE PHOTOGRAPHER TREAT THE BACKGROUND DIFFERENTLY FROM THE SUBJECT?
+    //
+    // `LocalMasks` now derives a background mask on every frame, which makes a default background
+    // treatment *possible* — and nothing yet says whether it is justified. That is not a taste
+    // guess: for every paired frame the photographer has already decided how bright each region of
+    // the finished photograph is. This measures that decision region by region.
+    //
+    // Mean luma is measured under the CAPTURE's own subject/sky/background masks — once on the
+    // capture, once on the photographer's export of the same frame — and each region's move is
+    // expressed in EV. One segmentation per pair: crops are excluded at corpus build, so the
+    // capture's geometry is the export's geometry, and segmenting the export separately would only
+    // add a second source of mask noise.
+    //
+    // The column that answers the question is the DIFFERENTIAL, backgroundΔEV − subjectΔEV: zero
+    // means the background simply rode the global edit; negative means the photographer settles
+    // the background relative to the subject, which is the evidence a default treatment would
+    // rest on.
+    do {
+        let rest = Array(arguments.dropFirst())
+        guard let inDir = value(for: "--in-dir", in: rest) else {
+            fail("bg-probe requires --in-dir")
+        }
+        guard let referenceDir = value(for: "--reference-dir", in: rest) else {
+            fail("bg-probe requires --reference-dir")
+        }
+        let paths = try FileManager.default.contentsOfDirectory(atPath: inDir)
+            .filter { !$0.hasPrefix(".") }.sorted()
+            .map { (inDir as NSString).appendingPathComponent($0) }
+
+        struct Row {
+            let origin: SubjectMask.Origin?
+            let skyPresent: Bool
+            let subjectEV: Double?
+            let skyEV: Double?
+            let backgroundEV: Double?
+            /// backgroundΔEV − subjectΔEV. Negative: the background was settled relative to the
+            /// subject.
+            let differential: Double?
+            let backgroundSatDelta: Double?
+        }
+
+        print("frame                                 subjΔEV   skyΔEV    bgΔEV | bg−subj  bgΔsat")
+        var rows: [Row] = []
+        var noReference = 0, unreadable = 0, misaligned = 0
+        for path in paths {
+            // One pool per frame: each iteration decodes two frames and runs a segmentation, and
+            // without a drain that is the same slow climb `BatchApply` measured at 60 GB over a
+            // 400-frame batch.
+            autoreleasepool {
+                let url = URL(fileURLWithPath: path)
+                let stem = url.deletingPathExtension().lastPathComponent
+                guard let capture = try? ImageDecoder.decode(url: url) else {
+                    unreadable += 1; return
+                }
+                var refImage: CIImage?
+                for ext in ["png", "jpg", "jpeg"] where refImage == nil {
+                    let refURL = URL(fileURLWithPath: referenceDir)
+                        .appendingPathComponent(stem).appendingPathExtension(ext)
+                    if FileManager.default.fileExists(atPath: refURL.path) {
+                        refImage = try? ImageDecoder.decode(url: refURL)
+                    }
+                }
+                guard let reference = refImage else { noReference += 1; return }
+
+                // Decode has already applied EXIF orientation — that is how `PairedCorpus` makes a
+                // rotated export comparable — so by here an alignable pair has the SAME aspect,
+                // not merely the same long/short ratio. A pair that still disagrees cannot share
+                // one mask honestly; skip it and say so in the summary.
+                let (cw, ch) = (capture.extent.width, capture.extent.height)
+                let (rw, rh) = (reference.extent.width, reference.extent.height)
+                guard ch > 0, rh > 0, abs(cw / ch - rw / rh) / (rw / rh) <= 0.02 else {
+                    misaligned += 1; return
+                }
+
+                // Measure on the 768 px perception proxy, which is where the app decides.
+                let captureProxy = PerceptionProxy.downsample(capture, maxEdge: 768)
+                let referenceProxy = PerceptionProxy.downsample(reference, maxEdge: 768)
+                let m = LocalMasks.measure(in: captureProxy)
+
+                /// Mean HSV saturation of the pixels the mask covers — the same sampled reduction
+                /// as `SubjectMask.maskedMeanLuma`, for the one extra channel this probe reports.
+                /// Local to the probe: luma is the primary question, and nothing else needs this
+                /// yet.
+                func maskedMeanSaturation(image: CIImage, mask: CIImage) -> Double? {
+                    guard let imgData = try? ImageWriter.rgba8Sampled(image, width: 96, height: 96),
+                          let maskData = try? ImageWriter.rgba8Sampled(mask, width: 96, height: 96)
+                    else { return nil }
+                    var satSum = 0.0, weight = 0.0
+                    imgData.withUnsafeBytes { ip in
+                        maskData.withUnsafeBytes { mp in
+                            let img = ip.bindMemory(to: UInt8.self)
+                            let msk = mp.bindMemory(to: UInt8.self)
+                            for i in stride(from: 0, to: imgData.count, by: 4) {
+                                let m = Double(msk[i]) / 255.0
+                                guard m > 0.4 else { continue }
+                                let r = Double(img[i]) / 255.0, g = Double(img[i + 1]) / 255.0
+                                let b = Double(img[i + 2]) / 255.0
+                                let hi = max(r, g, b), lo = min(r, g, b)
+                                satSum += (hi > 0 ? (hi - lo) / hi : 0) * m
+                                weight += m
+                            }
+                        }
+                    }
+                    guard weight > 4 else { return nil }
+                    return satSum / weight
+                }
+
+                /// How many stops the photographer moved a region. Nil when either side is
+                /// unmeasurable (no mask, mask too small to carry a mean, or a luma too near zero
+                /// for a log to mean anything).
+                func evDelta(_ src: Double?, _ ref: Double?) -> Double? {
+                    guard let src, let ref, src > 0.001, ref > 0.001 else { return nil }
+                    return log2(ref / src)
+                }
+
+                func regionEV(_ key: String) -> Double? {
+                    guard let mask = m.bitmaps[key] else { return nil }
+                    return evDelta(SubjectMask.maskedMeanLuma(image: captureProxy, mask: mask),
+                                   SubjectMask.maskedMeanLuma(image: referenceProxy, mask: mask))
+                }
+                let subjectEV = regionEV("subject")
+                let skyEV = regionEV("sky")
+                let backgroundEV = regionEV("background")
+                var differential: Double?
+                if let backgroundEV, let subjectEV { differential = backgroundEV - subjectEV }
+                var backgroundSatDelta: Double?
+                if let bg = m.bitmaps["background"],
+                   let srcSat = maskedMeanSaturation(image: captureProxy, mask: bg),
+                   let refSat = maskedMeanSaturation(image: referenceProxy, mask: bg) {
+                    backgroundSatDelta = refSat - srcSat
+                }
+                rows.append(Row(origin: m.subjectOrigin, skyPresent: m.bitmaps["sky"] != nil,
+                                subjectEV: subjectEV, skyEV: skyEV, backgroundEV: backgroundEV,
+                                differential: differential,
+                                backgroundSatDelta: backgroundSatDelta))
+
+                func cell(_ x: Double?) -> String {
+                    x.map { String(format: "%+7.2f", $0) } ?? "      —"
+                }
+                let name = stem.count > 36 ? String(stem.suffix(36)) : stem
+                print(name + String(repeating: " ", count: max(1, 38 - name.count))
+                      + cell(subjectEV) + "  " + cell(skyEV) + "  " + cell(backgroundEV)
+                      + " |" + cell(differential) + "  " + cell(backgroundSatDelta))
+            }
+        }
+        guard !rows.isEmpty else { fail("no scorable pairs") }
+
+        func quartiles(_ xs: [Double]) -> (p25: Double, median: Double, p75: Double)? {
+            guard !xs.isEmpty else { return nil }
+            let v = xs.sorted()
+            func q(_ f: Double) -> Double { v[Int((Double(v.count - 1) * f).rounded())] }
+            return (q(0.25), q(0.5), q(0.75))
+        }
+        func summarise(_ label: String, _ xs: [Double]) {
+            guard let q = quartiles(xs) else {
+                print("  " + label + "   (no measurable pairs)"); return
+            }
+            print(String(format: "  %@  n=%3d   p25 %+6.2f   median %+6.2f   p75 %+6.2f",
+                         label, xs.count, q.p25, q.median, q.p75))
+        }
+
+        print("\n\(rows.count) pairs scored"
+              + " (skipped: \(noReference) without a reference, \(unreadable) unreadable, "
+              + "\(misaligned) that could not be aligned).")
+        print("\nΔEV per region (photographer's export vs capture, EV = log2(ref/src)):")
+        summarise("subject   ", rows.compactMap(\.subjectEV))
+        summarise("sky       ", rows.compactMap(\.skyEV))
+        summarise("background", rows.compactMap(\.backgroundEV))
+
+        let diffs = rows.compactMap(\.differential)
+        print("\ndifferential (backgroundΔEV − subjectΔEV; negative = background settled"
+              + " relative to the subject):")
+        summarise("all pairs ", diffs)
+        summarise("  person  ", rows.filter { $0.origin == .person }.compactMap(\.differential))
+        summarise("  salient ", rows.filter { $0.origin == .foreground }.compactMap(\.differential))
+        summarise("  sky     ", rows.filter(\.skyPresent).compactMap(\.differential))
+        summarise("  no sky  ", rows.filter { !$0.skyPresent }.compactMap(\.differential))
+        let darker = diffs.filter { $0 < -0.15 }.count
+        let brighter = diffs.filter { $0 > 0.15 }.count
+        print("  |differential| > 0.15 EV on \(darker + brighter) of \(diffs.count) pairs — "
+              + "background darker on \(darker), brighter on \(brighter)")
+        print("\nbackground saturation (mean HSV sat under the background mask, ref − src):")
+        summarise("background", rows.compactMap(\.backgroundSatDelta))
     } catch {
         fail("\(error)")
     }
