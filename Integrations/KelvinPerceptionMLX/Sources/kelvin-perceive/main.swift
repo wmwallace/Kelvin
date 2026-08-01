@@ -221,18 +221,32 @@ if first == "bench-export" {
         // The concurrent half: the writes (which force the render) run N at a time. Per-stage
         // timings above stay sequential and honest; WALL time is what this flag measures.
         if lanes > 1 {
-            await withTaskGroup(of: Void.self) { group in
+            // Same `size:` as the sequential branch — this used to default to .fullResolution,
+            // which silently benchmarked full-resolution writes no matter what --long-edge said.
+            let failures = await withTaskGroup(of: String?.self) { group -> [String] in
                 var next = 0
                 func add() {
                     guard next < pending.count else { return }
                     let job = pending[next]; next += 1
                     group.addTask {
-                        try? ImageWriter.write(job.image, to: job.out, format: .jpeg(quality: 0.97))
+                        do {
+                            try ImageWriter.write(job.image, to: job.out,
+                                                  format: .jpeg(quality: 0.97), size: exportSize)
+                            return nil
+                        } catch {
+                            return job.out.lastPathComponent
+                        }
                     }
                 }
+                var failed: [String] = []
                 for _ in 0..<min(lanes, pending.count) { add() }
-                while await group.next() != nil { add() }
+                while let result = await group.next() {
+                    if let name = result { failed.append(name) }
+                    add()
+                }
+                return failed
             }
+            for name in failures { note("  FAILED to write \(name)") }
         }
         let wall = Date().timeIntervalSince(wallStart)
 
@@ -570,7 +584,7 @@ if first == "bench-export" {
             scored.append((recipe, aesthetic?.overall ?? 0))
             if let aesthetic { scoredForCuration.append(.init(recipe: recipe, score: aesthetic)) }
             let scoreStr = aesthetic.map { String(format: "%.2f", $0.overall) } ?? "  – "
-            let flags = aesthetic?.notes.isEmpty == false ? "  ⚠ " + (aesthetic!.notes.joined(separator: "; ")) : ""
+            let flags = (aesthetic?.notes).flatMap { $0.isEmpty ? nil : "  ⚠ " + $0.joined(separator: "; ") } ?? ""
             print("  \(label)  " + String(format: "exp %+.2f  contrast %+3.0f  vibrance %+3.0f  wb %-7@  score %@",
                                           g.exposureEV, g.contrast, g.vibrance, wb as NSString, scoreStr as NSString) + flags)
         }
