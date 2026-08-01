@@ -610,7 +610,7 @@ public struct Geometry: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        rotateDeg = try c.decodeIfPresent(Double.self, forKey: .rotateDeg) ?? 0
+        rotateDeg = try c.clampedDouble(.rotateDeg, default: 0, in: Ranges.rotateDeg)
         crop = try c.decodeIfPresent(CropRect.self, forKey: .crop)
         lensCorrection = try c.decodeIfPresent(Bool.self, forKey: .lensCorrection) ?? false
     }
@@ -622,4 +622,21 @@ public struct CropRect: Codable, Equatable, Sendable {
     public var y: Double
     public var width: Double
     public var height: Double
+
+    public init(x: Double, y: Double, width: Double, height: Double) {
+        self.x = x; self.y = y; self.width = width; self.height = height
+    }
+
+    /// The one recipe type that used to decode unclamped. A hand-edited `width: 0` or
+    /// `x: -2` reached the renderer as a degenerate rect and produced an empty image, so
+    /// decode guarantees a non-degenerate rect that fits inside the unit square.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        width = clamp(try c.decodeIfPresent(Double.self, forKey: .width) ?? 1, to: 0.01...1)
+        height = clamp(try c.decodeIfPresent(Double.self, forKey: .height) ?? 1, to: 0.01...1)
+        x = clamp(try c.decodeIfPresent(Double.self, forKey: .x) ?? 0, to: 0...(1 - width))
+        y = clamp(try c.decodeIfPresent(Double.self, forKey: .y) ?? 0, to: 0...(1 - height))
+    }
+
+    enum CodingKeys: String, CodingKey { case x, y, width, height }
 }

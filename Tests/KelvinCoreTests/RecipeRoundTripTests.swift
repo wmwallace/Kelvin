@@ -50,6 +50,24 @@ final class RecipeRoundTripTests: XCTestCase {
         XCTAssertEqual(back.provenance, original.provenance)
     }
 
+    /// Geometry was the one section that decoded untrusted JSON unclamped: a hand-edited
+    /// `"width": 0` or `"x": -2` reached the renderer as a degenerate rect and exported an
+    /// empty image. Decode must guarantee a usable rect, like every other section.
+    func testHostileGeometryDecodesToAUsableRect() throws {
+        let json = """
+        {"rotate_deg": 720, "crop": {"x": -2, "y": 0.5, "width": 0, "height": 9}, "lens_correction": false}
+        """
+        let g = try JSONDecoder().decode(Geometry.self, from: Data(json.utf8))
+        XCTAssertEqual(g.rotateDeg, Ranges.rotateDeg.upperBound)
+        let crop = try XCTUnwrap(g.crop)
+        XCTAssertGreaterThanOrEqual(crop.width, 0.01, "a crop must never be empty")
+        XCTAssertGreaterThanOrEqual(crop.height, 0.01)
+        XCTAssertGreaterThanOrEqual(crop.x, 0)
+        XCTAssertGreaterThanOrEqual(crop.y, 0)
+        XCTAssertLessThanOrEqual(crop.x + crop.width, 1, "the rect must fit the unit square")
+        XCTAssertLessThanOrEqual(crop.y + crop.height, 1)
+    }
+
     func testNewerSectionsSurviveARoundTrip() throws {
         var original = fullyPopulated()
         original.blackAndWhite = BlackAndWhiteMix(bands: ["blue": -60, "orange": 15])

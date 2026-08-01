@@ -13,6 +13,9 @@ public enum Ranges {
     /// sharpen, nr_luma, nr_color, feather.
     public static let unsigned100: ClosedRange<Double> = 0 ... 100
     public static let opacity: ClosedRange<Double> = 0 ... 1
+    /// The UI stops at ±15°; ±45° is the limit past which `largestInscribedRect`'s
+    /// same-aspect contract no longer holds.
+    public static let rotateDeg: ClosedRange<Double> = -45 ... 45
 }
 
 @inline(__always)
