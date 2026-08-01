@@ -157,6 +157,9 @@ public enum PerceptionStore {
     /// someone would rather reclaim the space than let it age out one stale entry at a time.
     public static func removeAll() {
         try? FileManager.default.removeItem(at: directory)
-        _ = directory      // recreate
+        // `directory` is a lazy `static let`: its create-on-first-access closure has already run,
+        // so reading it again recreates nothing. Recreate explicitly, or every save after a
+        // removeAll fails silently until relaunch (`.atomic` writes do not create directories).
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 }
