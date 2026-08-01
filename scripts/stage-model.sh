@@ -30,7 +30,16 @@ MODEL_REPO="${KELVIN_MODEL:-mlx-community/Qwen3.5-2B-MLX-4bit}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAGE="$ROOT/Vendor/PerceptionModel"
 
-# The source snapshot: given explicitly, or the newest snapshot in the HF cache.
+# The revision a release is allowed to ship: the same pin the source-build download path uses,
+# parsed out of the Swift source so the two can never drift (package-app.sh reads Branding.swift
+# the same way). HF cache snapshots are named by commit hash, which is what makes this checkable.
+PROVIDER="$ROOT/Integrations/KelvinPerceptionMLX/Sources/KelvinPerceptionMLX/MLXPerceptionProvider.swift"
+PINNED=""
+if [[ "$MODEL_REPO" == "mlx-community/Qwen3.5-2B-MLX-4bit" ]]; then
+    PINNED="$(sed -n 's/.*defaultModelRevision = "\([0-9a-f]\{40\}\)".*/\1/p' "$PROVIDER")"
+fi
+
+# The source snapshot: given explicitly, or the pinned snapshot in the HF cache.
 if [[ $# -ge 1 ]]; then
     SOURCE="$1"
 else
@@ -41,12 +50,36 @@ else
         echo "       run the app or kelvin-perceive once to populate it, or pass a directory." >&2
         exit 1
     fi
-    SOURCE="$(find "$CACHE_DIR/snapshots" -mindepth 1 -maxdepth 1 -type d | head -1)"
+    if [[ -n "$PINNED" && -d "$CACHE_DIR/snapshots/$PINNED" ]]; then
+        SOURCE="$CACHE_DIR/snapshots/$PINNED"
+    elif [[ -n "$PINNED" ]]; then
+        # This used to take whatever `find | head -1` returned — an arbitrary snapshot, staged
+        # into a signed release with nothing checking it was the revision the code pins.
+        echo "error: the cache has no snapshot at the pinned revision $PINNED" >&2
+        echo "       snapshots present:" >&2
+        ls -1 "$CACHE_DIR/snapshots" | sed 's/^/         /' >&2
+        echo "       run the app or kelvin-perceive once to fetch the pinned revision," >&2
+        echo "       or pass a directory explicitly to stage it anyway." >&2
+        exit 1
+    else
+        # A KELVIN_MODEL override has no pin recorded in code; take the newest snapshot.
+        SOURCE="$(ls -1dt "$CACHE_DIR/snapshots"/*/ | head -1)"
+        SOURCE="${SOURCE%/}"
+    fi
 fi
 
 if [[ ! -f "$SOURCE/config.json" ]]; then
     echo "error: $SOURCE does not look like a model directory (no config.json)" >&2
     exit 1
+fi
+
+# An explicitly passed snapshot is a deliberate choice, so a mismatch warns rather than refuses —
+# but it must never pass silently into a signed bundle.
+SOURCE_NAME="$(basename "$SOURCE")"
+if [[ -n "$PINNED" && "$SOURCE_NAME" =~ ^[0-9a-f]{40}$ && "$SOURCE_NAME" != "$PINNED" ]]; then
+    echo "warning: staging snapshot $SOURCE_NAME" >&2
+    echo "         but the code pins       $PINNED" >&2
+    echo "         — this bundle will not match what a source build downloads." >&2
 fi
 
 # THE LICENCE GATE. Checked before anything is copied, so a failed run leaves no half-staged bundle
