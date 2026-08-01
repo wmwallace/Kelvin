@@ -878,3 +878,42 @@ driven by someone's eye.
 No re-editing of a placed spot — no moving it, resizing it, or re-picking its source. Undo and
 delete only. This is a touch-up tool; if it turns out people want to nudge a patch, that is a
 selection model and canvas handles, and it should be asked for rather than assumed.
+
+## D17 — The app is not sandboxed, and says so · **Recorded 31 July 2026**
+
+**Status:** this records a choice every shipped build has already made, discovered by an audit
+rather than by an argument. There is no `.entitlements` file in the repository and `codesign` runs
+without one; releases have the hardened runtime and a secure timestamp (both notarisation
+prerequisites) and no App Sandbox.
+
+### Why recording it matters
+
+Several comments — `Branding.swift`, `CLAUDE.md`, `package-app.sh` — reason about "the sandbox
+container" that macOS keys off the bundle identifier. That reasoning is right as future-proofing
+(the identifier must stay frozen precisely so that *if* a container ever exists, it is not
+orphaned), but a reader could take it as a claim that the app is sandboxed today. It is not, and a
+project whose README leads with a privacy promise should not leave that to inference. The promise
+"reads your photographs, writes only its own folders" is enforced by code discipline and tests —
+`BatchDestination` refusing the source folder, stores keyed by digest under Application Support —
+not by the OS.
+
+### Why unsandboxed is the right call for now
+
+- **Distribution is Developer ID, not the App Store**, so the sandbox is optional. Notarisation and
+  the hardened runtime are the bar a direct-download Mac app must clear, and releases clear it.
+- **The filmstrip's whole job is walking a photography library across launches.** Sandboxed, every
+  folder a user ever opened becomes a security-scoped bookmark to mint, persist, resolve and
+  re-authorise when it goes stale — a real tax on exactly the browse-a-shoot loop D15 just made
+  fast, paid to defend against an app whose only network traffic is already enumerated in
+  SECURITY.md.
+- **MLX compiles Metal kernels at runtime.** The hardened runtime already constrains this (the
+  comment in `package-app.sh` flags it); the sandbox adds a second layer of the same kind of
+  restriction to debug, for a process that touches no network.
+- **Sparkle under the sandbox needs its XPC installer service arrangement** — more moving parts in
+  the update path, which is the one part of the app that must never break silently.
+
+### What would reopen it
+
+App Store distribution (which requires the sandbox outright), or any feature that starts executing
+material it downloads. Neither is planned. If it reopens, the bundle identifier this project froze
+in D11 is the name the container will be keyed under — which is why the comments above stay.
