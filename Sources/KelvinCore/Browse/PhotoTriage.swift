@@ -175,6 +175,18 @@ public enum PhotoTriage {
     /// against; changing it would silently move every focus verdict in the app.
     public static let proxyEdge = 1200
 
+    /// Every constant that decides what the measuring pass reads, folded into one token for a
+    /// cache key: the proxy edge, the focus grid, the histogram sample grid, and the dHash grid.
+    ///
+    /// A sweep and a cache are natural enemies — change any of these and every stored verdict
+    /// silently answers for a measurement nobody takes any more, the same hazard
+    /// `ResolvedRecipeStore` keys on `tuningSignature` to avoid. Derived from the constants
+    /// themselves rather than written down again, so bumping one invalidates every cache built on
+    /// it without anyone remembering to.
+    public static let measurementGeometry =
+        "p\(proxyEdge)-f\(FocusMeasure.grid)-s\(ImageMetrics.sampleEdge)"
+        + "-h\(hashColumns)x\(hashRows)x\(hashOversample)"
+
     /// Triage one already-decoded proxy. Pure apart from rasterising the sample grids.
     ///
     /// Pass the **proxy**, not the full-resolution original — consistency between frames matters
@@ -203,19 +215,31 @@ public enum PhotoTriage {
     ///
     /// Safe to run several at once: nothing in this path touches Vision.
     public static func read(url: URL, fastRAW: Bool = true) -> Verdict? {
-        // `measurementProxy` also accepts a RAW file's embedded preview, which `fromFile` refuses.
-        // For measurement that is the right trade — see its documentation — and it is the difference
-        // between six minutes and thirty seconds on a RAW shoot. `fastRAW: false` forces the slow,
-        // fully-decoded path, which is what `triage-compare` uses as its reference.
-        if let fast = fastRAW ? PerceptionProxy.measurementProxy(url, maxEdge: proxyEdge)
-                              : PerceptionProxy.fromFile(url, maxEdge: proxyEdge) {
-            return read(fast)
+        // One pool per frame, and it is load-bearing — the same shape as the BatchApply fix (see
+        // "A 400-frame batch no longer eats 60 GB getting there"): ImageIO and Core Image
+        // autorelease full-frame temporaries, and the fallback below fully decodes the original —
+        // 60 MP for a RAW that embeds no usable preview — while the app's scan runs up to eight of
+        // these concurrently in one long task-group loop that never drains. Here rather than in
+        // each caller because every loop over this function (the app's scan, `triage-compare`)
+        // needs the drain, and this is the tightest scope that encloses the decode. No
+        // cache-clearing, deliberately: that half of the batch fix was batch-scoped, and the app's
+        // interactive paths want their CIContext caches kept.
+        autoreleasepool {
+            // `measurementProxy` also accepts a RAW file's embedded preview, which `fromFile`
+            // refuses. For measurement that is the right trade — see its documentation — and it is
+            // the difference between six minutes and thirty seconds on a RAW shoot.
+            // `fastRAW: false` forces the slow, fully-decoded path, which is what `triage-compare`
+            // uses as its reference.
+            if let fast = fastRAW ? PerceptionProxy.measurementProxy(url, maxEdge: proxyEdge)
+                                  : PerceptionProxy.fromFile(url, maxEdge: proxyEdge) {
+                return read(fast)
+            }
+            guard let full = try? ImageDecoder.decode(url: url) else { return nil }
+            let scaled = PerceptionProxy.downsample(full, maxEdge: proxyEdge)
+            guard let cg = ImageWriter.exportContext.createCGImage(scaled, from: scaled.extent)
+            else { return read(scaled) }
+            return read(CIImage(cgImage: cg))
         }
-        guard let full = try? ImageDecoder.decode(url: url) else { return nil }
-        let scaled = PerceptionProxy.downsample(full, maxEdge: proxyEdge)
-        guard let cg = ImageWriter.exportContext.createCGImage(scaled, from: scaled.extent)
-        else { return read(scaled) }
-        return read(CIImage(cgImage: cg))
     }
 
     // MARK: - Near-duplicate signature

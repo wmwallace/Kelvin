@@ -1145,8 +1145,10 @@ final class AppState: ObservableObject {
         // The one place that knows the shoot has changed, so it is where everything keyed to the
         // OLD shoot is let go of.
         //
-        // The scan is the expensive one: 8½ minutes of decoding on a 437-frame RAW folder, which
-        // used to carry on regardless and hold the progress flag that stops the next folder's scan
+        // The scan is the expensive one: the fast path reads a RAW's embedded preview and serves
+        // repeat visits from `MediaCache`, but a first pass over bodies that embed no usable
+        // preview is still a full decode per frame — and an abandoned scan used to carry on
+        // regardless and hold the progress flag that stops the next folder's scan
         // from ever starting. The dictionaries are cheap each but unbounded across a session — the
         // thumbnail cache is ~68 KB a frame, so five shoots is ~150 MB of 160 px previews for
         // folders nobody has open, and it was never cleared anywhere.
@@ -1605,8 +1607,9 @@ final class AppState: ObservableObject {
     /// What a scan concluded about each frame, beyond sharpness.
     ///
     /// Read in the SAME pass as focus rather than a second one. Both want the same 1200 px proxy,
-    /// and on a RAW folder that proxy costs about 900 ms of decode per frame — 6.6 minutes across
-    /// a 437-frame shoot. Scanning twice would pay that twice for a measurement that adds 2 ms.
+    /// and that proxy is the dominant cost of the pass — an embedded-preview read on the fast
+    /// path, a full RAW decode on the fallback. Scanning twice would pay it twice for a
+    /// measurement that adds 2 ms.
     ///
     /// Deliberately NOT wired to any filter that hides frames. The concerns are advisory: the rule
     /// from the culling work is that photos are flagged for review, never auto-rejected, "so you
@@ -1747,14 +1750,18 @@ final class AppState: ObservableObject {
         let pending = photos.filter { triage[$0] == nil }
         guard !pending.isEmpty else { focusScanProgress = nil; return }
 
-        // HELD AND CANCELLABLE, because this pass is minutes long and it was neither.
+        // HELD AND CANCELLABLE, because this pass can still be minutes long and it was neither.
         //
-        // The measured cost is ~1170 ms per RAW frame; across a 437-frame folder that is 8½ minutes
-        // of decoding. Nothing stored the task and nothing cancelled it, so leaving for another
-        // folder left all of it running — four cores decoding frames nobody is looking at, each
-        // in-flight task holding a 1200 px proxy. Worse, `focusScanProgress` is the re-entry guard,
-        // so the new folder's scan (and the Similar lens, which asks for one) silently did nothing
-        // until the abandoned one drained.
+        // The costs have fallen twice since that bit: the fast path now reads a RAW's embedded
+        // preview instead of paying ~1170 ms of full decode per frame (8½ minutes across a
+        // 437-frame folder, which is where these rules were learned), and a verdict measured once
+        // is now served from `MediaCache` on every later visit for the price of a `stat`. What
+        // remains slow is the cold fallback — a body that embeds no usable preview still pays the
+        // full decode — so the rules stay. Nothing stored the task and nothing cancelled it, so
+        // leaving for another folder left all of it running — four cores decoding frames nobody is
+        // looking at, each in-flight task holding a 1200 px proxy. Worse, `focusScanProgress` is
+        // the re-entry guard, so the new folder's scan (and the Similar lens, which asks for one)
+        // silently did nothing until the abandoned one drained.
         scanTask?.cancel()
         scanTask = Task { [weak self] in
             var done = 0
@@ -1780,7 +1787,15 @@ final class AppState: ObservableObject {
                     guard next < pending.count else { return }
                     let url = pending[next]; next += 1
                     // .userInitiated: somebody pressed a button and is watching a progress bar.
-                    group.addTask(priority: .userInitiated) { (url, PhotoTriage.read(url: url)) }
+                    //
+                    // Through the disk cache: a verdict is a pure function of the file's bytes and
+                    // the measurement geometry, both of which are in the cache key, so a shoot
+                    // measured once costs one `stat` per frame on every later visit. A miss
+                    // measures via `PhotoTriage.read` and writes through. Either way the result
+                    // lands below exactly as a fresh measurement would — `triage` AND `focus`.
+                    group.addTask(priority: .userInitiated) {
+                        (url, MediaCache.shared.verdict(for: url))
+                    }
                 }
                 for _ in 0..<min(limit, pending.count) { start() }
                 for await (url, verdict) in group {

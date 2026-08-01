@@ -8,7 +8,8 @@ import KelvinCore
 import os
 
 /// Derived data about a photograph that is expensive to read and cheap to keep: its filmstrip
-/// thumbnail, its content hash, and what the camera recorded in its header.
+/// thumbnail, its content hash, what the camera recorded in its header, and what the triage scan
+/// measured.
 ///
 /// **This exists because of network volumes.** Everything Kelvin knows about a photograph it learns
 /// by reading the file, and until this landed it learned it again on every launch. On a local SSD
@@ -295,6 +296,142 @@ struct MediaCache: Sendable {
             info.pixelWidth = pixelWidth
             info.pixelHeight = pixelHeight
             return info
+        }
+    }
+
+    // MARK: - Triage verdicts
+
+    /// The Best/Focus/Flagged measuring pass for one frame, from disk if it is there.
+    ///
+    /// Safe to cache because a verdict is a pure function of the file's bytes: every sample grid
+    /// comes off the deterministic software raster (`ImageWriter.rgba8Sampled`, whose determinism
+    /// is documented and tested), so the second answer equalling the first — the property this
+    /// whole cache rests on — holds by construction. What used to happen instead: `AppState`
+    /// held verdicts only in memory, so reopening a shoot re-measured all of it; over SMB that is
+    /// the difference between one `stat` per frame and a preview read per frame.
+    ///
+    /// What is stored is the RAW READINGS only — never the derived concerns. Thresholds move
+    /// (`PhotoTriage` deleted four of its own seven concerns after measuring 836 real frames), and
+    /// an entry that stored conclusions would keep showing yesterday's flags on today's rules.
+    /// Concerns are re-derived from the current thresholds on every load.
+    func verdict(for url: URL, fastRAW: Bool = true) -> PhotoTriage.Verdict? {
+        if let cached = storedVerdict(for: url, fastRAW: fastRAW) { return cached }
+        guard let fresh = PhotoTriage.read(url: url, fastRAW: fastRAW) else { return nil }
+        storeVerdict(fresh, for: url, fastRAW: fastRAW)
+        return fresh
+    }
+
+    /// The stored verdict alone, never measuring. Split from `verdict(for:)` because nothing else
+    /// can tell "served from the cache" from "re-measured quickly", and that distinction is what
+    /// the invalidation tests exist to prove.
+    func storedVerdict(for url: URL, fastRAW: Bool = true) -> PhotoTriage.Verdict? {
+        guard let entry = entry(for: url, variant: Self.verdictVariant(fastRAW: fastRAW),
+                                ext: "json"),
+              let data = try? Data(contentsOf: entry),
+              let stored = try? JSONDecoder().decode(StoredVerdict.self, from: data),
+              stored.version == StoredVerdict.currentVersion
+        else { return nil }
+        return stored.verdict
+    }
+
+    func storeVerdict(_ verdict: PhotoTriage.Verdict, for url: URL, fastRAW: Bool = true) {
+        guard let entry = entry(for: url, variant: Self.verdictVariant(fastRAW: fastRAW),
+                                ext: "json"),
+              let data = try? JSONEncoder().encode(StoredVerdict(verdict))
+        else { return }
+        try? data.write(to: entry, options: .atomic)
+    }
+
+    /// The variant carries the whole measurement geometry plus the decode path, and both come from
+    /// the code rather than from literals here: `PhotoTriage.measurementGeometry` is built out of
+    /// the same constants the pass measures through, so changing any of them — the 1200 px proxy,
+    /// the 384 px focus grid, the 96 px histogram sample, the 9×8×8 hash — strands every existing
+    /// entry instead of silently serving it for a measurement nobody takes any more. `fast` and
+    /// `full` are separate entries because the two decode paths can rasterise differently, and
+    /// `triage-compare` exists precisely because that difference is worth measuring.
+    private static func verdictVariant(fastRAW: Bool) -> String {
+        "verdict-\(PhotoTriage.measurementGeometry)-\(fastRAW ? "fast" : "full")"
+    }
+
+    /// `Verdict` is not `Codable` and should not become so — Core keeps its measurement types free
+    /// of serialisation decisions, the same call `StoredCaptureInfo` records for `CaptureInfo`. A
+    /// DTO here keeps that decision local and versioned.
+    ///
+    /// Raw readings only; no `concerns` field, by design — see `verdict(for:)`.
+    private struct StoredVerdict: Codable {
+        static let currentVersion = 1
+        var version = currentVersion
+
+        // FocusMeasure.Reading
+        var acuity: Double
+        var measurable: Bool
+
+        // PhotoTriage.Signature
+        var signatureBits: UInt64
+        var signatureContrast: Double
+
+        // ImageStatistics — every stored property except `dynamicRange`, which its initialiser
+        // derives from the white and black points exactly as `compute` originally did.
+        var meanLuma: Double
+        var medianLuma: Double
+        var blackPoint: Double
+        var shadowLevel: Double
+        var highlightLevel: Double
+        var whitePoint: Double
+        var highlightClip: Double
+        var shadowClip: Double
+        var shadowMass: Double
+        var shadowRegion: Double
+        var saturationClip: Double
+        var chromaA: Double
+        var chromaB: Double
+        var neutralChromaA: Double
+        var neutralChromaB: Double
+        var edgeChromaA: Double
+        var edgeChromaB: Double
+
+        init(_ verdict: PhotoTriage.Verdict) {
+            acuity = verdict.focus.acuity
+            measurable = verdict.focus.measurable
+            signatureBits = verdict.signature.bits
+            signatureContrast = verdict.signature.contrast
+            let s = verdict.statistics
+            meanLuma = s.meanLuma
+            medianLuma = s.medianLuma
+            blackPoint = s.blackPoint
+            shadowLevel = s.shadowLevel
+            highlightLevel = s.highlightLevel
+            whitePoint = s.whitePoint
+            highlightClip = s.highlightClip
+            shadowClip = s.shadowClip
+            shadowMass = s.shadowMass
+            shadowRegion = s.shadowRegion
+            saturationClip = s.saturationClip
+            chromaA = s.chromaA
+            chromaB = s.chromaB
+            neutralChromaA = s.neutralChromaA
+            neutralChromaB = s.neutralChromaB
+            edgeChromaA = s.edgeChromaA
+            edgeChromaB = s.edgeChromaB
+        }
+
+        var verdict: PhotoTriage.Verdict {
+            let statistics = ImageStatistics(
+                meanLuma: meanLuma, medianLuma: medianLuma, blackPoint: blackPoint,
+                shadowLevel: shadowLevel, highlightLevel: highlightLevel, whitePoint: whitePoint,
+                highlightClip: highlightClip, shadowClip: shadowClip,
+                chromaA: chromaA, chromaB: chromaB,
+                shadowMass: shadowMass, shadowRegion: shadowRegion,
+                saturationClip: saturationClip,
+                neutralChromaA: neutralChromaA, neutralChromaB: neutralChromaB,
+                edgeChromaA: edgeChromaA, edgeChromaB: edgeChromaB)
+            let focus = FocusMeasure.Reading(acuity: acuity, measurable: measurable)
+            let signature = PhotoTriage.Signature(bits: signatureBits,
+                                                  contrast: signatureContrast)
+            // Concerns come from the CURRENT thresholds, never from the entry.
+            return PhotoTriage.Verdict(
+                concerns: PhotoTriage.concerns(for: statistics, focus: focus),
+                focus: focus, statistics: statistics, signature: signature)
         }
     }
 

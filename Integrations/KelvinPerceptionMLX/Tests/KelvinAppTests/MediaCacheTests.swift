@@ -246,6 +246,95 @@ final class MediaCacheTests: XCTestCase {
         XCTAssertEqual(cache.captureIndex(for: [a, b]), uncached, "and again, warm")
     }
 
+    // MARK: - Triage verdicts
+
+    /// Property 1 for the measuring pass: a warm verdict is the SAME verdict — focus reading,
+    /// statistics, signature and concerns — as a cold measurement, proven against both the
+    /// read-through path and the stored entry.
+    func testAStoredVerdictRoundTripsExactly() throws {
+        let photo = try writeJPEG(named: "_DSC0030.JPG")
+        let cold = try XCTUnwrap(PhotoTriage.read(url: photo))
+        let warm = try XCTUnwrap(cache.verdict(for: photo))       // measures and writes the entry
+        let cached = try XCTUnwrap(cache.storedVerdict(for: photo))
+        XCTAssertEqual(warm, cold)
+        XCTAssertEqual(cached, cold,
+                       "every reading must survive the round trip, and the re-derived concerns "
+                       + "must agree with the cold ones while the thresholds have not moved")
+    }
+
+    /// The reason the entry stores readings and not conclusions. A stored verdict whose concerns
+    /// LIE about its own readings must come back corrected: if this fails, a threshold moved in
+    /// `PhotoTriage` keeps serving flags decided under the old rules to every shoot measured
+    /// before the change.
+    func testConcernsAreReDerivedFromCurrentThresholdsOnLoad() throws {
+        let photo = try writeJPEG(named: "_DSC0031.JPG")
+        // Statistics that trip `veryDark` and a focus reading that trips `softFocus`, stored with
+        // concerns claiming nothing is wrong.
+        let statistics = ImageStatistics(
+            meanLuma: 0.05, medianLuma: 0.05, blackPoint: 0, shadowLevel: 0.01,
+            highlightLevel: 0.3, whitePoint: 0.4, highlightClip: 0, shadowClip: 0.2,
+            chromaA: 1.5, chromaB: -2.0, shadowMass: 0.7, shadowRegion: 0.9)
+        let focus = FocusMeasure.Reading(acuity: 1.5, measurable: true)
+        let lying = PhotoTriage.Verdict(
+            concerns: [],
+            focus: focus,
+            statistics: statistics,
+            signature: PhotoTriage.Signature(bits: 0x0123_4567_89AB_CDEF, contrast: 0.02))
+        cache.storeVerdict(lying, for: photo)
+
+        let loaded = try XCTUnwrap(cache.storedVerdict(for: photo))
+        XCTAssertEqual(loaded.concerns, PhotoTriage.concerns(for: statistics, focus: focus))
+        XCTAssertEqual(loaded.concerns, [.softFocus, .veryDark])
+        XCTAssertEqual(loaded.statistics, statistics)
+        XCTAssertEqual(loaded.focus, focus)
+        XCTAssertEqual(loaded.signature, lying.signature,
+                       "the 64-bit fingerprint must survive JSON exactly — one flipped bit moves "
+                       + "a frame between near-duplicate groups")
+    }
+
+    /// A version this code does not know is a miss, never a guess — the reader must refuse the
+    /// entry rather than reinterpret its fields.
+    func testABumpedVerdictVersionIsAMiss() throws {
+        let photo = try writeJPEG(named: "_DSC0032.JPG")
+        _ = try XCTUnwrap(cache.verdict(for: photo))
+        XCTAssertNotNil(cache.storedVerdict(for: photo))
+
+        // Rewrite the one JSON entry as a future version, fields otherwise intact.
+        let entries = try FileManager.default
+            .contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }
+        XCTAssertEqual(entries.count, 1)
+        let entry = try XCTUnwrap(entries.first)
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: entry)) as? [String: Any])
+        object["version"] = 999
+        try JSONSerialization.data(withJSONObject: object).write(to: entry)
+
+        XCTAssertNil(cache.storedVerdict(for: photo))
+    }
+
+    /// The two decode paths can rasterise the same photograph differently — `triage-compare`
+    /// exists to measure exactly that — so a verdict measured down one must never be served for
+    /// the other.
+    func testTheFastAndFullDecodePathsDoNotShareAVerdictEntry() throws {
+        let photo = try writeJPEG(named: "_DSC0033.JPG")
+        _ = try XCTUnwrap(cache.verdict(for: photo))              // fastRAW: true
+        XCTAssertNil(cache.storedVerdict(for: photo, fastRAW: false))
+    }
+
+    /// A re-synced or restored file must miss even when nothing visible changed: the key carries
+    /// the modification date, and this proves the verdict entry inherits that.
+    func testATouchedFileMissesItsVerdictEntry() throws {
+        let photo = try writeJPEG(named: "_DSC0034.JPG")
+        _ = try XCTUnwrap(cache.verdict(for: photo))
+        XCTAssertNotNil(cache.storedVerdict(for: photo))
+
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(90)], ofItemAtPath: photo.path)
+        XCTAssertNil(cache.storedVerdict(for: photo),
+                     "same bytes, new mtime — the entry must not survive the touch")
+    }
+
     // MARK: - Housekeeping
 
     /// A cache in `~/Library/Caches` that grows forever is bad manners, and this is the only thing
