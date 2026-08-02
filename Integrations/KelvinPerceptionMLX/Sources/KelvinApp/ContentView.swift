@@ -838,11 +838,6 @@ final class AppState: ObservableObject {
             sessionOrder.removeAll { $0 == url }
         }
 
-        // Start reading the frames nobody has opened yet. Applying a look is the moment someone
-        // commits to the shoot, and it is the last moment before export at which six seconds a
-        // frame can be spent without anybody waiting on it.
-        readShootAhead()
-
         // Says which of the three scopes actually happened, because they are three different
         // promises. "This shoot is in Vivid" over a kept-only apply is a lie the record no longer
         // tells and the status line must not either.
@@ -856,9 +851,22 @@ final class AppState: ObservableObject {
         } else {
             base = "\(n) selected frame\(s) set to \(style.label) — the rest of the shoot is unchanged"
         }
-        statusMessage = shootReadTotal > 0
-            ? base + " · reading \(shootReadTotal) of them now, so export doesn't have to"
-            : base + ". Export edited writes the files"
+        let settled = base + ". Export edited writes the files"
+        statusMessage = settled
+
+        // Start reading the frames nobody has opened yet. Applying a look is the moment someone
+        // commits to the shoot, and it is the last moment before export at which six seconds a
+        // frame can be spent without anybody waiting on it.
+        //
+        // The count arrives with the seed rather than before it: the unread filter runs off the
+        // main actor, so reading `shootReadTotal` on the next line quoted whatever the last
+        // neighborhood seed had left there — usually 0, occasionally 16 out of a 400-frame shoot.
+        // Only rewrite the line if it is still the one this apply wrote; a seed landing after the
+        // user has done something else must not talk over what that something else said.
+        readShootAhead { [weak self] unread in
+            guard let self, unread > 0, self.statusMessage == settled else { return }
+            self.statusMessage = base + " · reading \(unread) of them now, so export doesn't have to"
+        }
     }
 
     /// The frames `applyLookToShoot` will claim: the selection if there is one, otherwise the whole
@@ -892,6 +900,14 @@ final class AppState: ObservableObject {
     /// The neighborhood being computed off the main actor, so a seed for a photo the user has
     /// already left never lands.
     private var seedTask: Task<Void, Never>?
+    /// The whole-shoot sweep's own seed, held apart from the neighborhood's.
+    ///
+    /// They shared one slot, and the mode guard that was supposed to keep browsing from outranking
+    /// a sweep is blind to a sweep whose scope filter is still running. So pressing Apply and then
+    /// touching the strip — which is exactly what someone does next, since the whole point is that
+    /// the read happens while they carry on culling — cancelled the sweep outright, and nothing
+    /// ever re-seeded it. Export then paid the perception cost per frame, with someone waiting.
+    private var sweepSeedTask: Task<Void, Never>?
 
     var isReadingShoot: Bool { shootReadTotal > 0 && shootReadDone < shootReadTotal }
     /// Whether the current read is the whole-shoot sweep (Apply) rather than the browsing
@@ -910,11 +926,15 @@ final class AppState: ObservableObject {
     /// It yields to the photograph on screen. The provider is an actor with one read in flight, so a
     /// background read that queued ahead of the frame someone just clicked would make browsing feel
     /// broken — which is a worse bug than the slow export this fixes.
-    func readShootAhead() {
-        seedTask?.cancel()
+    /// - Parameter announce: called on the main actor once the sweep is actually seeded, with the
+    ///   number of frames it will read. The count cannot be read back synchronously — the scope
+    ///   filter is a `stat` and a JSON decode per frame and runs off the main actor — so the caller
+    ///   that wants to say "reading 400 of them now" has to be told, rather than ask.
+    func readShootAhead(announce: (@MainActor @Sendable (Int) -> Void)? = nil) {
+        sweepSeedTask?.cancel()
         let modelId = perceptionProvider.activeModelID
         let scope = applyScope()
-        seedTask = Task { [weak self] in
+        sweepSeedTask = Task { [weak self] in
             // The unread filter is a `stat` and a JSON decode per frame OF THE WHOLE SCOPE, at
             // the moment Apply was clicked — off the main actor, like the neighborhood seed and
             // every other per-file pass in this file. Same pattern, previously applied to one
@@ -926,6 +946,7 @@ final class AppState: ObservableObject {
             self.readQueue.seedSweep(targets)
             self.publishReadProgress()
             self.ensureReadLoop()
+            announce?(self.shootReadTotal)
         }
     }
 
@@ -1118,6 +1139,9 @@ final class AppState: ObservableObject {
 
     private func tearDownReadAhead(halting: Bool) {
         seedTask?.cancel(); seedTask = nil
+        // Both seeders, or a sweep seeded a moment before the user pressed stop would land after
+        // the teardown and start the loop again.
+        sweepSeedTask?.cancel(); sweepSeedTask = nil
         // The in-flight generation dies mid-token — the provider checks — and never saves.
         backgroundReadTask?.cancel(); backgroundReadTask = nil
         readLoopTask?.cancel(); readLoopTask = nil
@@ -2337,7 +2361,7 @@ final class AppState: ObservableObject {
     private var dismissedURLs: Set<URL> = []
     /// Full editing state per photo, so switching away and back is instant and lossless — no
     /// re-running the model. Bounded, because each entry pins decoded images.
-    private var sessions: [URL: PhotoSession] = [:]
+    var sessions: [URL: PhotoSession] = [:]
     private var sessionOrder: [URL] = []
     private static let maxSessions = 8
 
@@ -2664,11 +2688,25 @@ final class AppState: ObservableObject {
     /// on this one: keyed on `imageURL`, opening a third photo while the second was still decoding
     /// filed the FIRST photo's images, edit and sidecar under the SECOND photo's URL, and reopening
     /// that frame from the strip then showed someone else's picture.
-    private var loadedURL: URL?
+    /// Internal, not private, so the photo-switch rules below can be pinned by test.
+    var loadedURL: URL?
+
+    /// Whether the per-photo state has been torn down but `loadedURL` has not moved on yet.
+    ///
+    /// The window between `clearPerPhotoState` and the new decode landing is the one place where
+    /// `loadedURL` describes a photograph the rest of the state no longer does — deliberately, so a
+    /// failed load can be retried. Anything that FILES state away in that window would file an empty
+    /// panel under the previous photograph: overwriting its session, and, because the cleared state
+    /// reads as untouched, deleting its saved edit off disk. `dismiss` already defends against
+    /// exactly this by nil-ing `loadedURL` first; this covers every other route into the window.
+    var perPhotoStateIsCleared = false
 
     /// Capture the current photo's state before leaving it.
-    private func stashCurrentSession() {
+    func stashCurrentSession() {
         guard let url = loadedURL, let full = fullResCI, let proxy = proxyCI else { return }
+        // Nothing here belongs to `url` any more — see `perPhotoStateIsCleared`. The outgoing photo
+        // was already stashed intact on the way into the clear, so there is nothing to lose.
+        guard !perPhotoStateIsCleared else { return }
         let session = PhotoSession(
             url: url, imageId: imageId, fullResCI: full, proxyCI: proxy,
             originalPreviewImage: original.flatMap { $0.url == url ? $0.image : nil },
@@ -2698,7 +2736,7 @@ final class AppState: ObservableObject {
     /// Not the same as `closeCurrentPhoto`, which also clears the URL and returns to the empty
     /// state — a switch is arriving somewhere rather than leaving. `loadedURL` deliberately stays
     /// put until the new photo actually loads, so a failed load can still be retried.
-    private func clearPerPhotoState() {
+    func clearPerPhotoState() {
         activeRecipe = nil; preview.active = nil; original = nil; preview.lastRenderedCI = nil
         candidates = []; selectedCandidateId = nil; perception = nil
         activeCraftIssues = []; lastCraftReading = nil; exhaustedFixes = []
@@ -2714,12 +2752,20 @@ final class AppState: ObservableObject {
         // survive a cached-session hop into a different shoot, and linger invisibly on frames
         // whose checkbox is hidden. Including a location is a decision about one photograph.
         shareIncludeLocation = false
+        perPhotoStateIsCleared = true
+        // A commit coalescing from the outgoing photograph must not fire against the incoming one.
+        commitToken += 1
     }
 
     /// Put a previously-edited photo back exactly as it was.
-    private func restore(_ s: PhotoSession) {
+    func restore(_ s: PhotoSession) {
         imageURL = s.url; imageId = s.imageId
         loadedURL = s.url
+        perPhotoStateIsCleared = false
+        // Per-PHOTOGRAPH, like the reset in `clearPerPhotoState` — and this is the path that reset
+        // could not see. A cached hop never reaches `loadPhoto`, so without this a tick made for one
+        // frame was still ticked on the next one, whose checkbox may not even be on screen.
+        shareIncludeLocation = false
         fullResCI = s.fullResCI; proxyCI = s.proxyCI
         original = s.originalPreviewImage.map { TaggedPreview(url: s.url, image: $0) }
         perception = s.perception; candidates = s.candidates
@@ -2886,15 +2932,84 @@ final class AppState: ObservableObject {
             // folder A must not govern folder B — an audit found a 400-frame sweep still burning
             // GPU under another folder's cached frames, with the old folder's counts in the
             // toolbar. Same folder, nothing changes.
+            //
+            // `restore` first, so `enterShoot`'s `imageURL == url` contract holds and the strip is
+            // never re-listed for a photograph the user has already left. The read-ahead reset that
+            // used to be spelled out here now lives inside `enterShoot`'s folder-change block,
+            // together with the rest of the housekeeping it was separated from.
             let folder = url.deletingLastPathComponent()
-            if shootLookFolder != nil, shootLookFolder != folder { resetReadAhead() }
             restore(cached)
             sessionOrder.removeAll { $0 == url }; sessionOrder.append(url)
+            if shootLookFolder != folder { await enterShoot(around: url) }
             // The anchor still moved — the neighborhood re-seeds around the frame now on screen.
             seedNeighborhoodRead()
             return
         }
         await loadPhoto(from: url)
+    }
+
+    /// Arrive in the shoot a photograph belongs to: list it, sort it, and reset everything that
+    /// names one folder. Returns false if the photograph was superseded while the listing was in
+    /// flight, in which case the caller must abandon the load.
+    ///
+    /// BOTH arrival paths go through this, and that is the point. When only `loadPhoto` did it, a
+    /// cached-session hop into a different folder left the strip listing the old shoot, the shoot
+    /// look and its style belonging to the old shoot, and the selection and export label still
+    /// naming it — so Apply and Export edited operated on a folder the user had left.
+    @discardableResult
+    func enterShoot(around url: URL) async -> Bool {
+        // `includeFolderOnOpen` off means exactly this photograph and nothing else. The strip
+        // disappears (it only draws above one photo), which also takes the arrow keys, culling and
+        // Batch apply with it — that is the deal, and it is the user's to make.
+        // The listing goes off the main actor for the reason `open` documents: it is a `readdir`
+        // plus a stat per entry, and on a share that is the first place the window can freeze.
+        let siblings: [URL]
+        if includeFolderOnOpen {
+            let listed = await Task.detached(priority: .userInitiated) {
+                PhotoBrowser.siblings(of: url)
+            }.value
+            siblings = listed.filter { !dismissedURLs.contains($0) || $0 == url }
+        } else {
+            siblings = [url]
+        }
+        // The photograph may have been superseded while the listing was in flight — arrowing through
+        // a shoot faster than a share can answer is exactly when that happens. Same contract as
+        // every other `imageURL == url` guard in this file.
+        guard imageURL == url else { return false }
+        folderPhotos = PhotoOrder.sorted(siblings, by: photoSort,
+                                         reversed: photoSortReversed, captureDates: captureIndex.dates)
+        // THE REST OF THE FOLDER IS NOT READ UNTIL YOU ASK TO SEE IT.
+        //
+        // Reported as "it automatically opens every single photo in the folder", and that was
+        // fair. Listing the directory is one cheap readdir, but everything after it was per-file
+        // and ran unconditionally: an EXIF header read for every sibling, a sidecar existence
+        // check for every sibling, a flag lookup for every sibling. Open one frame in a
+        // 437-photo shoot and that is some thirteen hundred file operations nobody asked for,
+        // for a strip that is folded shut.
+        //
+        // So the enrichment waits for the strip. Folded, opening a photo touches that photo.
+        // Unfolded — which is what opening a FOLDER means — it runs immediately, because then
+        // the shoot is the thing you asked for.
+        loadFolderDetailIfVisible(for: url.deletingLastPathComponent(), photos: siblings)
+        // The shoot's look, before the candidates are built — `buildCandidates` needs it to know
+        // which style to open this frame in. One small JSON read, and only when the folder changes.
+        let folder = url.deletingLastPathComponent()
+        // Leaving the shoot ends the read-ahead with it: those seconds belong to the folder someone
+        // is working on, not to one they have walked away from. Reset rather than halt — the new
+        // folder is allowed to read its own neighborhood.
+        if shootLookFolder != folder {
+            selectedPhotos = []; selectionAnchor = nil
+            resetReadAhead()
+            // The export label names ONE shoot. Carrying "Lake Como" into the next folder is how a
+            // Reykjavik wedding gets delivered labelled Lake Como — a mistake nobody would catch
+            // until a client did.
+            exportLabel = ""
+            // Same shape of mistake, worse payload: an "Include location" ticked for one shoot
+            // must not still be ticked when a different shoot gets texted to someone else.
+            shareIncludeLocation = false
+        }
+        loadShootLook(for: folder)
+        return true
     }
 
     /// What one `stat` off the main actor found at a path, so `open` can decide what to do without
@@ -3050,57 +3165,7 @@ final class AppState: ObservableObject {
         // Stashed first, so nothing is lost — this only clears what has just been saved.
         if loadedURL != url { clearPerPhotoState() }
         imageURL = url
-        // `includeFolderOnOpen` off means exactly this photograph and nothing else. The strip
-        // disappears (it only draws above one photo), which also takes the arrow keys, culling and
-        // Batch apply with it — that is the deal, and it is the user's to make.
-        // The listing goes off the main actor for the reason `open` documents: it is a `readdir`
-        // plus a stat per entry, and on a share that is the first place the window can freeze.
-        let siblings: [URL]
-        if includeFolderOnOpen {
-            let listed = await Task.detached(priority: .userInitiated) {
-                PhotoBrowser.siblings(of: url)
-            }.value
-            siblings = listed.filter { !dismissedURLs.contains($0) || $0 == url }
-        } else {
-            siblings = [url]
-        }
-        // The photograph may have been superseded while the listing was in flight — arrowing through
-        // a shoot faster than a share can answer is exactly when that happens. Same contract as
-        // every other `imageURL == url` guard in this function.
-        guard imageURL == url else { return }
-        folderPhotos = PhotoOrder.sorted(siblings, by: photoSort,
-                                         reversed: photoSortReversed, captureDates: captureIndex.dates)
-        // THE REST OF THE FOLDER IS NOT READ UNTIL YOU ASK TO SEE IT.
-        //
-        // Reported as "it automatically opens every single photo in the folder", and that was
-        // fair. Listing the directory is one cheap readdir, but everything after it was per-file
-        // and ran unconditionally: an EXIF header read for every sibling, a sidecar existence
-        // check for every sibling, a flag lookup for every sibling. Open one frame in a
-        // 437-photo shoot and that is some thirteen hundred file operations nobody asked for,
-        // for a strip that is folded shut.
-        //
-        // So the enrichment waits for the strip. Folded, opening a photo touches that photo.
-        // Unfolded — which is what opening a FOLDER means — it runs immediately, because then
-        // the shoot is the thing you asked for.
-        loadFolderDetailIfVisible(for: url.deletingLastPathComponent(), photos: siblings)
-        // The shoot's look, before the candidates are built — `buildCandidates` needs it to know
-        // which style to open this frame in. One small JSON read, and only when the folder changes.
-        let folder = url.deletingLastPathComponent()
-        // Leaving the shoot ends the read-ahead with it: those seconds belong to the folder someone
-        // is working on, not to one they have walked away from. Reset rather than halt — the new
-        // folder is allowed to read its own neighborhood.
-        if shootLookFolder != folder {
-            selectedPhotos = []; selectionAnchor = nil
-            resetReadAhead()
-            // The export label names ONE shoot. Carrying "Lake Como" into the next folder is how a
-            // Reykjavik wedding gets delivered labelled Lake Como — a mistake nobody would catch
-            // until a client did.
-            exportLabel = ""
-            // Same shape of mistake, worse payload: an "Include location" ticked for one shoot
-            // must not still be ticked when a different shoot gets texted to someone else.
-            shareIncludeLocation = false
-        }
-        loadShootLook(for: folder)
+        guard await enterShoot(around: url) else { return }
         // An EXIF header read, off the main actor and through the cache. It is one file open, which
         // is nothing locally and a round trip on a share — and it sat on the main thread in front of
         // the decode, so the window could not even paint the new filename until it came back.
@@ -3195,6 +3260,7 @@ final class AppState: ObservableObject {
                 self.imageId = id
             }
             self.loadedURL = url
+            self.perPhotoStateIsCleared = false
             // The untouched original, for the before/after compare.
             self.original = decoded.originalPreview.map { TaggedPreview(url: url, image: $0) }
             let perceptionProxy = decoded.perceptionProxy
@@ -3947,8 +4013,14 @@ final class AppState: ObservableObject {
     private func scheduleCommit() {
         commitToken += 1
         let t = commitToken
+        // WHOSE edit this is, decided now rather than in 0.45 s. Keyed on `imageURL`, a commit
+        // scheduled for one photograph and landing after a switch wrote that photograph's numbers
+        // under the next one's name — or, if the state had been cleared in between, read as
+        // untouched and deleted the next one's saved edit. `loadedURL` is the ownership boundary
+        // (see its doc); it moves only when a decode lands or a cached session is restored.
+        let owner = loadedURL
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
-            guard let self, self.commitToken == t else { return }
+            guard let self, self.commitToken == t, self.loadedURL == owner else { return }
             if let prev = self.committed, prev != self.snapshot() {
                 self.undoStack.append(prev)
                 if self.undoStack.count > 60 { self.undoStack.removeFirst() }
@@ -3958,7 +4030,7 @@ final class AppState: ObservableObject {
             self.refreshUndoState()
             // Keep the filmstrip's "edited" dot honest as you work, not just on switch, and put
             // the edit on disk so quitting the app doesn't throw the work away.
-            if let url = self.imageURL {
+            if let url = owner {
                 if self.isTouched { self.editedURLs.insert(url) } else { self.editedURLs.remove(url) }
                 self.persistEdit(for: url)
             }
@@ -5417,10 +5489,20 @@ final class AppState: ObservableObject {
             // are answerable only with the rest of the pool in hand. Rendering the requested style
             // alone and checking its score would agree with the canvas most of the time, which is
             // the worst kind of nearly-right.
+            // ONE face detection for the whole set, on the UNGRADED proxy — byte for byte the
+            // canvas's sequence (see `buildCandidates`). `score(rendered:)` detects inside each
+            // candidate's own render instead, so a look dark enough to lose the face Vision found
+            // on the plain proxy scored its skin against a different face set than its rivals did:
+            // the two curators could then resolve different recipes for the same photograph, which
+            // is the canvas showing one picture and the export writing another. It also ran Vision
+            // once per candidate — 626 ms apiece on a three-face proxy — to answer the same question.
+            let faces = FaceSkin.detect(in: work.proxy)
             var scored: [CandidateCurator.Scored] = []
             for recipe in recipes {
                 let rendered = Renderer.render(work.proxy, with: recipe, maskBitmaps: m.bitmaps)
-                guard let score = AestheticEvaluator.score(rendered: rendered) else { continue }
+                guard let renderedStats = try? ImageStatistics.compute(rendered) else { continue }
+                let score = AestheticEvaluator.score(stats: renderedStats,
+                                                     face: FaceSkin.meter(in: rendered, faces: faces))
                 scored.append(.init(recipe: recipe, score: score))
             }
             let resolution = CandidateCurator.resolve(from: scored, requested: style.id, count: 4)
@@ -5530,7 +5612,9 @@ final class AppState: ObservableObject {
         g.dehaze = Self.clampStep(g.dehaze + (t["dehaze"] ?? 0), 0...100, 1)
         g.fusion = Self.clampStep(g.fusion + (t["fusion"] ?? 0), 0...100, 1)
         g.tint = Self.clampStep(g.tint + (t["tint"] ?? 0), -100...100, 1)
-        if let dt = t["temperatureK"] { g.temperatureK = (g.temperatureK ?? 5500) + dt }
+        // As-shot is 6500 — the renderer's no-op — not 5500. Against 5500 a tweak of +200 K landed
+        // 800 K warmer than the frame it was measured on.
+        if let dt = t["temperatureK"] { g.temperatureK = (g.temperatureK ?? 6500) + dt }
     }
 
     /// The ids of the auto-masks on the current candidate (e.g. "subject", "sky"), for the UI.
@@ -5551,9 +5635,16 @@ final class AppState: ObservableObject {
     var subjectIsPerson: Bool { subjectOrigin == .person }
     var hasSky: Bool { proxyMaskBitmaps["sky"] != nil }
 
-    /// A binding for the white-balance slider (absolute Kelvin; nil → as-shot shown as 5500).
+    /// A binding for the white-balance slider (absolute Kelvin; nil → as-shot, which is 6500).
+    ///
+    /// 6500 and not 5500, because 6500 is what the renderer's no-op is and lower Kelvin renders
+    /// WARMER: reporting as-shot as 5500 drew the thumb 1000 K to the warm side of the picture
+    /// actually on screen, showed the control as modified when nothing had been applied, and made
+    /// the smallest possible drag jump the photograph a thousand Kelvin. The same sentinel had
+    /// already been found and fixed once in the engine (see `RecipeEngine`'s note); this was the
+    /// copy in the slider.
     var temperatureBinding: Binding<Double> {
-        Binding(get: { self.edit.temperatureK ?? 5500 },
+        Binding(get: { self.edit.temperatureK ?? 6500 },
                 set: { self.edit.temperatureK = $0; self.updateActiveRecipe() })
     }
 
@@ -7699,7 +7790,11 @@ struct ContentView: View {
 
     private func openExportPanel() {
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.jpeg, .png]
+        // The format the popup is currently set to, not a fixed pair. Hard-coded to [.jpeg, .png],
+        // the panel renamed a HEIC or 16-bit TIFF export to `.jpeg` on the way out while
+        // `ImageWriter` went on encoding the chosen format into it. Kept in step from
+        // `ExportTarget.refresh` for every later change to the popup.
+        panel.allowedContentTypes = [appState.exportFormat.contentType]
         // Suggest a name that says what the photo IS — still fully editable in the panel.
         panel.nameFieldStringValue = appState.suggestedExportName(ext: appState.exportFormat.fileExtension)
         // The one thing about an export that is not visible in the file you get back.

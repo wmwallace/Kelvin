@@ -413,6 +413,18 @@ enum PanelAccessories {
             namingExample?.stringValue = real ?? state.exportNaming.example
         }
 
+        /// Tell the panel which type is actually being written.
+        ///
+        /// AppKit rewrites the extension of the URL it returns to match `allowedContentTypes`, and
+        /// the encoder is driven by the Format popup, not by the URL — so a panel left saying
+        /// "JPEG or PNG" while the popup said HEIC handed back `photo.jpeg` and `ImageWriter` wrote
+        /// HEIC bytes into it. Every viewer that trusts the extension then fails to open a file the
+        /// user believes is a JPEG. Must be applied on every format change, not only at creation.
+        func syncSavePanelType() {
+            guard let state, let panel = savePanel else { return }
+            panel.allowedContentTypes = [state.exportFormat.contentType]
+        }
+
         func syncSavePanelName() {
             guard let state, let panel = savePanel, state.imageURL != nil else { return }
             let next = state.suggestedExportName(ext: state.exportFormat.fileExtension)
@@ -430,7 +442,9 @@ enum PanelAccessories {
             quality?.isEnabled = lossy
             qualityLabel?.stringValue = lossy ? "\(Int(state.exportQuality * 100))" : "—"
             qualityLabel?.textColor = lossy ? .labelColor : .tertiaryLabelColor
-            // The format decides the extension, so the suggested name moves with it.
+            // The format decides the extension, so the panel's type and the suggested name move
+            // with it — the type first, since AppKit renames the field when it changes.
+            syncSavePanelType()
             refreshNamingExample()
             syncSavePanelName()
         }

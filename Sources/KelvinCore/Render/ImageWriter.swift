@@ -2,6 +2,7 @@ import Foundation
 import CoreImage
 import ImageIO
 import Metal
+import UniformTypeIdentifiers
 
 /// Encoding a rendered `CIImage` to a file, plus a deterministic raster helper used by
 /// tests to compare pixels. Output is written in sRGB.
@@ -37,6 +38,19 @@ public enum ImageWriter {
             case .jpeg:   return "jpg"
             case .tiff16: return "tif"
             case .heic:   return "heic"
+            }
+        }
+
+        /// The type a save panel should be told to expect. Same reason `fileExtension` lives here:
+        /// AppKit rewrites the extension of whatever URL it hands back to match the panel's allowed
+        /// types, so a panel that is not told the chosen format renames the file out from under the
+        /// encoder — and the user gets HEIC bytes in something called `.jpeg`.
+        public var contentType: UTType {
+            switch self {
+            case .png:    return .png
+            case .jpeg:   return .jpeg
+            case .tiff16: return .tiff
+            case .heic:   return .heic
             }
         }
 
