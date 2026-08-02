@@ -15,6 +15,207 @@
     <link>https://usekelvin.app</link>
     <description>Updates for Kelvin, the local-AI photo editor for macOS.</description>
     <item>
+      <title>Kelvin 0.7.0 &#8212; hold the answers against each other</title>
+      <pubDate>Sun, 02 Aug 2026 12:45:00 -0700</pubDate>
+      <sparkle:version>308</sparkle:version>
+      <sparkle:shortVersionString>0.7.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <link>https://github.com/wmwallace/Kelvin/releases/tag/v0.7.0</link>
+      <description><![CDATA[
+        <style>
+          /* Kelvin update notes. Self-contained: no external fonts, images or scripts — Sparkle
+             renders this offline, mid-install, in a narrow pane. */
+          :root {
+            color-scheme: light dark;
+            --ink: #1c1a17;
+            --dim: #6b6660;
+            --faint: #928c84;
+            --bg: #faf8f5;
+            --rule: rgba(0,0,0,0.10);
+            --glow: #b4661a;
+          }
+          @media (prefers-color-scheme: dark) {
+            :root {
+              --ink: #e8e3dc;
+              --dim: #9a938a;
+              --faint: #6f6862;
+              --bg: #131211;
+              --rule: rgba(255,255,255,0.11);
+              --glow: #e9a44c;
+            }
+          }
+          body {
+            margin: 0;
+            padding: 18px 20px 26px;
+            background: var(--bg);
+            color: var(--ink);
+            font: 13px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+            -webkit-font-smoothing: antialiased;
+          }
+          /* The blackbody rail: amber through daylight to blue, which is what the app is named after
+             and the one piece of decoration here that means something. It separates sections the way
+             the temperature rail runs under the canvas in the app itself. */
+          .rail {
+            height: 2px;
+            border: 0;
+            margin: 20px 0 16px;
+            background: linear-gradient(90deg, #e9a44c 0%, #f2ead9 42%, #cfd8e6 68%, #7fa2cc 100%);
+            opacity: 0.85;
+          }
+          .lede {
+            margin: 0;
+            font-size: 15px;
+            line-height: 1.45;
+            letter-spacing: -0.005em;
+          }
+          .version {
+            font: 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--faint);
+            margin: 0 0 9px;
+          }
+          /* Mono, tracked, uppercase — the same label treatment the app uses over its own panel
+             sections, so the notes read in the app's voice rather than a changelog's. */
+          h2 {
+            font: 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+            color: var(--glow);
+            margin: 22px 0 7px;
+          }
+          h2:first-of-type { margin-top: 0; }
+          p { margin: 0 0 9px; }
+          p.note { color: var(--dim); }
+          ul { margin: 0 0 9px; padding-left: 17px; }
+          li { margin-bottom: 4px; }
+          strong { font-weight: 600; }
+          .limit {
+            border-left: 2px solid var(--rule);
+            padding-left: 11px;
+            margin: 12px 0 0;
+            color: var(--dim);
+          }
+          .closing {
+            margin-top: 22px;
+            padding-top: 14px;
+            border-top: 1px solid var(--rule);
+            color: var(--faint);
+            font-size: 12px;
+          }
+        </style>
+
+        <p class="version">Kelvin 0.7.0</p>
+        <p class="lede">You can hold Kelvin&rsquo;s answers against each other now &mdash; and three
+        things that were wrong in 0.6.0 are named below rather than buried.</p>
+
+        <hr class="rail">
+
+        <h2>See the choice you are being asked to make</h2>
+        <p>Kelvin offers you several finished interpretations of a photograph and asks you to pick
+        one. Until now it asked you to make that choice from four thumbnails the size of a postage
+        stamp and a line of numbers like &ldquo;+18 contrast&rdquo;. That is a fair question to put
+        to somebody who can read those numbers and picture the result. It is not a fair question to
+        put to anybody else.</p>
+        <p>Press <strong>C</strong>, or the new Compare button, and the candidates take over the
+        canvas at full size. Two at a time by default, or all four when you want the survey. Click
+        the photograph you prefer and that is your pick; 1&ndash;4 choose, C or Esc closes.</p>
+        <p class="note">Zoom and pan apply to every tile at once &mdash; two crops of different parts
+        of the frame are not a comparison of two edits. And the tiles are re-rendered at canvas
+        resolution rather than scaled up from the thumbnails, because a comparison of anything other
+        than what you would actually get is worse than no comparison.</p>
+
+        <h2>The colour grade was wrong, and is now right</h2>
+        <p>Every look that grades colour &mdash; Vivid, Dramatic, Warm, Rich, Teal &amp; orange
+        &mdash; applied its grade through the wrong gamma. It came out weak in the highlights and
+        <strong>pointed the wrong way in the shadows</strong>: a look asking for cool shadows
+        produced a warm cast instead.</p>
+        <p>Measured against 77 photographs with the photographer&rsquo;s own finished edit as the
+        reference, every graded look moved closer to what the photographer actually did &mdash; Soft
+        7.77&nbsp;&rarr;&nbsp;7.72, Rich 9.63&nbsp;&rarr;&nbsp;9.48, Vivid
+        10.29&nbsp;&rarr;&nbsp;10.08, Dramatic 10.76&nbsp;&rarr;&nbsp;10.52, Warm
+        10.05&nbsp;&rarr;&nbsp;9.79.</p>
+        <p class="note">The look a photograph opens in is unchanged &mdash; Natural measures
+        identically before and after. This moves the looks you reach for when Natural is not what
+        you wanted.</p>
+
+        <h2>An edit could be deleted, and no longer can</h2>
+        <p>This is the one worth reading. If you clicked a third thumbnail while the second
+        photograph was still decoding, Kelvin could file an <em>empty</em> editing panel under the
+        photograph you had just left &mdash; and because an empty panel looks like an unedited one,
+        it then removed that photograph&rsquo;s saved edit from disk. A brush mask, a look, a set of
+        retouched spots: gone.</p>
+        <p class="limit">It is fixed and pinned by tests. If you have lost work this way, this
+        release cannot bring it back; nothing wrote it anywhere else.</p>
+
+        <h2>&ldquo;Include location&rdquo; off now really means off</h2>
+        <p>0.6.0 said that turning location off stripped everything identifying from a shared
+        photograph. That was not completely true. Cameras that write the extended Exif block &mdash;
+        many Sony, Canon and Nikon bodies &mdash; still carried the <strong>camera body&rsquo;s
+        serial number</strong> and the <strong>owner name</strong> recorded in the camera, and place
+        names written by other software survived as well. A serial number is a tracking key: the
+        same body in two shared photographs links them to one person.</p>
+        <p class="limit">All of it is removed now. If you shared photographs from 0.6.0 with location
+        turned off, those files still contain those fields.</p>
+
+        <h2>Also fixed</h2>
+        <ul>
+          <li>A colour-based mask (Skin, or a colour range) silently stopped working the moment a
+          black-and-white look was applied &mdash; it selected nothing at all, with no error.</li>
+          <li>Contrast through a Background mask pivoted on the brightness of the <em>subject</em>
+          instead of the background it was adjusting.</li>
+          <li>Exposure fusion and the clarity controls faded out in a band around the edge of the
+          frame, more so at export size than in the preview.</li>
+          <li>Exporting as HEIC or 16-bit TIFF wrote those bytes into a file the save panel had
+          renamed <code>.jpeg</code>.</li>
+          <li>The Temp slider showed &ldquo;as shot&rdquo; as 5500&nbsp;K when the neutral is
+          6500&nbsp;K, so the first small drag jumped the photograph about 1000&nbsp;K warmer.</li>
+          <li>Pressing Apply and then touching the filmstrip cancelled the whole-shoot scene read
+          outright, and nothing restarted it.</li>
+          <li>Reopening a photograph from another folder left the filmstrip listing the folder you
+          had left, with that folder&rsquo;s look and export label still attached.</li>
+        </ul>
+
+        <h2>What still does not work</h2>
+        <p class="limit"><strong>Kelvin does not learn from which candidate you pick.</strong> The
+        pick is recorded; nothing reads it. <strong>A toned black-and-white look</strong> (Selenium)
+        renders silvery rather than toned, and several looks declare a warmth shift that has no
+        effect on most photographs. <strong>A batch export cannot be cancelled</strong> once it is
+        running. <strong>The canvas is softer than the exported file</strong> &mdash; export and open
+        at 100% to judge sharpness.</p>
+
+        <p class="closing">Everything runs on your Mac. No account, no upload, and nothing leaves the
+        machine except this update check &mdash; which you can switch off in Settings. Sharing a
+        photo sends it where you send it, with location stripped unless you tick the box.</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/wmwallace/Kelvin/releases/download/v0.7.0/Kelvin-0.7.0.dmg"
+        sparkle:edSignature="PJx6TThv3Jgp+OmUqeT0yU2XQI2WvxHpGwV0/BmveVNBBWHh6EO2RuH8PQmfKMuQ2cxj0Jrm2LOO1i9KSr3zCA=="
+        length="1516178822"
+        type="application/octet-stream"/>
+      <!-- One delta per shipped predecessor, keyed on CFBundleVersion. -->
+      <sparkle:deltas>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.7.0/Kelvin-0.7.0-from-297.delta"
+          sparkle:deltaFrom="297"
+          sparkle:edSignature="Fv+jrujME5VPlegSROXdDfbf0J0PIMOyHbxwhRo7LiHOFoZIgm7BhOi0PMcuP/pVC7Wkm4UxnaFarmSGGCJoAA=="
+          length="2064990"
+          type="application/octet-stream"/>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.7.0/Kelvin-0.7.0-from-276.delta"
+          sparkle:deltaFrom="276"
+          sparkle:edSignature="211VBbUhdeOarDUTwR0kv/sQ9ctKMK1Ewprc/B0ozbveECHcJAUK7MKiYbIvJwSTn+Mkjm9PY6ALfzbPtpD9Ag=="
+          length="2201598"
+          type="application/octet-stream"/>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.7.0/Kelvin-0.7.0-from-258.delta"
+          sparkle:deltaFrom="258"
+          sparkle:edSignature="kH0RRIqNVl8h2HMff8qtd6q03VKB0idSuLKpQIQjTWJCK3rmu5DEh1Ug+NDYVRBivUpwGWuxqZB+fnzo5TuDDg=="
+          length="2325150"
+          type="application/octet-stream"/>
+      </sparkle:deltas>
+    </item>
+    <item>
       <title>Kelvin 0.6.0 — it reads ahead of you, and it learned to share</title>
       <pubDate>Fri, 01 Aug 2026 16:30:00 -0700</pubDate>
       <sparkle:version>297</sparkle:version>
