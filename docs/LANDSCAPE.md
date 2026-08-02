@@ -91,10 +91,16 @@ point.
 Nothing shipping, open or closed, does all three of:
 
 1. Semantic understanding of the individual photograph
-2. Several genuinely different candidate interpretations offered as a choice
-3. Preference learning from that choice, with a low-teens cold start
+2. Several genuinely different candidate interpretations, offered as a choice and shown
+   large enough to actually make it
+3. That choice carried across the shoot, each frame re-measured rather than copied
 
 Existing tools do deterministic auto-adjust (one answer, no reasoning), or style-cloning
 that needs thousands of prior edits, or generative pixel editing.
+
+Point 3 used to read "preference learning from that choice, with a low-teens cold start".
+That claim is withdrawn — D18 dropped preference learning, and the cold-start number was
+never tested. Nothing else in the list moved, and points 1 and 2 are still unmatched: they
+are the differentiator, and the learning was only ever one candidate mechanism on top.
 
 That is the whole product. Protect it.

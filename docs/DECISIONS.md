@@ -917,3 +917,66 @@ not by the OS.
 App Store distribution (which requires the sandbox outright), or any feature that starts executing
 material it downloads. Neither is planned. If it reopens, the bundle identifier this project froze
 in D11 is the name the container will be keyed under — which is why the comments above stay.
+
+## D18 — Preference learning is dropped, and the dead learner with it · **Decided 2 August 2026**
+
+**Status:** decided by the owner. `CLAUDE.md`'s build order lists preference learning as step 9,
+the last unbuilt step, and calls the preference loop half of the one-sentence differentiator.
+`HANDOFF.local.md` says cross-image learning was removed for corrupting results and is not wanted.
+Both could not be true. They are now resolved the second way: **Kelvin does not learn from your
+picks, and for the foreseeable future it will not.**
+
+### What is deleted
+
+`Sources/KelvinCore/Engine/PreferenceLearning.swift` in full — `PreferenceProfile`,
+`PreferenceLearner.learn`, `RecipeEngine.candidates(…, profile:)` and `applyFieldBias` — with its
+two test files. Nothing in the app or the CLI ever called any of it; the only callers were tests,
+so this removes a documented public API that had never once run in front of a user.
+
+Leaving it in place was the worse option, and not by a small margin. Its doc comment claimed to
+close "the loop that is the whole product", which is exactly the kind of sentence a future reader
+trusts. And it carried a latent defect that proves the point: the `profile:` overload called the
+base generator without `subjectLuma`, `skyLuma`, `subjectOrigin` or `iso`, so anything built
+through it would have been mask-blind and ISO-blind — the same class of error as the eval harness
+measuring a path the app does not ship, which once hid months of drift.
+
+### Why, on the numbers
+
+`applyFieldBias` added a damped learned offset to thirteen global fields. That is the model
+emitting numbers with extra steps: an unverifiable parameter arriving from the user instead of from
+the VLM, which non-negotiable #1 exists to prevent. D13 had already deleted the one other mechanism
+that carried a reference frame's slider values around.
+
+And the style half was measured and found worthless. Fed the real pick log (12 picks, soft 7 /
+natural 5) the learner yields a soft weight of 0.583 and reorders soft first; on the 77 real pairs,
+always-soft against always-natural is 7.5650 / 7.5948 — a global style prior is worth nothing or a
+small loss. The log itself could not have trained anything better: `perception_hash` is null on 12
+of 12 rows, `subsequent_manual_edits` — which `docs/RECIPE-SCHEMA.md` calls the most valuable field
+in the system — is present on 1 of 12, and the normal workflow of applying a look to a shoot and
+exporting records **no rows at all**.
+
+### What is kept, and why
+
+`PreferenceStore` and `PreferencePick` stay. Recording which candidate was exported costs nothing,
+the store's history-truncating bug was just fixed, and the record is honest. But it is now
+explicitly a **log with no reader**, and the release notes say so. If a reader is ever built, the
+Settings pane disclosing the log is a prerequisite of that work and not of this decision.
+
+### What replaces it
+
+The thing the loop was for — a photograph opening in the look that suits it — turns out not to need
+learning at all. `pick-probe` (`docs/EVALUATION.md`) measured that **shadow structure predicts which
+look wins**: frames with more, deeper shadow are the ones where the photographer pulled contrast
+down, replicated across both corpora. That is a property of the frame, not of the user, so it
+belongs in the engine where every parameter is computed from measurements — which is where this
+project already keeps its decisions.
+
+The owner's accompanying call: a photograph **may** open in something other than Natural, but only
+above a margin calibrated on the harness, and only if the app says on screen that it chose. Below
+that margin the ordering of the other candidates may change and the opening frame may not.
+
+### What would reopen it
+
+Evidence that a per-user signal beats the measured per-frame rule — which is a comparison that can
+now actually be run, because `engine-ranked` and the shadow rule give it something to be compared
+against. Not before.

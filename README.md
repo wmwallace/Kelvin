@@ -61,11 +61,12 @@ it will invent one, confidently, and you will never know which answers were gues
 
 **Not yet**
 
-- Preference learning exists in the engine but isn't wired into a loop
+- Kelvin does not learn from which candidate you pick. The pick is recorded; nothing reads
+  it (see `docs/DECISIONS.md` D18 for why the learner was dropped rather than finished)
 - Auto-masks can be refined and inverted, but not brushed by hand
 - Nothing generative, on purpose
 
-785 tests — 564 over the core, 221 over the app. CI runs on every pull request.
+870 tests — 587 over the core, 283 over the app. CI runs on every pull request.
 
 <p align="center">
 <img src="docs/images/01-hero.webp" width="900" alt="The Kelvin window: the photograph, what the model made of the scene, the candidate list, the adjustment panel and the filmstrip">

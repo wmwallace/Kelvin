@@ -18,10 +18,24 @@ Everything runs on-device. No cloud, no account, no upload.
 ## The one-sentence differentiator
 
 **Semantic understanding of a single photo produces several candidate parametric
-recipes; the user's pick becomes training signal.**
+recipes, shown large enough to choose between, and the chosen one carries across the
+shoot.**
 
 Everything else in this app is table stakes that other tools already do better. If a
 proposed feature does not serve that sentence, it is out of scope for v1.
+
+The sentence used to end "the user's pick becomes training signal". It no longer does:
+**D18 dropped preference learning**, on the owner's decision and on measurements showing
+that a learned global style prior is worth nothing and that the pick log could not have
+trained anything better. What the loop was *for* — a photograph opening in the look that
+suits it — turned out not to need learning, because shadow structure predicts it from the
+frame itself (`docs/EVALUATION.md`, "What predicts which look wins"). That belongs in the
+engine, where every number is computed from a measurement.
+
+The audience is the other half of the sentence's job. The owner's words, 2 August 2026:
+**people should get pro edits without being pros.** Work that makes the choice easier or
+better-informed serves that; another slider does not, and a number a photographer has to
+read and picture is the professional's affordance rather than this app's.
 
 ---
 
@@ -79,9 +93,9 @@ bottleneck into a rounding error.
 
 ### 5. Boring infrastructure, novel product
 
-The novelty budget is fully spent on the recipe IR and the preference loop. Everything
-else — rendering, file handling, UI — should be the most proven, least clever approach
-available.
+The novelty budget is fully spent on the recipe IR and on the candidate-and-choice loop.
+Everything else — rendering, file handling, UI — should be the most proven, least clever
+approach available.
 
 Rationale: novel architecture plus novel product means two unsolved problems at once,
 and when an edit comes out ugly you cannot tell which one failed.
@@ -127,7 +141,10 @@ Do not skip ahead. The UI is the last thing, not the first.
 6. **Preference store** — record which candidate was picked. Just logging at first.
 7. **UI** — only now.
 8. **Batch apply** — recipe propagation across a folder.
-9. **Preference learning** — use the logged pairs to reweight candidate generation.
+9. ~~**Preference learning** — use the logged pairs to reweight candidate generation.~~
+   **Dropped, D18.** The learner is deleted; the pick store stays, as a log with no
+   reader. What replaces it is a measured per-frame rule, not a learned one — see
+   `docs/EVALUATION.md`, "What predicts which look wins".
 
 The reason for this order: if the recipes are bad, the most beautiful app in the world
 is worthless. Find that out in week three, not month nine.
