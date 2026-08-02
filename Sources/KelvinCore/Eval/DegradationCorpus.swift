@@ -41,9 +41,15 @@ public enum DegradationCorpus {
 
     public enum Error: Swift.Error, CustomStringConvertible {
         case noPhotos(URL)
+        case collidingNames(stem: String, files: [URL])
         public var description: String {
             switch self {
             case .noPhotos(let url): return "No decodable photos in \(url.path)"
+            case .collidingNames(let stem, let files):
+                let names = files.map { $0.lastPathComponent }.joined(separator: " and ")
+                return "Two photographs share the name \"\(stem)\" (\(names)). Every reference, "
+                    + "source and entry id is keyed on that name, so one would overwrite the other "
+                    + "while the manifest counted both. Build from one format, or rename."
             }
         }
     }
@@ -69,6 +75,24 @@ public enum DegradationCorpus {
         outputDir: URL,
         longEdge: Int? = nil
     ) throws -> CorpusManifest {
+        let photos = goodPhotos.sorted(by: { $0.path < $1.path })
+
+        // A folder straight off a camera holds `_DSC0100.ARW` beside `_DSC0100.JPG`, and both
+        // would key the same `reference/_DSC0100.png` and the same entry id: the second write wins
+        // while the manifest emits a full set of entries for each, so the corpus claims twice the
+        // frames it holds and every number computed on it is quietly wrong. Refuse before writing
+        // anything rather than disambiguate, because the stem is also how a corpus finds its
+        // perception labels (`perception/<id>.json`) — renaming entries would silently unmatch the
+        // labels of every corpus already built. Compared case-insensitively: it is the written path
+        // that collides, and macOS volumes are case-insensitive by default.
+        var seenStems: [String: URL] = [:]
+        for photo in photos {
+            let stem = photo.deletingPathExtension().lastPathComponent
+            if let first = seenStems.updateValue(photo, forKey: stem.lowercased()) {
+                throw Error.collidingNames(stem: stem, files: [first, photo])
+            }
+        }
+
         let fm = FileManager.default
         let refDir = outputDir.appendingPathComponent("reference")
         let srcDir = outputDir.appendingPathComponent("source")
@@ -76,7 +100,7 @@ public enum DegradationCorpus {
         try fm.createDirectory(at: srcDir, withIntermediateDirectories: true)
 
         var entries: [CorpusManifest.Entry] = []
-        for photo in goodPhotos.sorted(by: { $0.path < $1.path }) {
+        for photo in photos {
             let stem = photo.deletingPathExtension().lastPathComponent
             // Resized BEFORE degrading, not after: a degradation is a recipe, and applying it to
             // the frame the corpus will actually be scored on keeps the source an exact render of

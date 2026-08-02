@@ -70,14 +70,23 @@ public actor PreferenceStore {
             try fm.createDirectory(at: folder, withIntermediateDirectories: true)
         }
 
-        if let handle = try? FileHandle(forWritingTo: logFileURL) {
+        // Whether to create or to append is decided by whether the file exists, never by
+        // whether the handle opened. `try?` on the open would erase the difference between
+        // "no log yet" and "the log is there but unwritable" — a read-only mode left behind
+        // by a restore, or descriptor exhaustion — and the create path *replaces* the file.
+        // This log is append-forever training signal that cannot be recomputed from the
+        // originals, so a failed open must cost one pick and throw, not the whole history.
+        // The gap between the existence check and the open is harmless: `record` is actor
+        // isolated and is the only writer.
+        if !fm.fileExists(atPath: logFileURL.path) {
+            try line.write(to: logFileURL, atomically: true, encoding: .utf8)
+        } else {
+            let handle = try FileHandle(forWritingTo: logFileURL)
             defer { try? handle.close() }
             try handle.seekToEnd()
             if let lineData = line.data(using: .utf8) {
                 try handle.write(contentsOf: lineData)
             }
-        } else {
-            try line.write(to: logFileURL, atomically: true, encoding: .utf8)
         }
     }
 

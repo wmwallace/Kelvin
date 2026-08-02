@@ -151,7 +151,15 @@ if first == "bench-export" {
                 recipe = cachedRecipe
                 recipeHits += 1
             } else {
-                let proxy = clock(&t.proxy) { Bench.materialise(PerceptionProxy.downsample(full)) }
+                // Built the way `AppState.adaptedRecipe` builds it, not merely to the same size:
+                // `fromFile` decodes straight from the file and `downsample` scales the decoded
+                // frame, and for anything that is not RAW those are different pixels at identical
+                // dimensions. A benchmark measuring the second set would report statistics the app
+                // never sees, which is the whole failure mode this command exists to avoid.
+                let proxy = clock(&t.proxy) {
+                    PerceptionProxy.fromFile(url, matching: full.extent)
+                        ?? Bench.materialise(PerceptionProxy.downsample(full))
+                }
 
                 // The same cache the app uses, hit in the same order — so this measures shipped
                 // behaviour rather than a benchmark's idea of it. Run twice on one shoot to see the
@@ -176,11 +184,17 @@ if first == "bench-export" {
                 // wrong for a frame, and a benchmark that skips the curator measures a path nobody
                 // ships. `curate` is timed separately so the cost of getting it right is visible rather
                 // than buried in `engine`.
+                //
+                // `subjectOrigin` travels with the lumas, and it is not optional detail: the engine
+                // declines the person-specific local moves when the model called the subject a
+                // person and Vision's segmentation disagrees. Omitting it resolved a different
+                // recipe than the app would — and this loop SAVES what it resolves.
                 let iso = ExifReader.iso(url: url)
                 let generated = clock(&t.engine) {
                     RecipeEngine.candidates(perception: perception, statistics: stats,
                                             subjectLuma: measured.subjectLuma,
-                                            skyLuma: measured.skyLuma, iso: iso)
+                                            skyLuma: measured.skyLuma,
+                                            subjectOrigin: measured.subjectOrigin, iso: iso)
                 }
                 recipe = clock(&t.curate) { () -> Recipe in
                     var scored: [CandidateCurator.Scored] = []
@@ -194,10 +208,16 @@ if first == "bench-export" {
                     }
                     return RecipeEngine.candidate(perception: perception, statistics: stats, style: style,
                                                   subjectLuma: measured.subjectLuma,
-                                                  skyLuma: measured.skyLuma, iso: iso)
+                                                  skyLuma: measured.skyLuma,
+                                                  subjectOrigin: measured.subjectOrigin, iso: iso)
                 }
-                ResolvedRecipeStore.save(recipe, for: url, styleId: style.id,
-                                         modelId: provider.activeModelID)
+                // `--no-cache` means the benchmark neither reads nor WRITES the app's store. This
+                // store is shared with the app — what it holds is what a user's export renders — so
+                // a run measuring the cold path must be able to leave it exactly as it found it.
+                if !noCache {
+                    ResolvedRecipeStore.save(recipe, for: url, styleId: style.id,
+                                             modelId: provider.activeModelID)
+                }
             }
             // Full-resolution masks only when the recipe actually carries masks — same condition
             // the export loop uses, and it is a large part of the cost when it fires.

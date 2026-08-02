@@ -2243,6 +2243,12 @@ case "sky-metrics":
     var styleReadings: [String: [SkyMetrics.Reading]] = [:]
     var styleGlobalOnly: [String: [SkyMetrics.Reading]] = [:]
     var styleDivergence: [String: [SkyMetrics.Divergence]] = [:]
+    // The unedited reading of every frame a style was actually measured on. This is the subtrahend
+    // for the global/mask split, and it cannot be the `readings` mean: `readings` drops the suspect
+    // frames, which are still rendered and still counted below, so subtracting one population's mean
+    // from another's would leak every excluded frame's sky luma into the attribution and break the
+    // identity global + mask == Δluma.
+    var styleBaseline: [String: [SkyMetrics.Reading]] = [:]
     var styleLabels: [String: String] = [:]
     var styleOrder: [String] = []
     // Pairwise, per frame, between every pair of styles — the "are these two candidates actually
@@ -2323,19 +2329,22 @@ case "sky-metrics":
             let out = Renderer.render(image, with: recipe, maskBitmaps: measured.bitmaps)
             rendered.append((id, out))
             if styleLabels[id] == nil { styleLabels[id] = recipe.label ?? id; styleOrder.append(id) }
-            if let r = (try? SkyMetrics.read(out, in: region)) ?? nil {
-                styleReadings[id, default: []].append(r)
-            }
+            let r = (try? SkyMetrics.read(out, in: region)) ?? nil
             // THE SAME RECIPE WITH ITS MASKS WITHHELD. `Renderer` skips any mask it is handed no
             // bitmap for, so this is the recipe's global half alone — and the difference between
             // the two is exactly what the sky mask contributed. Without this split, "the sky came
             // out brighter" cannot be attributed: a lever that is doing nothing and a lever that is
             // doing its job against a global layer doing more look identical in the total.
-            if let g = (try? SkyMetrics.read(Renderer.render(image, with: recipe), in: region)) ?? nil {
+            let g = (try? SkyMetrics.read(Renderer.render(image, with: recipe), in: region)) ?? nil
+            let d = (try? SkyMetrics.compare(image, out, in: region)) ?? nil
+            // All four recorded together or not at all: the moment one of them is missing for a
+            // frame the others keep, the style row is averaging four different populations and its
+            // columns stop adding up.
+            if let r, let g, let d {
+                styleReadings[id, default: []].append(r)
                 styleGlobalOnly[id, default: []].append(g)
-            }
-            if let d = (try? SkyMetrics.compare(image, out, in: region)) ?? nil {
                 styleDivergence[id, default: []].append(d)
+                styleBaseline[id, default: []].append(reading)
             }
         }
         for i in 0..<rendered.count {
@@ -2375,8 +2384,8 @@ case "sky-metrics":
         for id in styleOrder {
             let rs = styleReadings[id] ?? [], ds = styleDivergence[id] ?? []
             guard !rs.isEmpty else { continue }
-            let gs = styleGlobalOnly[id] ?? []
-            let globalDelta = gs.isEmpty ? 0 : mean(gs.map(\.meanLuma)) - mean(readings.map(\.meanLuma))
+            let gs = styleGlobalOnly[id] ?? [], bs = styleBaseline[id] ?? []
+            let globalDelta = gs.isEmpty ? 0 : mean(gs.map(\.meanLuma)) - mean(bs.map(\.meanLuma))
             let maskDelta = gs.isEmpty ? 0 : mean(rs.map(\.meanLuma)) - mean(gs.map(\.meanLuma))
             print(String(format: "%@ %8.3f %7.3f %+8.3f %+9.3f %+8.3f %9.3f %9.3f",
                          (styleLabels[id] ?? id).padding(toLength: 11, withPad: " ", startingAt: 0),

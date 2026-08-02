@@ -71,4 +71,35 @@ final class PreferenceStoreTests: XCTestCase {
         let survivors = try await store.loadAll()
         XCTAssertEqual(survivors.count, 2, "loadAll must not throw on damage")
     }
+
+    /// A restore that preserves 0444, a backup tool, a stray chmod: the log is there but
+    /// cannot be opened for writing. `record` must refuse loudly. It must not fall through
+    /// to the create path, which replaces the file and would take every pick with it.
+    func testAnUnwritableLogCostsOnePickNotTheHistory() async throws {
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent("kelvin-pref-\(UUID().uuidString)")
+        try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempDir) }
+
+        let logURL = tempDir.appendingPathComponent("preferences.jsonl")
+        let store = PreferenceStore(logFileURL: logURL)
+
+        for id in ["sha256:aaa", "sha256:bbb", "sha256:ccc"] {
+            try await store.record(pick: PreferencePick(imageId: id, shown: ["a", "b"], chosen: "a"))
+        }
+
+        try fm.setAttributes([.posixPermissions: 0o444], ofItemAtPath: logURL.path)
+        defer { try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: logURL.path) }
+
+        do {
+            try await store.record(pick: PreferencePick(imageId: "sha256:ddd", shown: ["a", "b"], chosen: "b"))
+            XCTFail("a log that cannot be opened for writing must surface as an error, not pass silently")
+        } catch {
+            // Expected: the pick is dropped, and the caller (`try? await store.record`) sees it.
+        }
+
+        let survivors = try await store.loadAll()
+        XCTAssertEqual(survivors.map(\.imageId), ["sha256:aaa", "sha256:bbb", "sha256:ccc"],
+                       "the history predating the failed write is intact")
+    }
 }
