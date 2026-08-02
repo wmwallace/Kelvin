@@ -43,7 +43,12 @@ public enum ExposureFusion {
         // *region* rather than by pixel — a hard selection would make edges crawl. Scaled to the
         // image so a proxy and a full-res export fuse the same way (as `clarityRadius` does).
         let radius = max(4.0, min(extent.width, extent.height) * 0.035)
+        // Clamped before the blur for the same reason `prepareMask` is: outside a finite extent is
+        // transparent black, so blurring a map that runs to the border averages it against nothing
+        // and the selection fades out in a band as wide as the radius — 140 px on a 6000 px export
+        // against 28 px on a proxy, which also made the two fuse differently at the frame's edge.
         let brightness = luma(of: image)
+            .clampedToExtent()
             .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: radius])
             .cropped(to: extent)
 

@@ -75,7 +75,11 @@ enum Clarity {
     private static func soften(_ image: CIImage, amount: Double, radius: Double) -> CIImage {
         let extent = image.extent
         let r = max(2.0, radius)
+        // Clamped before the blur, as `prepareMask` is: blurring to the border of a finite extent
+        // averages the frame against the transparent black outside it, which would darken the
+        // smoothed result in a band as wide as the radius.
         let blurred = image
+            .clampedToExtent()
             .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: r])
             .cropped(to: extent)
         guard !extent.isInfinite, let risk = haloRisk(of: image, radius: r, extent: extent) else {
@@ -102,7 +106,11 @@ enum Clarity {
     /// amplified, and spread slightly wider than the edge itself (the fringe extends past it).
     /// White = high risk.
     private static func haloRisk(of image: CIImage, radius: Double, extent: CGRect) -> CIImage? {
+        // Both blurs are clamped first. Unclamped, the frame's own border reads as the biggest edge
+        // in the picture — the blur falls toward transparent black there while the image does not,
+        // so the difference is large — and clarity would be backed off in a band all the way round.
         let gaussian = image
+            .clampedToExtent()
             .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: radius])
             .cropped(to: extent)
         return image
@@ -113,6 +121,7 @@ enum Clarity {
                 "inputBVector": CIVector(x: 2.4, y: 2.4, z: 2.4, w: 0),
                 "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1)
             ])
+            .clampedToExtent()
             .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: radius * 0.6])
             .cropped(to: extent)
     }

@@ -191,11 +191,21 @@ public enum Renderer {
 
         // Per-channel R/G/B curves — colour grading (split-tone): a warm highlight / cool shadow
         // response for cinematic depth. Applied via CIColorCurves; identity channels are a no-op.
+        //
+        // NO `inputColorSpace` HERE, deliberately. That parameter tells Core Image the table is
+        // written in some *other* space, so it converts the working value in, looks the table up,
+        // and converts the result back — and the working values at this point have ALREADY been
+        // encoded to sRGB by the round trip above. Naming sRGB again encoded them a second time:
+        // the table was read at srgb(D) instead of D and its output decoded twice. Measured on a
+        // flat quarter-tone patch with a blue curve mapping 64 → 128, the pixel came back 112
+        // instead of 126 — the grade weakened in the highlights and pushed the wrong way in the
+        // shadows. Omitted, the table applies directly to the values as they are, which is what
+        // this block exists to make true. (The HSL and mono cubes below are outside the sRGB
+        // block, on genuinely linear values, which is why they DO name the space.)
         if let curve = recipe.curve, let cdata = channelCurvesData(curve) {
             img = img.applyingFilter("CIColorCurves", parameters: [
                 "inputCurvesData": cdata,
-                "inputCurvesDomain": CIVector(x: 0, y: 1),
-                "inputColorSpace": ImageWriter.outputColorSpace
+                "inputCurvesDomain": CIVector(x: 0, y: 1)
             ])
         }
 
@@ -211,6 +221,19 @@ public enum Renderer {
                 "inputColorSpace": ImageWriter.outputColorSpace
             ])
         }
+
+        // THE LAST FRAME THAT STILL HAS COLOUR IN IT, kept only when the next step is about to
+        // take the colour away. A `.color` selection is a hue window that fades out with
+        // saturation (`SelectionMask.makeData`, `min(1, s / 0.15)`), so evaluated against a
+        // monochrome image every such cube returns solid black and the masked adjustment becomes a
+        // silent no-op — a Skin mask lifting a face by +0.4 EV simply stops working the moment the
+        // Mono or red-filter look is chosen, with nothing to show for it.
+        //
+        // Gated on a B&W conversion actually being present, because in a colour render a `.color`
+        // selection is deliberately evaluated against the RUNNING image, earlier masks included
+        // (see the comment in the loop below). Snapshotting unconditionally would change those
+        // renders; this way every non-mono render stays bit-identical.
+        let colourReference: CIImage? = recipe.blackAndWhite != nil ? img : nil
 
         // Black & white. Applied after all colour work (which shapes what the greys become) and
         // before masks, so a mask's saturation adjustment can't reintroduce colour.
@@ -239,8 +262,12 @@ public enum Renderer {
             // it (see `Mask.skin`, which still constructs precisely the old behaviour).
             let bitmap: CIImage?
             if let sel = mask.selection, let cube = SelectionMask.makeData(sel) {
-                // The cube turns the current image into a white-where-selected mask.
-                bitmap = img.applyingFilter("CIColorCubeWithColorSpace", parameters: [
+                // The cube turns the current image into a white-where-selected mask — except under
+                // a B&W conversion, where a hue window has nothing left to read and must go back to
+                // the last colour frame instead (see `colourReference`). Luminance selections are
+                // unaffected and stay on the running image.
+                let source = sel.kind == .color ? (colourReference ?? img) : img
+                bitmap = source.applyingFilter("CIColorCubeWithColorSpace", parameters: [
                     "inputCubeDimension": SelectionMask.dimension,
                     "inputCubeData": cube,
                     "inputColorSpace": ImageWriter.outputColorSpace
@@ -279,7 +306,9 @@ public enum Renderer {
             // worse than one that does nothing. A missing refinement cube, by contrast, leaves the
             // region as it is: the narrowing is optional, the region is not.
             if let refine = mask.refine, let cube = SelectionMask.makeData(refine) {
-                let selected = img.applyingFilter("CIColorCubeWithColorSpace", parameters: [
+                // Same colour-blindness problem as a `.color` source above, and the same answer.
+                let narrowing = refine.kind == .color ? (colourReference ?? img) : img
+                let selected = narrowing.applyingFilter("CIColorCubeWithColorSpace", parameters: [
                     "inputCubeDimension": SelectionMask.dimension,
                     "inputCubeData": cube, "inputColorSpace": ImageWriter.outputColorSpace])
                 region = selected.applyingFilter("CIMultiplyCompositing", parameters: [
@@ -496,7 +525,18 @@ public enum Renderer {
             let gain = 1.0 + (a["contrast"] ?? 0) / 100.0 * 0.6
             var pivotShift = 0.0
             if (a["contrast"] ?? 0) != 0 {
-                let pivot = SubjectMask.maskedMeanLuma(image: base, mask: maskBitmap) ?? 0.5
+                // METERED THROUGH THE INVERT, because `invert` is not applied until `prepareMask`
+                // below. The app's "Background" preset is a subject mask with `invert: true`, so
+                // metering the raw bitmap pivoted on the SUBJECT — precisely the pixels the
+                // adjustment then leaves alone — and a background darker than the subject got the
+                // shift pushed the wrong way, which is the crush this pivot exists to prevent.
+                //
+                // Only the invert, not the whole of `prepareMask`: that also scales by `opacity`,
+                // and `maskedMeanLuma` throws away samples reading below 0.4 and needs more than a
+                // handful left, so metering the prepared mask would return nil and fall back to
+                // 0.5 for every mask under about 40% strength.
+                let metered = mask.invert ? maskBitmap.applyingFilter("CIColorInvert") : maskBitmap
+                let pivot = SubjectMask.maskedMeanLuma(image: base, mask: metered) ?? 0.5
                 pivotShift = (gain - 1.0) * (0.5 - pivot)
             }
             layer = layer

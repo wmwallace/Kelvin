@@ -122,4 +122,43 @@ final class FeatherEdgeTests: XCTestCase {
         let band = grid.flatMap { $0 }.filter { $0 > 0.08 && $0 < 0.92 }.count
         XCTAssertGreaterThan(band, 0, "feathering a background no longer softens its subject edge")
     }
+
+    /// The same trap, one filter along. Exposure fusion picks between its virtual exposures through
+    /// a *blurred* luminance map, so an unclamped blur fades the fusion out in a band round the
+    /// whole frame: the effect is strongest in the middle of the picture and weakest at the edges,
+    /// and it differs between a proxy and an export because the radius scales with the frame
+    /// (28 px on a 1200 px proxy, 140 px at 24 MP). A flat frame has no region to select, so fusing
+    /// one must give a flat frame back.
+    func testFusingAUniformFrameLeavesItUniform() throws {
+        let fused = try rows(ExposureFusion.fuse(uniform(128), strength: 1.0)).flatMap { $0 }
+        let lowest = try XCTUnwrap(fused.min())
+        let highest = try XCTUnwrap(fused.max())
+        XCTAssertEqual(highest - lowest, 0, accuracy: 0.02,
+                       "fusing a flat frame left a border band — \(lowest) at its darkest against "
+                       + "\(highest) at its brightest")
+    }
+
+    /// Stated as the photographer would see it: the top and bottom of a fused frame get the same
+    /// treatment as the middle of it.
+    func testFusionKeepsItsStrengthAtTheFrameEdge() throws {
+        let grid = try rows(ExposureFusion.fuse(uniform(128), strength: 1.0))
+        func mean(_ row: [Double]) -> Double { row.reduce(0, +) / Double(row.count) }
+        let top = try XCTUnwrap(grid.first)
+        let bottom = try XCTUnwrap(grid.last)
+        let middle = mean(grid[grid.count / 2])
+        XCTAssertEqual(mean(top), middle, accuracy: 0.02,
+                       "the top of a fused frame is fused differently from its middle")
+        XCTAssertEqual(mean(bottom), middle, accuracy: 0.02,
+                       "the bottom of a fused frame is fused differently from its middle")
+    }
+
+    /// And clamping the selection map must not make fusion inert: a frame that really does have a
+    /// dark region and a bright one still comes back changed.
+    func testFusionStillChangesAFrameWithDarkAndBrightRegions() throws {
+        let scene = TestSupport.pixels(size: 64) { x, _ in x < 32 ? (30, 30, 30) : (225, 225, 225) }
+        let before = try rows(scene).flatMap { $0 }
+        let after = try rows(ExposureFusion.fuse(scene, strength: 1.0)).flatMap { $0 }
+        let biggest = try XCTUnwrap(zip(before, after).map { abs($0.0 - $0.1) }.max())
+        XCTAssertGreaterThan(biggest, 0.02, "exposure fusion no longer changes anything")
+    }
 }
