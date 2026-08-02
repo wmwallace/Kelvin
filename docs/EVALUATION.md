@@ -500,6 +500,61 @@ believing the result; the known-good cross-check is that `KELVIN_SKY_EV=0.45` pu
 Dramatic's `← mask` column at −0.040 and its sky spread at 0.112, the values recorded in
 `b0bd667`.
 
+## What predicts which look wins
+
+```
+kelvin-cli eval --corpus ./corpus-pairs --out report.json
+kelvin-cli pick-probe --report report.json --corpus ./corpus-pairs
+```
+
+The preference loop rests on a question nobody had asked. Two things were already known:
+choosing the right candidate is worth about six times what adding more candidates is, and
+**perception cannot make that choice** — the scene categories have near-identical
+distributions over frames where Soft wins and frames where Natural does. "Portrait,
+overcast" does not tell you which one the photographer kept.
+
+So the question narrows: does anything *measurable about the light* separate them? Not the
+scene depicted — the frame itself, as a chooser would see it, unedited and with no
+reference in hand. `pick-probe` re-reads a report the harness has already written (every
+`engine-<style>` row carries a per-frame `minDeltaE`, so each frame's winner is already on
+disk and nothing is re-rendered), measures the corpus *sources*, and reports the AUC of
+each property between the two groups. 0.50 is a coin flip.
+
+**The answer, as of 2 August 2026: shadow structure separates them, and nothing else does.**
+
+| property | natural | soft | AUC (pairs) | AUC (degradations) |
+|---|---|---|---|---|
+| `shadowRegion` | 0.196 | 0.255 | 0.714 | 0.657 |
+| `shadowMass` | 0.027 | 0.050 | 0.669 | 0.680 |
+| `blackPoint` | 0.063 | 0.040 | 0.302 | 0.274 |
+| `dynamicRange` | 0.808 | 0.881 | 0.707 | **0.486** |
+| `edgeCast` | 2.27 | 2.02 | 0.367 | **0.763** |
+
+The first three are one finding seen from both ends: **a frame with more, deeper shadow is
+one where the photographer pulled contrast down (Soft); a frame with lifted blacks and
+little shadow is one where Natural was already right.** It replicates on both corpora, in
+direction and in rough magnitude, and it is mechanistically sensible, which is more than
+this project has previously got out of a threshold hunt (the halo discriminator died at
+62% against a coin flip).
+
+The last two rows are the reason the hold-out exists and why the command prints the number
+of properties it searched. `dynamicRange` looked like the co-winner on the paired corpus
+and is dead on the other. `edgeCast` is the *strongest* property on the degradation corpus
+and points the **opposite way** on real pairs — unsurprising once said out loud, because
+that corpus injects colour casts by construction, so it is measuring the corpus rather than
+anybody's taste. Both are exactly what noise looks like when thirteen properties are
+searched at n≈60.
+
+Read the result with its limits attached: one photographer, 63 usable frames on the paired
+corpus and 45 on the degradation corpus (only 10 of them Soft wins), and the degradation
+corpus is synthetic variants of the same photographs rather than an independent sample. It
+is enough to say a per-frame chooser has **something** to read, which was the open
+question. It is not enough to calibrate one on.
+
+Useful flags: `--pair natural,soft` to separate a different two (the default is the two
+winningest styles), and `--min-margin <ΔE>` to drop frames the two styles effectively tied
+on, which are not evidence about either.
+
 ## Baselines
 
 Every report compares against these. If the engine cannot beat them, it is not ready.

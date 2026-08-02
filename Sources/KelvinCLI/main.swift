@@ -42,6 +42,7 @@ func printUsage() {
       \(tool) wb-probe --in-dir <dir> [--reference-dir <dir>] [--cost]
       \(tool) instances --in <image>
       \(tool) grow --in <image> --at <x,y> [--tolerance <t>] [--softness <s>] [--out-dir <dir>]
+      \(tool) pick-probe --report <report.json> --corpus <dir> [--pair a,b] [--min-margin <dE>]
 
     wb-probe options (docs/EVALUATION.md, "Which illuminant estimate is right"):
       --in / --in-dir  One photograph, or a folder of them. Required.
@@ -2464,6 +2465,186 @@ case "eval":
         // Surface the no-op invariant as a non-zero exit so CI can gate on it.
         if !report.noOpFidelityOK {
             fail("no-op fidelity failed: a neutral recipe altered pixels")
+        }
+    } catch {
+        fail("\(error)")
+    }
+
+case "pick-probe":
+    // WHAT, IF ANYTHING, PREDICTS WHICH LOOK WINS?
+    //
+    // This is the question the preference loop rests on and the one nobody has asked. What IS
+    // known, and is recorded in docs/EVALUATION.md, is the shape of the prize: choosing the right
+    // candidate is worth about six times what adding more candidates is. What is also known is
+    // that PERCEPTION cannot make that choice — the scene categories the model emits have
+    // near-identical distributions over frames where Soft wins and frames where Natural does, so
+    // "portrait, overcast" tells you nothing about which of the two the photographer would keep.
+    //
+    // So the question narrows to: does anything MEASURABLE about the photograph separate them? Not
+    // the scene it depicts — the light in it. Median luma, shadow mass, dynamic range, the size of
+    // the neutral cast, how much of the frame is nearly clipped. If one of these separates the two
+    // groups, a per-frame chooser is buildable and the loop has a shape. If nothing does, the only
+    // remaining option is a global "this user tends to prefer Soft" prior, which has already been
+    // measured on the real pick log as worth approximately nothing — and the honest conclusion is
+    // that the loop as conceived does not work, arrived at in an afternoon instead of a fortnight.
+    //
+    // It reads a report the harness has already written. Every `engine-<style>` row carries a
+    // per-frame `minDeltaE` — distance to the photographer's own edit — so the frame's WINNER is
+    // already on disk and needs no re-render. The properties are measured on the corpus SOURCE,
+    // because a chooser can only ever see the unedited frame.
+    //
+    // AUC is the readout, not a p-value: the probability that a randomly chosen frame from one
+    // group scores above a randomly chosen frame from the other. 0.50 is a coin flip. It is
+    // reported per property, sorted by distance from 0.50, alongside each group's mean — and with
+    // the group sizes stated loudly, because on 77 frames a split of 60/17 can manufacture an
+    // impressive-looking AUC out of nothing. This project has hunted a threshold before and had it
+    // come back at 62% against a coin flip; the instrument exists to make that outcome legible
+    // rather than to avoid it.
+    do {
+        let rest = Array(arguments.dropFirst())
+        guard let reportPath = value(for: "--report", in: rest) else {
+            fail("pick-probe needs --report <report.json> (written by `eval --out`)")
+        }
+        guard let corpusPath = value(for: "--corpus", in: rest) else {
+            fail("pick-probe needs --corpus <dir> — the properties are measured on its sources")
+        }
+        let corpusDir = URL(fileURLWithPath: corpusPath, isDirectory: true)
+        let reportData = try Data(contentsOf: URL(fileURLWithPath: reportPath))
+        guard let root = try JSONSerialization.jsonObject(with: reportData) as? [String: Any],
+              let images = root["images"] as? [[String: Any]] else {
+            fail("\(reportPath) does not look like an eval report (no `images` array)")
+        }
+
+        /// The style closest to the photographer's own edit on one frame, and by how much it beat
+        /// the runner-up. The margin matters: a frame the two styles tie on is not evidence about
+        /// either, and including it would dilute whatever signal exists with coin flips.
+        struct Winner { let id: String; let style: String; let margin: Double }
+        var winners: [Winner] = []
+        for image in images {
+            guard let id = image["id"] as? String,
+                  let methods = image["methods"] as? [[String: Any]] else { continue }
+            var scores: [(style: String, dE: Double)] = []
+            for m in methods {
+                guard let name = m["method"] as? String, name.hasPrefix("engine-"),
+                      let dE = m["minDeltaE"] as? Double else { continue }
+                let style = String(name.dropFirst("engine-".count))
+                // `engine-default` and `engine-best` are summaries over the styles, not styles.
+                guard style != "default", style != "best" else { continue }
+                scores.append((style, dE))
+            }
+            guard scores.count >= 2 else { continue }
+            scores.sort { $0.dE < $1.dE }
+            winners.append(Winner(id: id, style: scores[0].style,
+                                  margin: scores[1].dE - scores[0].dE))
+        }
+        guard !winners.isEmpty else { fail("no per-frame engine-<style> rows in that report") }
+
+        var tally: [String: Int] = [:]
+        for w in winners { tally[w.style, default: 0] += 1 }
+        let ranked = tally.sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
+        print("Frames won, by style (closest to the photographer's own edit):")
+        for (style, n) in ranked {
+            print(String(format: "  %-10@ %3d  %4.1f%%", style as NSString, n,
+                         100 * Double(n) / Double(winners.count)))
+        }
+        print("")
+
+        // The pair to separate. Defaults to the two winningest styles, which on the paired corpus
+        // is where nearly all of the available headroom sits — but it is a flag, because the answer
+        // for natural-vs-soft need not be the answer for anything else.
+        let pair: [String]
+        if let asked = value(for: "--pair", in: rest) {
+            pair = asked.split(separator: ",").map(String.init)
+        } else {
+            pair = Array(ranked.prefix(2).map(\.key))
+        }
+        guard pair.count == 2 else { fail("--pair takes exactly two style names, comma separated") }
+        let minMargin = Double(value(for: "--min-margin", in: rest) ?? "") ?? 0
+
+        let corpus = try Corpus.load(root: corpusDir)
+        var sourceById: [String: URL] = [:]
+        for entry in corpus.manifest.entries where sourceById[entry.id] == nil {
+            sourceById[entry.id] = corpus.sourceURL(for: entry)
+        }
+
+        /// One frame's measured light, as a chooser would see it: on the unedited source, with no
+        /// reference in hand.
+        var groups: [String: [[String: Double]]] = [pair[0]: [], pair[1]: []]
+        var missing = 0, tied = 0
+        for w in winners where pair.contains(w.style) {
+            if w.margin < minMargin { tied += 1; continue }
+            guard let url = sourceById[w.id] else { missing += 1; continue }
+            guard let image = try? ImageDecoder.decode(url: url),
+                  let stats = try? ImageStatistics.compute(image) else { missing += 1; continue }
+            groups[w.style]?.append([
+                "medianLuma": stats.medianLuma,
+                "meanLuma": stats.meanLuma,
+                "shadowMass": stats.shadowMass,
+                "shadowRegion": stats.shadowRegion,
+                "dynamicRange": stats.dynamicRange,
+                "highlightLevel": stats.highlightLevel,
+                "blackPoint": stats.blackPoint,
+                "whitePoint": stats.whitePoint,
+                "highlightClip": stats.highlightClip,
+                "shadowClip": stats.shadowClip,
+                "neutralCast": stats.neutralCastMagnitude,
+                "edgeCast": stats.edgeCastMagnitude,
+                "chroma": (stats.chromaA * stats.chromaA + stats.chromaB * stats.chromaB).squareRoot(),
+            ])
+        }
+        let a = groups[pair[0]] ?? [], b = groups[pair[1]] ?? []
+        if missing > 0 { print("‡ \(missing) frame(s) skipped — no readable source in the corpus") }
+        if tied > 0 { print("‡ \(tied) frame(s) skipped — the two styles were within \(minMargin) ΔE") }
+        guard a.count >= 3, b.count >= 3 else {
+            fail("not enough frames to separate: \(pair[0]) \(a.count), \(pair[1]) \(b.count)")
+        }
+
+        /// The probability that a frame drawn from the second group scores above one drawn from the
+        /// first — the Mann-Whitney statistic, computed the honest way, by counting every pair.
+        /// Ties count a half, so a property that is constant lands on exactly 0.50 rather than on
+        /// whichever side the comparison operator happens to fall.
+        func auc(_ xs: [Double], _ ys: [Double]) -> Double {
+            var wins = 0.0
+            for x in xs { for y in ys { wins += y > x ? 1 : (y == x ? 0.5 : 0) } }
+            return wins / Double(xs.count * ys.count)
+        }
+        func mean(_ xs: [Double]) -> Double { xs.isEmpty ? 0 : xs.reduce(0, +) / Double(xs.count) }
+
+        let keys = a[0].keys.sorted()
+        var rows: [(key: String, ma: Double, mb: Double, auc: Double)] = []
+        for k in keys {
+            let xs = a.compactMap { $0[k] }, ys = b.compactMap { $0[k] }
+            rows.append((k, mean(xs), mean(ys), auc(xs, ys)))
+        }
+        rows.sort { abs($0.auc - 0.5) > abs($1.auc - 0.5) }
+
+        print("")
+        print("Separating \(pair[0]) (n=\(a.count)) from \(pair[1]) (n=\(b.count)) "
+              + "on the UNEDITED frame:")
+        print(String(format: "%-16@ %10@ %10@ %8@   %@", "property" as NSString,
+                     pair[0] as NSString, pair[1] as NSString, "AUC" as NSString,
+                     "reading" as NSString))
+        print(String(repeating: "-", count: 74))
+        for r in rows {
+            // Deliberately worded, not starred. A number a reader has to interpret is a number a
+            // reader will interpret generously, and this project has been generous to a 62%
+            // discriminator before.
+            let d = abs(r.auc - 0.5)
+            let reading = d >= 0.20 ? "separates" : d >= 0.12 ? "weak" : "nothing"
+            print(String(format: "%-16@ %10.4f %10.4f %8.3f   %@", r.key as NSString,
+                         r.ma, r.mb, r.auc, reading as NSString))
+        }
+        print("")
+        let best = rows.first.map { abs($0.auc - 0.5) } ?? 0
+        if best < 0.12 {
+            print("NOTHING SEPARATES THEM. No measured property of the unedited frame predicts which")
+            print("of these two the photographer kept. A per-frame chooser has nothing to read, and")
+            print("the remaining option is a global prior over the pick log.")
+        } else {
+            print("The strongest is \(rows[0].key) at AUC \(String(format: "%.3f", rows[0].auc)).")
+            print("Before believing it: the groups are \(a.count) and \(b.count) frames, one")
+            print("photographer, and this property was chosen from \(rows.count) candidates — which")
+            print("is \(rows.count) chances for noise to look like signal. Hold it out before building on it.")
         }
     } catch {
         fail("\(error)")
