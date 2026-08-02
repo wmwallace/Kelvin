@@ -2748,6 +2748,9 @@ final class AppState: ObservableObject {
         maskAdjustments = [:]; maskFeather = [:]; maskTightness = [:]; maskInvert = [:]
         hsl = [:]; straighten = 0; activeLookId = nil
         showingOriginal = false; showingRepairSpots = false; hoveringRepairControls = false
+        // The grid is four renders of the photograph being left behind, and the comparison it
+        // offers is not a comparison of the one arriving.
+        comparing = false; compareRenders = [:]; comparePartnerId = nil
         // Per-PHOTOGRAPH, not per-shoot: an audit found the folder-change reset alone let a tick
         // survive a cached-session hop into a different shoot, and linger invisibly on frames
         // whose checkbox is hidden. Including a location is a decision about one photograph.
@@ -2786,6 +2789,7 @@ final class AppState: ObservableObject {
         userMasks = s.userMasks; straighten = s.straighten; hsl = s.hsl
         brushCache = [:]; selectedMask = nil; paintingMaskId = nil; pickingInstance = false
         zoom = 1; pan = .zero; showingOriginal = false
+        comparing = false; compareRenders = [:]; comparePartnerId = nil
         updateActiveRecipe()
         resetHistory()
         statusMessage = "\(s.url.lastPathComponent) · picking up where you left off"
@@ -2810,6 +2814,7 @@ final class AppState: ObservableObject {
         brushCache = [:]
         proxyMaskBitmaps = [:]; healSpots = []; healToolActive = false
         zoom = 1; pan = .zero; showingOriginal = false
+        comparing = false; compareRenders = [:]; comparePartnerId = nil
         statusMessage = "Drop a photo or a folder to read the light."
     }
 
@@ -3638,6 +3643,86 @@ final class AppState: ObservableObject {
     func selectCandidateIndex(_ index: Int) {
         guard index >= 0, index < candidates.count else { return }
         selectCandidate(id: candidates[index].id)
+        // Choosing ends the comparison. A number key pressed while comparing is the same decision a
+        // click on a tile is, and leaving the grid up afterwards would make the app look like it
+        // had not heard.
+        comparing = false
+    }
+
+    // MARK: Comparing candidates
+
+    /// Whether the compare grid has the canvas.
+    @Published var comparing = false
+    /// Two at a time or all four. Remembered for the session — someone who wants the survey wants
+    /// it on the next frame too — but not persisted, because it is a way of looking rather than a
+    /// setting.
+    @Published var compareMode: CandidateCompare.Mode = .two
+    /// What the chosen candidate is being held against in 2-up. Nil means "the next one".
+    @Published var comparePartnerId: String?
+    /// Canvas-resolution renders, keyed by candidate id.
+    ///
+    /// The picker's own thumbnails are 768 px because at 62 points that is ample; shown a foot wide
+    /// they are not, and the whole point of this view is that the difference should be visible. So
+    /// the candidates are re-rendered once, on the proxy the canvas itself draws, through the same
+    /// `Renderer` call — a comparison of anything other than what you would actually get is worse
+    /// than no comparison.
+    @Published private(set) var compareRenders: [String: NSImage] = [:]
+    /// Guards a render batch against the photograph moving on under it, exactly like the candidate
+    /// build it mirrors.
+    private var compareRenderToken = 0
+
+    /// Comparing needs two things to compare and a proxy to draw them from.
+    var canCompare: Bool { candidates.count >= 2 && proxyCI != nil }
+
+    func toggleCompare() {
+        if comparing { comparing = false; return }
+        guard canCompare else { return }
+        if selectedCandidateId == nil { selectedCandidateId = candidates.first?.id }
+        comparing = true
+        buildCompareRenders()
+    }
+
+    func closeCompare() { comparing = false }
+
+    /// The pick, made from the compare view — which is the reason the view exists.
+    func pickFromCompare(id: String) {
+        selectCandidate(id: id)
+        comparing = false
+    }
+
+    /// Render every curated candidate at proxy resolution, off the main actor.
+    ///
+    /// Four renders of a 1200 px proxy, measured at roughly 20 ms each on this machine, so the grid
+    /// is soft for about a tenth of a second and then sharp. Deliberately NOT done when the
+    /// candidates are built: most photographs are never compared, and paying for four extra renders
+    /// on every frame of a 400-frame shoot to serve the ones that are is the wrong trade.
+    private func buildCompareRenders() {
+        guard let proxy = proxyCI else { return }
+        let items = candidates.map { (id: $0.id, recipe: $0.baseRecipe) }
+        let masks = proxyMaskBitmaps
+        let url = imageURL
+        compareRenderToken += 1
+        let token = compareRenderToken
+        Task { [weak self] in
+            let rendered = await Task.detached(priority: .userInitiated) { () -> CompareRenders in
+                var out: [String: NSImage] = [:]
+                for item in items {
+                    let ci = Renderer.render(proxy, with: item.recipe, maskBitmaps: masks)
+                    if let cg = AppState.sharedContext.createCGImage(ci, from: ci.extent) {
+                        out[item.id] = NSImage(cgImage: cg, size: .zero)
+                    }
+                }
+                return CompareRenders(images: out)
+            }.value
+            guard let self, self.compareRenderToken == token, self.imageURL == url else { return }
+            self.compareRenders = rendered.images
+        }
+    }
+
+    /// Boxed for the same reason `CandidateBatch` is: `NSImage` crosses the actor boundary here and
+    /// the box is where that is said out loud.
+    private struct CompareRenders: @unchecked Sendable {
+        let images: [String: NSImage]
     }
 
     func onEdit() {
@@ -5984,6 +6069,15 @@ struct ContentView: View {
                         .keyboardShortcut("\\", modifiers: [])
                     Button("") { appState.toggleFilmstrip() }
                         .keyboardShortcut("/", modifiers: [])
+                    // Comparing Kelvin's answers against each other, which is the one act the app
+                    // exists for and had no key. `C` is free and is what the word starts with;
+                    // `⇧C` is taken and means something else.
+                    Button("") { appState.toggleCompare() }
+                        .keyboardShortcut("c", modifiers: [])
+                    // A view entered with one keystroke has to be leavable with the key everything
+                    // else is leavable with.
+                    Button("") { appState.closeCompare() }
+                        .keyboardShortcut(.escape, modifiers: [])
                     Button("") { appState.toggleZoomRatio() }
                         .keyboardShortcut(.space, modifiers: [])
                     Button("") { openExportPanel() }
@@ -6229,6 +6323,13 @@ struct ContentView: View {
         VStack(spacing: 0) {
                 GeometryReader { geo in
                     ZStack {
+                        if appState.comparing {
+                            // The grid TAKES the canvas rather than floating over it. Kelvin's
+                            // answers deserve the same space the photograph gets, and a panel
+                            // hovering over a dimmed picture would be comparing two crops of
+                            // whatever it did not cover.
+                            CandidateCompareView(appState: appState)
+                        } else {
                         PreviewImage(preview: appState.preview,
                                      url: appState.imageURL,
                                      showingOriginal: appState.showingOriginal,
@@ -6263,6 +6364,7 @@ struct ContentView: View {
                                     .transition(.opacity)
                             }
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
                         }
                     }
                     // Photos come in from the filmstrip, a drop, or the arrow keys. A hard cut
@@ -6994,6 +7096,17 @@ struct ContentView: View {
                     .gesture(DragGesture(minimumDistance: 0)
                         .onChanged { _ in if !appState.showingOriginal { appState.showingOriginal = true } }
                         .onEnded { _ in appState.showingOriginal = false })
+                // Holding against the ORIGINAL is one question; holding Kelvin's answers against
+                // each other is the other one, and it is the question this app is for. It sits
+                // next to its neighbour because they are the same gesture of the mind.
+                if appState.canCompare {
+                    Button { appState.toggleCompare() } label: {
+                        toolbarLabel(appState.comparing ? "Comparing" : "Compare",
+                                     filled: appState.comparing)
+                    }
+                    .buttonStyle(.plain)
+                    .help("See Kelvin's interpretations side by side, large, and choose one. (C)")
+                }
                     }
                     .padding(.trailing, 4)
                 }
