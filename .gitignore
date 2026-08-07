@@ -50,3 +50,9 @@ build/
 # Built application bundles and disk images. 1.7 GB of app does not belong in git — it is
 # assembled by scripts/package-app.sh and attached to a GitHub release.
 /dist/
+
+# Scratch git worktrees created by tooling that builds a second revision alongside this one
+# (comparing two releases, isolating a change). They contain a whole checkout plus its build
+# directory, and a stray one turns `git status` into noise at exactly the moment you are trying
+# to read a diff.
+/.claude/worktrees/

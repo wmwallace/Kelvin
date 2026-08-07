@@ -555,6 +555,108 @@ Useful flags: `--pair natural,soft` to separate a different two (the default is 
 winningest styles), and `--min-margin <ΔE>` to drop frames the two styles effectively tied
 on, which are not evidence about either.
 
+## What the perception read is worth, measured three ways
+
+**7 August 2026, 77 real pairs, same binary, same pixels, only the perception JSON varying.**
+The corpus manifest carries a per-entry `perception` path, so the same corpus can be scored
+under different reads and the difference *is* the model's contribution. Run it before arguing
+about the model again.
+
+| arm | engine-default | engine-best | frames >1 ΔE worse than doing nothing |
+|---|---|---|---|
+| the shipped model's real reads | 7.670 | 7.027 | **13** |
+| `problems[]` emptied, all else real | 7.502 | 6.757 | **3** |
+| everything constant (scene `.other`, subject absent, lighting `.unknown`, no problems) | 7.527 | 6.785 | 4 |
+| perception shuffled between frames | 7.822 | — | 16 |
+| doing nothing | 7.887 | — | — |
+
+**The world is `real < neutral ≈ oracle`.** A hand-written read of 12 frames — written by
+opening each photograph and grounding the read on measured clipping — lands *on top of* the
+constant arm (8.991 vs 8.971), not above it. So this is not "the model reads badly and a better
+model would fix it": a **correct** read is worth nothing to the engine as currently wired, and the
+model's actual read is worse than silence.
+
+⚠️ **Report the tail, not the mean.** On the mean, real vs neutral is not significant — paired
+difference −0.143, t = −0.93, bootstrap 95% CI [−0.443, +0.151], sign test 38 better / 39 worse.
+The read is a **high-variance, zero-mean perturbation**: all 77 frames move, mean magnitude 0.788
+ΔE, max 5.762. What changes is how many photographs come out *ruined* (13 → 3), which no mean
+over this corpus will ever show you.
+
+Where the harm concentrates: `problems[]`, the engine's most-read perception field. `crushed-shadows`
+alone costs 0.20 ΔE — nearly the engine's entire 0.22 margin over doing nothing. It is claimed on 12
+corpus frames of which **nine have exactly 0.00000 measured shadow clipping**, and its overlap with
+frames that genuinely clip is at chance (expected 1.9 at n=77, observed 3). `ImageStatistics`
+measures every one of these properties exactly; the engine was asking a 2B model instead.
+
+⚠️ The constant arm is not hypothetical — it is byte-identical to `conservativeRead`
+(`ContentView.swift:679-684`), a branch the app already ships when the model is unavailable.
+
+### What the read still cannot be replaced on
+
+`subject.present` and `subject.type`. Replacing the other eight fields — scene, lighting condition,
+contrast range, direction, intent, count, placement, notes — with fixed constants costs **0.05 ΔE**.
+`natural-feature` (added 1 Aug) is the counter-example that earns its keep: it admits sea-stack
+frames to the corrective subject lift, and on 24 re-read Cannon Beach frames the subject mask
+appeared on 11 and the result is visibly better on 6 of 8 inspected.
+
+## A read that changes is not an edit that changes
+
+⚠️ **Before blaming a prompt change for a quality complaint, measure whether it reached the
+picture.** A prompt edit changes `PerceptionStore`'s key (`SHA256(identity-promptSignature)`) and
+re-reads the whole library, which *looks* alarming: across the owner's cache, re-reads disagreed on
+`problems[]` for 48% of photographs and `subject.type` for 34%.
+
+It did not reach the picture. Rendering 24 of those frames under both their old and new reads, same
+binary: pixels moved on 19, and the look a photographer **opens on changed for zero of them**. The
+curated four were `[Natural, Soft, Vivid, Dramatic]` in both arms on every frame.
+
+Two lessons, both cheap to forget:
+
+- **`temperature = 0`** (`MLXPerceptionProvider.swift:198`), so "label drift between runs" is not an
+  available explanation — the same prompt on the same pixels gives the same answer. Two differing
+  reads mean the prompt changed **or the pixels did**.
+- **The pixels can differ without anyone touching the photograph.** `kelvin-perceive` perceives
+  `downsample(full)` in one step; the app perceives `fromFile(maxEdge: 1200)` and then downsamples
+  again. Different resampling, same cache key. The harness and the app can be reading different
+  images of the same file, and whichever runs first wins.
+
+## The opener is a constant
+
+`CandidateCurator.select` iterates in engine order; `natural` is index 0 of `CandidateStyle.all`
+and is exempt from the quality floor, so it is always `curated.first`, and `resolve` returns
+`match ?? curated.first`. **`engine-default` is `engine-natural`.** Every eval run prints
+`opened in: natural ×77` and that is structural, not a property of the corpus.
+
+Consequences worth stating plainly before designing anything that assumes otherwise:
+
+- The craft floor, the aesthetic evaluator, the eight-style roster and any per-frame chooser
+  cannot change what a photographer sees on opening.
+- The app opens on the candidate its **own evaluator ranks second**: Soft outscores Natural on 26 of
+  39 corpus frames. Slot 1 is assigned by engine order with no score check.
+- Because Natural is `corrective`, seven levers are off on 100% of frames at open — the S-curve, the
+  split-tone grade, clarity, texture, most of the endpoint push, most of fusion, and **the entire sky
+  graduated-ND**. The sky lever calibrated by sweep at 1.4 EV reaches zero frames on open.
+- Picking is worth **0.61 ΔE** (`engine-best` 7.027 vs `engine-default` 7.670) against 0.10 for
+  expanding the roster. Ranked by measurement, a per-frame opener beats every roster change,
+  every new style and every constant sweep on the table.
+
+## Highlights are computed open-loop
+
+`highlightRecovery` sizes itself from **`s.highlightClip` on the source** — `min(66, clip * 400)` —
+and nothing re-measures after the recipe is composed. Every `highlightClip` reference in
+`RecipeEngine` reads the input statistic; the exposure lever never consults highlights at all.
+
+So on a backlit frame the engine lifts global exposure to rescue the subject, sized against the
+*unlifted* input, and the highlights go where they go. Measured on the default candidate: a backlit
+interior goes **0.673% → 8.311%** of pixels at ≥254, a tungsten interior 3.007% → 7.354%. A window
+with cloud detail in the original renders as paper white.
+
+This is the same finding `bg-probe` reached from the other side: the photographer makes that
+separation by lifting the **subject** (+0.40 EV median) while the background stays put (+0.04). A
+global lift cannot express that, and the blown window is what it costs. Note this violates the v1
+success criterion "never clips highlights worse than the camera JPEG on any image" — check it
+against that row before treating it as a nicety.
+
 ## Baselines
 
 Every report compares against these. If the engine cannot beat them, it is not ready.
