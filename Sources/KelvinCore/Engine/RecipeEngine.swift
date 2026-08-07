@@ -18,7 +18,7 @@ import Foundation
 public enum RecipeEngine {
     /// Engine version, recorded in provenance so a recipe on disk can be traced to the rules
     /// that made it. Bump on any change that moves the numbers.
-    public static let version = "0.4.0"
+    public static let version = "0.4.1"
 
     /// Below this confidence the engine drops all *stylistic* moves (contrast shaping,
     /// vibrance, point placement) and keeps only *corrective* ones justified purely by
@@ -1117,7 +1117,7 @@ public enum RecipeEngine {
             nr = noisy ? 30 : (highISOProne ? 15 : 0)
         }
 
-        let sharpen: Double
+        var sharpen: Double
         switch p.scene {
         case .macro:              sharpen = 20
         case .landscape, .street: sharpen = 14
@@ -1125,6 +1125,13 @@ public enum RecipeEngine {
         case .event:              sharpen = p.subject.type == .person ? 0 : 10
         default:                  sharpen = 8
         }
+        // A person anywhere in frame caps it, whatever the scene was called — the same rule
+        // `localContrast` already applies. Without this the skin protection is enforced by the
+        // SCENE word rather than the SUBJECT word, so a frame of people read as `landscape` — which
+        // the model does; two men filling the frame were read that way on the owner's own library —
+        // is sharpened at 14 with no protection at all. `portrait` and `event`-with-person already
+        // resolve to 0, so this only ever tightens, never loosens.
+        if p.subject.present && p.subject.type == .person { sharpen = 0 }
 
         let nrAmount = roundedClamp(nr, to: 0...45, step: 1)
         guard nrAmount > 0 || sharpen > 0 else { return nil }

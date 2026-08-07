@@ -288,6 +288,36 @@ final class RecipeEngineTests: XCTestCase {
         XCTAssertEqual(d?.sharpen ?? 99, 0, "never sharpen a portrait, even at high ISO")
     }
 
+    /// The skin protection must key off the SUBJECT word, not the SCENE word. `localContrast`
+    /// already caps a person whatever the scene was called; `detail` did not, so a frame of people
+    /// misread as `landscape` — which the shipped model does — was sharpened at 14 with no
+    /// protection at all. A misread scene must not be able to switch skin protection off.
+    func testAPersonIsNeverSharpenedWhateverTheSceneIsCalled() {
+        for scene in [Scene.landscape, .street, .macro, .other] {
+            // At high ISO the NR limb keeps the block alive, so this asserts sharpen is zero
+            // *inside a Detail that exists* rather than passing on a nil block.
+            let firm = RecipeEngine.detail(perception(scene: scene, subjectType: .person), iso: 6400)
+            XCTAssertNotNil(firm, "ISO 6400 must still produce NR for a '\(scene)' frame")
+            XCTAssertEqual(firm?.sharpen ?? 99, 0,
+                           "a person read in a '\(scene)' frame must not be sharpened")
+
+            // At low ISO both limbs go to zero, so the whole block correctly drops out. `?? 0` is
+            // the honest reading: nil means no detail stage, which means no sharpening.
+            let clean = RecipeEngine.detail(perception(scene: scene, subjectType: .person), iso: 200)
+            XCTAssertEqual(clean?.sharpen ?? 0, 0,
+                           "a clean '\(scene)' frame with a person applies no sharpening")
+        }
+    }
+
+    /// The cap is a floor on protection, not a blanket mute: the same scenes without a person
+    /// keep their output sharpening, or the fix would have cost every landscape its crispness.
+    func testTheSameScenesStillSharpenWithoutAPerson() {
+        for scene in [Scene.landscape, .street, .macro] {
+            let d = RecipeEngine.detail(perception(scene: scene, subjectType: .none), iso: 200)
+            XCTAssertGreaterThan(d?.sharpen ?? 0, 0, "'\(scene)' with no person still sharpens")
+        }
+    }
+
     func testNoiseReductionScalesWithISO() {
         let lo = RecipeEngine.detail(perception(scene: .landscape), iso: 1600)?.nrLuma ?? 0
         let hi = RecipeEngine.detail(perception(scene: .landscape), iso: 3200)?.nrLuma ?? 0
