@@ -46,6 +46,11 @@ final class NoDeadControlsTests: XCTestCase {
             ("exposure_ev", { $0.exposureEV = 0.6 }),
             ("contrast",    { $0.contrast = 40 }),
             ("highlights",  { $0.highlights = -50 }),
+            // BOTH directions. `CIHighlightShadowAdjust`'s `inputHighlightAmount` has range 0…1,
+            // so `1.0 + h/100` was neutral for every positive value and the slider did nothing
+            // above zero. This suite missed it for exactly as long as it only tested −50 — a
+            // half-covered control is how a dead control hides.
+            ("highlights (positive)", { $0.highlights = 50 }),
             ("shadows",     { $0.shadows = 50 }),
             ("whites",      { $0.whites = 40 }),
             ("blacks",      { $0.blacks = -40 }),

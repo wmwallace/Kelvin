@@ -13,6 +13,15 @@ import CoreImage
 /// no-op" holds by construction, not by luck (docs/RECIPE-SCHEMA.md invariant #1).
 public enum Renderer {
 
+    /// How far a full `highlights: +100` lifts the three-quarter point, display-referred.
+    /// A `static` member inside the type rather than a top-level `let`, which CodeQL rejects.
+    ///
+    /// Chosen for SYMMETRY against `CIHighlightShadowAdjust`'s recovery limb rather than for a
+    /// corpus score — docs/EVALUATION.md is explicit that picking the best-scoring constant is how
+    /// this engine gets tuned into doing nothing, and that a constant belongs to a property. The
+    /// property here is that the slider behaves the same in both directions.
+    static let highlightLiftGain = 0.16
+
     /// Order of operations is fixed here in code, not implied by JSON key order (invariant #5):
     /// white balance → exposure → highlight/shadow → whites/blacks → contrast/saturation →
     /// clarity → vibrance → curve. (Curve precedes HSL in the schema; HSL is a later milestone.)
@@ -69,9 +78,18 @@ public enum Renderer {
 
         // Highlights / shadows recovery. CIHighlightShadowAdjust neutral is
         // highlightAmount = 1.0, shadowAmount = 0.0.
-        if g.highlights != 0 || g.shadows != 0 {
+        //
+        // ⚠️ `inputHighlightAmount` HAS RANGE 0…1, so `1.0 + h/100` is neutral for every POSITIVE
+        // `highlights` — the filter can only ever RECOVER (darken) highlights, never lift them.
+        // A positive value round-tripped through the schema, moved the slider, and rendered
+        // nothing: exactly the dead control `NoDeadControlsTests` exists to prevent, and the
+        // suite missed it because it only ever asserted `highlights = -50`. Verified by render:
+        // a mask carrying `highlights: 60` was identical to the base to 0.000 at every distance.
+        // So only the negative limb goes through this filter; the positive limb is a lift curve
+        // in the display-referred stage below, where a highlight move is predictable.
+        if g.highlights < 0 || g.shadows != 0 {
             img = img.applyingFilter("CIHighlightShadowAdjust", parameters: [
-                "inputHighlightAmount": 1.0 + (g.highlights / 100.0),
+                "inputHighlightAmount": 1.0 + (min(0, g.highlights) / 100.0),
                 "inputShadowAmount": g.shadows / 100.0
             ])
         }
@@ -100,8 +118,27 @@ public enum Renderer {
         // this bug, and moving them changed their strength enough to cost 5 ΔE on the engine
         // benchmark's flat case. Fix the thing that is broken, not everything nearby.
         let tonePass = g.whites != 0 || g.blacks != 0 || g.contrast != 0 || g.saturation != 0
-            || g.dehaze != 0
+            || g.dehaze != 0 || g.highlights > 0
         if tonePass { img = img.applyingFilter("CILinearToSRGBToneCurve") }
+
+        // The POSITIVE half of `highlights` (see the recovery filter above, which can only darken).
+        // Shaped like `whites` — anchored at both ends so nothing clips — but weighted higher up
+        // the range, because "highlights" is the top eighth where "whites" is the top quarter.
+        //
+        // `highlightLiftGain` is calibrated on a PROPERTY, not on corpus ΔE: the slider must be
+        // SYMMETRIC, so +50 lifts the highlight region by as much as −50 recovers it. That is
+        // pinned by `RendererFieldsTests.testHighlightsAreSymmetricAboutNeutral`; change the
+        // constant and the test tells you what it cost.
+        if g.highlights > 0 {
+            let h = g.highlights / 100.0
+            img = img.applyingFilter("CIToneCurve", parameters: [
+                "inputPoint0": CIVector(x: 0.0, y: 0.0),
+                "inputPoint1": CIVector(x: 0.5, y: 0.5),
+                "inputPoint2": CIVector(x: 0.75, y: clamp01(0.75 + h * Renderer.highlightLiftGain)),
+                "inputPoint3": CIVector(x: 0.9, y: clamp01(0.9 + h * Renderer.highlightLiftGain * 0.6)),
+                "inputPoint4": CIVector(x: 1.0, y: 1.0)
+            ])
+        }
 
         // Whites / blacks. Endpoint tone shaping: `blacks` moves the low quarter, `whites` the
         // high quarter, with pure black (0→0) and pure white (1→1) anchored so the range is
@@ -479,11 +516,30 @@ public enum Renderer {
         if let ev = a["exposure_ev"], ev != 0 {
             layer = layer.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: ev])
         }
-        if (a["highlights"] ?? 0) != 0 || (a["shadows"] ?? 0) != 0 {
+        // Same 0…1 clamp as the global stage: a mask's POSITIVE `highlights` was a silent no-op,
+        // verified by render (a subject mask at `highlights: 60` matched the base to 0.000 at
+        // feather 16 and at feather 30). Negative recovers here; positive lifts below.
+        if (a["highlights"] ?? 0) < 0 || (a["shadows"] ?? 0) != 0 {
             layer = layer.applyingFilter("CIHighlightShadowAdjust", parameters: [
-                "inputHighlightAmount": 1.0 + (a["highlights"] ?? 0) / 100.0,
+                "inputHighlightAmount": 1.0 + min(0, a["highlights"] ?? 0) / 100.0,
                 "inputShadowAmount": (a["shadows"] ?? 0) / 100.0
             ])
+        }
+        if let hi = a["highlights"], hi > 0 {
+            // The mask layer has no display-referred wrapper of its own, so the lift is applied
+            // through the same encode/decode the masked contrast path uses below, keeping the
+            // curve's control points in the numbers a photographer reads.
+            let h = hi / 100.0
+            layer = layer
+                .applyingFilter("CILinearToSRGBToneCurve")
+                .applyingFilter("CIToneCurve", parameters: [
+                    "inputPoint0": CIVector(x: 0.0, y: 0.0),
+                    "inputPoint1": CIVector(x: 0.5, y: 0.5),
+                    "inputPoint2": CIVector(x: 0.75, y: clamp01(0.75 + h * Renderer.highlightLiftGain)),
+                    "inputPoint3": CIVector(x: 0.9, y: clamp01(0.9 + h * Renderer.highlightLiftGain * 0.6)),
+                    "inputPoint4": CIVector(x: 1.0, y: 1.0)
+                ])
+                .applyingFilter("CISRGBToneCurveToLinear")
         }
         if (a["contrast"] ?? 0) != 0 || (a["saturation"] ?? 0) != 0 {
             // Display-referred, for exactly the reason the global tone stage is (see above):

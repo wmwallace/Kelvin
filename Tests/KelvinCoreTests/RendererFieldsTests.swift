@@ -17,6 +17,75 @@ final class RendererFieldsTests: XCTestCase {
 
     private func bytes(_ image: CIImage) throws -> Data { try ImageWriter.rgba8Bytes(image) }
 
+    /// Mean luma of the pixels that were in the highlight region BEFORE the edit, so both
+    /// directions are measured over the same set of pixels rather than over whatever each
+    /// result happens to push above a threshold.
+    private func highlightMean(_ image: CIImage, reference: CIImage) throws -> Double {
+        let a = try ImageWriter.rgba8Bytes(image), r = try ImageWriter.rgba8Bytes(reference)
+        var sum = 0.0, n = 0
+        for i in stride(from: 0, to: min(a.count, r.count), by: 4) {
+            let refLuma = (0.299 * Double(r[i]) + 0.587 * Double(r[i + 1]) + 0.114 * Double(r[i + 2])) / 255
+            guard refLuma > 0.75 else { continue }          // the highlight region, display-referred
+            sum += (0.299 * Double(a[i]) + 0.587 * Double(a[i + 1]) + 0.114 * Double(a[i + 2])) / 255
+            n += 1
+        }
+        return n > 0 ? sum / Double(n) : 0
+    }
+
+    /// A smooth ramp through the full range, so there are real highlight pixels to move.
+    private func makeRamp(width: Int = 64, height: Int = 8) -> CIImage {
+        let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+        let bpr = width * 4
+        var px = [UInt8](repeating: 255, count: bpr * height)
+        for y in 0..<height {
+            for x in 0..<width {
+                let v = UInt8(Double(x) / Double(width - 1) * 255)
+                let i = y * bpr + x * 4
+                px[i] = v; px[i + 1] = v; px[i + 2] = v; px[i + 3] = 255
+            }
+        }
+        let ctx = CGContext(data: &px, width: width, height: height, bitsPerComponent: 8,
+                            bytesPerRow: bpr, space: cs,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        return CIImage(cgImage: ctx.makeImage()!)
+    }
+
+    /// `highlights` must work in BOTH directions and by comparable amounts. The positive limb was
+    /// a silent no-op for the life of the project: `CIHighlightShadowAdjust`'s
+    /// `inputHighlightAmount` is clamped to 0…1, so `1.0 + h/100` is neutral for every h > 0.
+    ///
+    /// This also pins `Renderer.highlightLiftGain`. The constant is chosen on this PROPERTY —
+    /// a slider that behaves the same in both directions — rather than on a corpus score, which
+    /// docs/EVALUATION.md warns is how constants get tuned into doing nothing. If you change the
+    /// gain, this test tells you what the asymmetry cost.
+    func testHighlightsAreSymmetricAboutNeutral() throws {
+        let src = makeRamp()
+        let flat = Renderer.render(src, with: recipe())
+        let up = Renderer.render(src, with: recipe { $0.highlights = 50 })
+        let down = Renderer.render(src, with: recipe { $0.highlights = -50 })
+
+        let base = try highlightMean(flat, reference: flat)
+        let lifted = try highlightMean(up, reference: flat)
+        let recovered = try highlightMean(down, reference: flat)
+
+        XCTAssertGreaterThan(lifted, base + 0.005, "highlights +50 must LIFT the highlight region")
+        XCTAssertLessThan(recovered, base - 0.005, "highlights −50 must RECOVER the highlight region")
+
+        let liftAmount = lifted - base, recoverAmount = base - recovered
+        XCTAssertEqual(liftAmount, recoverAmount, accuracy: max(0.02, recoverAmount * 0.6),
+                       "the slider must move comparably in both directions — "
+                       + "lift \(liftAmount), recover \(recoverAmount)")
+    }
+
+    /// The no-op invariant, restated for the limb that just gained a filter: zero must still
+    /// render byte-identically, or docs/RECIPE-SCHEMA.md invariant #1 is broken.
+    func testHighlightsZeroIsStillAByteIdenticalNoOp() throws {
+        let src = makeRamp()
+        XCTAssertEqual(try bytes(Renderer.render(src, with: recipe { $0.highlights = 0 })),
+                       try bytes(Renderer.render(src, with: recipe())),
+                       "highlights = 0 must add no filter at all")
+    }
+
     /// A hard vertical edge (left black, right white) — clarity/unsharp is a no-op on a smooth
     /// gradient, so local contrast needs a real edge to act on.
     private func makeSplitImage(width: Int = 48, height: Int = 48) -> CIImage {

@@ -37,14 +37,19 @@ final class MaskAdjustmentTests: XCTestCase {
     /// `Renderer.applyMaskedAdjustments` exactly — a typo here is a slider that moves and does
     /// nothing.
     ///
-    /// `highlights` is recovery-only, and that is a real limitation rather than a preference:
-    /// `CIHighlightShadowAdjust` documents its highlight amount as 0…1 with 1.0 meaning no change,
-    /// so the renderer's `1.0 + highlights/100` clamps for any positive value. Measured at exactly
-    /// ΔE 0.0 — a dead control, found by this test. The panel therefore offers -100…0 only.
+    /// `highlights` WAS recovery-only, because `CIHighlightShadowAdjust` documents its highlight
+    /// amount as 0…1 with 1.0 meaning no change, so `1.0 + highlights/100` clamped for any positive
+    /// value — measured at exactly ΔE 0.0, a dead control found by this test. The renderer no
+    /// longer depends on that filter for the positive limb (see `Renderer.highlightLiftGain`), so
+    /// the set is now empty and every exposed key is live in both directions.
+    ///
+    /// ⚠️ THE PANEL STILL OFFERS -100…0. This table describes what the RENDERER honours; widening
+    /// the slider is a UI change and the owner's call. Kept as a set rather than deleted because
+    /// it is the right place to record the next such limitation.
     /// Derived from `Mask.adjustmentKeys` rather than hand-listed, so adding a key to the
     /// renderer's contract without proving it is live fails here instead of shipping a dead
     /// slider. `positiveWorks` is the per-key exception, not the source of the key list.
-    private static let positiveIsDead: Set<String> = ["highlights"]
+    private static let positiveIsDead: Set<String> = []
     private static let exposed: [(key: String, positiveWorks: Bool)] =
         Mask.adjustmentKeys.map { ($0, !positiveIsDead.contains($0)) }
 
@@ -70,11 +75,23 @@ final class MaskAdjustmentTests: XCTestCase {
         }
     }
 
-    /// Pins the limitation itself, so if a future Core Image release starts honouring values above
-    /// 1.0 this fails and the panel can open the range back up.
-    func testPositiveHighlightsIsStillInertAndSoIsNotOffered() throws {
-        XCTAssertEqual(try differs(render([:]), render(["highlights": 60])), 0, accuracy: 0.01,
-                       "positive highlights now does something — widen the slider range")
+    /// This used to pin the LIMITATION — "positive highlights is inert, so the panel does not
+    /// offer it" — and waited for a Core Image release that honours values above 1.0. That wait is
+    /// over because the lift no longer goes through `CIHighlightShadowAdjust` at all: the negative
+    /// limb still does, and the positive limb is a display-referred tone curve in `Renderer`
+    /// (`highlightLiftGain`). Apple's clamp is unchanged; we stopped depending on it.
+    ///
+    /// It matters beyond the slider: `LookPreset.highlightsBias` is documented as "lifts them —
+    /// film's soft, bloomy top end" and one shipped look sets +6, which rendered as nothing.
+    ///
+    /// ⚠️ The mask panel's range is still recovery-only. Opening it up is a UI change and the
+    /// owner's call; this test now guards the renderer half so that decision is unblocked.
+    func testPositiveHighlightsLiftsNowThatItDoesNotUseTheClampedFilter() throws {
+        XCTAssertGreaterThan(try differs(render([:]), render(["highlights": 60])), 0.5,
+                             "positive highlights must lift — it is no longer a dead direction")
+        // And the negative direction must not have been disturbed by the split.
+        XCTAssertGreaterThan(try differs(render([:]), render(["highlights": -60])), 0.5,
+                             "negative highlights must still recover")
     }
 
     /// Negative values must work too. That is precisely how the clarity/texture bug hid: the
