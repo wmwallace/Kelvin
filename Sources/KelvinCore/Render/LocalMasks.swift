@@ -28,13 +28,24 @@ public enum LocalMasks {
         /// mask is the thing the perception read was talking about. See `RecipeEngine.subjectMask`.
         public let subjectOrigin: SubjectMask.Origin?
 
+        /// True when `subjectLuma` is METERED SKIN rather than the whole subject.
+        ///
+        /// This matters to the engine and it is not a detail. `subjectLuma` is compared against the
+        /// frame median to size the lift, so when it is skin the rule is measuring how far a
+        /// person's SKIN sits from the frame's average brightness — and a darker-skinned subject
+        /// measures further from it while being correctly exposed. The engine caps the lift when
+        /// this is set; see `RecipeEngine.subjectMask`.
+        public let subjectLumaIsSkin: Bool
+
         public init(bitmaps: [String: CIImage], subjectLuma: Double?, skyLuma: Double?,
-                    subjectOrigin: SubjectMask.Origin? = nil, backgroundLuma: Double? = nil) {
+                    subjectOrigin: SubjectMask.Origin? = nil, backgroundLuma: Double? = nil,
+                    subjectLumaIsSkin: Bool = false) {
             self.bitmaps = bitmaps
             self.subjectLuma = subjectLuma
             self.skyLuma = skyLuma
             self.subjectOrigin = subjectOrigin
             self.backgroundLuma = backgroundLuma
+            self.subjectLumaIsSkin = subjectLumaIsSkin
         }
     }
 
@@ -45,6 +56,7 @@ public enum LocalMasks {
         var subjectLuma: Double?
         var skyLuma: Double?
         var subjectOrigin: SubjectMask.Origin?
+        var subjectLumaIsSkin = false
 
         if let found = SubjectMask.subjectWithOrigin(in: image) {
             let subject = found.mask
@@ -55,7 +67,7 @@ public enum LocalMasks {
             // decision actually cares about, and metering (not classifying) skin keeps the
             // recovery tone-fair. The whole-person mask still carries the lift.
             let face = FaceSkin.read(in: image)
-            if let skin = face.skinLuma { subjectLuma = skin }
+            if let skin = face.skinLuma { subjectLuma = skin; subjectLumaIsSkin = true }
         }
         if var sky = SkyMask.detect(in: image) {
             // Subtract the subject from the sky so sky adjustments never touch a person standing
@@ -81,7 +93,8 @@ public enum LocalMasks {
         let backgroundLuma = SubjectMask.maskedMeanLuma(image: image, mask: background)
 
         return Measured(bitmaps: bitmaps, subjectLuma: subjectLuma, skyLuma: skyLuma,
-                        subjectOrigin: subjectOrigin, backgroundLuma: backgroundLuma)
+                        subjectOrigin: subjectOrigin, backgroundLuma: backgroundLuma,
+                        subjectLumaIsSkin: subjectLumaIsSkin)
     }
 
     /// The derived background: `1 − subject − sky`, pointwise. The three masks partition the

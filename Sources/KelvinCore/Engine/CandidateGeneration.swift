@@ -29,14 +29,15 @@ public extension RecipeEngine {
         iso: Double? = nil,
         engineVersion: String = version,
         perceptionHash: String? = nil,
-        generatedAt: String? = nil
+        generatedAt: String? = nil,
+        subjectLumaIsSkin: Bool = false
     ) -> [Recipe] {
         CandidateStyle.all.map { style in
             candidate(
                 perception: p, statistics: s, style: style,
                 subjectLuma: subjectLuma, skyLuma: skyLuma, subjectOrigin: subjectOrigin, iso: iso,
                 engineVersion: engineVersion, perceptionHash: perceptionHash,
-                generatedAt: generatedAt
+                generatedAt: generatedAt, subjectLumaIsSkin: subjectLumaIsSkin
             )
         }
     }
@@ -52,12 +53,13 @@ public extension RecipeEngine {
         iso: Double? = nil,
         engineVersion: String = version,
         perceptionHash: String? = nil,
-        generatedAt: String? = nil
+        generatedAt: String? = nil,
+        subjectLumaIsSkin: Bool = false
     ) -> Recipe {
         var g = GlobalAdjustments.neutral
 
         // --- Shared corrective baseline (identical across styles) ---
-        g.exposureEV = exposure(p, s)
+        g.exposureEV = exposure(p, s, subjectLuma: subjectLuma)
         g.highlights = highlightRecovery(p, s)
         g.shadows = shadowLift(p, s)
         g.dehaze = dehazeAmount(p, s, skyLuma: skyLuma)
@@ -147,7 +149,8 @@ public extension RecipeEngine {
             // The subject lift is corrective and shared; the SKY carries the style's opinion. It
             // used to be shared too, which meant Dramatic and Soft emitted the same sky mask.
             masks: localMasks(p, s, subjectLuma: subjectLuma, skyLuma: skyLuma,
-                              subjectOrigin: subjectOrigin, style: style),
+                              subjectOrigin: subjectOrigin, style: style,
+                              subjectLumaIsSkin: subjectLumaIsSkin),
             detail: detail(p, iso: iso),
             geometry: nil
         )

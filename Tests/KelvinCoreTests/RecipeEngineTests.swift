@@ -274,6 +274,56 @@ final class RecipeEngineTests: XCTestCase {
         XCTAssertEqual(s.chromaB, 0, accuracy: 1.0)
     }
 
+    // MARK: - The face cap
+
+    /// `LocalMasks` prefers metered SKIN for `subjectLuma` when a face is present, and the lift is
+    /// half the gap from that skin to the FRAME MEDIAN. A darker-skinned subject measures further
+    /// from the median while correctly exposed, so the rule prescribes a bigger lift for them —
+    /// measured on a real frame at +0.56 EV and +35 shadows on a face. The engine cannot separate
+    /// "in shadow" from "darker skin" on one frame, so where it cannot tell, it commits least.
+    func testAMeteredFaceCapsTheSubjectLift() {
+        let p = perception(scene: .portrait, subjectType: .person)
+        let s = ImageStatistics(
+            meanLuma: 0.42, medianLuma: 0.42, blackPoint: 0.02, shadowLevel: 0.06,
+            highlightLevel: 0.80, whitePoint: 0.86, highlightClip: 0, shadowClip: 0,
+            chromaA: 0, chromaB: 0, shadowMass: 0, shadowRegion: 0)
+
+        // Same dark subject, measured two ways.
+        let fromWholeSubject = RecipeEngine.subjectMask(
+            p, s, subjectLuma: 0.16, subjectOrigin: .person, subjectLumaIsSkin: false)
+        let fromMeteredSkin = RecipeEngine.subjectMask(
+            p, s, subjectLuma: 0.16, subjectOrigin: .person, subjectLumaIsSkin: true)
+
+        let uncapped = fromWholeSubject?.adjustments["exposure_ev"] ?? 0
+        let capped = fromMeteredSkin?.adjustments["exposure_ev"] ?? 0
+        XCTAssertGreaterThan(uncapped, capped, "a metered face must be lifted less, not the same")
+        // The mask applies `ev * 0.7`, so the cap shows through at 0.7 of it — plus one step of
+        // the recipe's 0.01 quantisation, which rounds 0.175 up to 0.18.
+        XCTAssertLessThanOrEqual(capped, RecipeEngine.faceLiftCapEV * 0.7 + 0.01,
+                                 "the face cap must bind")
+        // Shadows are derived from the same ev, so they are capped by construction.
+        XCTAssertLessThanOrEqual(fromMeteredSkin?.adjustments["shadows"] ?? 99,
+                                 RecipeEngine.faceLiftCapEV * 45 + 1)
+    }
+
+    /// The cap must not quietly become a global restraint on every subject. A sea stack has no
+    /// skin, nothing is being conflated, and the calibrated lift stands.
+    func testTheCapDoesNotTouchASubjectThatIsNotSkin() {
+        let p = perception(scene: .landscape, subjectType: .naturalFeature)
+        let s = ImageStatistics(
+            meanLuma: 0.42, medianLuma: 0.42, blackPoint: 0.02, shadowLevel: 0.06,
+            highlightLevel: 0.80, whitePoint: 0.86, highlightClip: 0, shadowClip: 0,
+            chromaA: 0, chromaB: 0, shadowMass: 0, shadowRegion: 0)
+        let m = RecipeEngine.subjectMask(p, s, subjectLuma: 0.16, subjectLumaIsSkin: false)
+        XCTAssertGreaterThan(m?.adjustments["exposure_ev"] ?? 0, RecipeEngine.faceLiftCapEV * 0.7,
+                             "a non-skin subject keeps the calibrated lift")
+    }
+
+    func testTheFaceCapIsInTheTuningSignature() {
+        XCTAssertTrue(RecipeEngine.tuningSignature.contains("faceCap:"),
+                      "a sweep of the face cap would be served cached recipes without this")
+    }
+
     // MARK: - Highlight headroom (the loop that was open)
 
     /// Builds statistics with a given white point; everything else neutral-ish.

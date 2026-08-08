@@ -139,7 +139,8 @@ public enum ShippedCandidates {
             subjectOrigin: masks.subjectOrigin,
             iso: iso,
             perceptionHash: perceptionHash,
-            generatedAt: generatedAt
+            generatedAt: generatedAt,
+            subjectLumaIsSkin: masks.subjectLumaIsSkin
         )
 
         // ONE face detection for the whole set, not one per candidate — the app's optimisation and

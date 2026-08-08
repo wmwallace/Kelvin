@@ -18,13 +18,39 @@ import Foundation
 public enum RecipeEngine {
     /// Engine version, recorded in provenance so a recipe on disk can be traced to the rules
     /// that made it. Bump on any change that moves the numbers.
-    public static let version = "0.5.1"
+    public static let version = "0.6.0"
 
     /// Below this confidence the engine drops all *stylistic* moves (contrast shaping,
     /// vibrance, point placement) and keeps only *corrective* ones justified purely by
     /// measurement (exposure toward a mid target, highlight/shadow recovery, cast removal).
     /// Rationale: docs/RECIPE-SCHEMA.md — a low-confidence read should not commit to a look.
     public static let confidenceFloor = 0.5
+
+    /// How much darker than its own frame a subject must be before the exposure rules treat it as
+    /// needing help. The same value `subjectMask` uses for `backlit`, deliberately: two rules that
+    /// disagree about what a dark subject is produce a lift with no mask or a mask with no lift.
+    /// The ceiling on a subject lift WHEN THE SUBJECT LUMA IS METERED SKIN.
+    ///
+    /// `LocalMasks` prefers metered skin for `subjectLuma` when a face is present, and the lift is
+    /// then half the gap between that skin and the FRAME MEDIAN. Metering rather than classifying
+    /// keeps the engine from ever branching on skin tone — but the target is still a frame-relative
+    /// brightness, so a darker-skinned subject measures further from it while correctly exposed and
+    /// the rule prescribes a bigger lift. On a real frame (Cannon Beach, skin luma 0.160, frame
+    /// median 0.41) that produced +0.56 EV and +35 shadows on a face, visibly lightening it.
+    ///
+    /// No single frame can separate "in shadow" from "darker skin", so the engine stops trying to
+    /// and stops short instead. 0.25 sits well under the +0.40 EV median that `bg-probe` measured
+    /// the photographer applying by hand, so the cap can only ever leave a face closer to how it
+    /// was captured. Owner decision, 7 Aug 2026.
+    static var faceLiftCapEV: Double {
+        ProcessInfo.processInfo.environment["KELVIN_FACE_LIFT_CAP"]
+            .flatMap(Double.init).map { min(0.85, max(0.0, $0)) } ?? 0.25
+    }
+
+    static var subjectDeficitFloor: Double {
+        ProcessInfo.processInfo.environment["KELVIN_SUBJECT_DEFICIT"]
+            .flatMap(Double.init).map { min(0.5, max(0.0, $0)) } ?? 0.12
+    }
 
     /// Where the white point is allowed to land after the whole recipe, and how hard `highlights`
     /// buys back an overshoot. See `highlightHeadroom`. Env-overridable and in `tuningSignature`,
@@ -77,7 +103,9 @@ public enum RecipeEngine {
             "wbEdgeP:\(ImageStatistics.edgeMinkowskiP)",
             "wbDeadband:\(castDeadband)",
             "clipCeiling:\(clipCeiling)",
-            "headroomGain:\(headroomGain)/\(headroomCap)"
+            "headroomGain:\(headroomGain)/\(headroomCap)",
+            "subjectDeficit:\(subjectDeficitFloor)",
+            "faceCap:\(faceLiftCapEV)"
         ].joined(separator: ";")
     }
 
@@ -213,7 +241,7 @@ public enum RecipeEngine {
         let confident = p.confidence >= confidenceFloor
 
         var g = GlobalAdjustments.neutral
-        g.exposureEV = exposure(p, s)
+        g.exposureEV = exposure(p, s, subjectLuma: subjectLuma)
         g.highlights = highlightRecovery(p, s)
         g.shadows = shadowLift(p, s)
         g.dehaze = dehazeAmount(p, s, skyLuma: skyLuma)
@@ -294,7 +322,8 @@ public enum RecipeEngine {
     ///   fires for a dog, so the fallback IS how you get one, and "the salient object" is a fair
     ///   description of a photograph of an animal in a way it is not of a landscape with people in it.
     static func subjectMask(_ p: Perception, _ s: ImageStatistics, subjectLuma: Double?,
-                            subjectOrigin: SubjectMask.Origin? = nil) -> Mask? {
+                            subjectOrigin: SubjectMask.Origin? = nil,
+                            subjectLumaIsSkin: Bool = false) -> Mask? {
         // `naturalFeature` is admitted by owner decision (1 Aug 2026): a sea stack read as the
         // subject is eligible for the same corrective lift as an animal, riding the salient
         // fallback. It is NOT a warm subject (no skin-hue claim) — `warmSubject` stays
@@ -327,7 +356,10 @@ public enum RecipeEngine {
         // sub-1.0 arm scales the lift without also tightening its ceiling.
         let scale = subjectOrigin == .foreground ? SalientLift.scale : 1.0
         let cap = max(1.0, scale)
-        let ev = roundedClamp(lift * scale, to: 0...(0.85 * cap), step: 0.01)
+        var ev = roundedClamp(lift * scale, to: 0...(0.85 * cap), step: 0.01)
+        // A face is where this rule is least able to tell light from skin, so it is where the
+        // engine commits least. See `faceLiftCapEV`.
+        if subjectLumaIsSkin { ev = min(ev, faceLiftCapEV) }
         guard ev > 0.05 else { return nil }
 
         return Mask(
@@ -367,9 +399,11 @@ public enum RecipeEngine {
     static func localMasks(
         _ p: Perception, _ s: ImageStatistics, subjectLuma: Double?, skyLuma: Double?,
         subjectOrigin: SubjectMask.Origin? = nil,
-        style: CandidateStyle = .natural
+        style: CandidateStyle = .natural,
+        subjectLumaIsSkin: Bool = false
     ) -> [Mask]? {
-        let ms = [subjectMask(p, s, subjectLuma: subjectLuma, subjectOrigin: subjectOrigin),
+        let ms = [subjectMask(p, s, subjectLuma: subjectLuma, subjectOrigin: subjectOrigin,
+                              subjectLumaIsSkin: subjectLumaIsSkin),
                   skyMask(p, s, skyLuma: skyLuma, style: style)].compactMap { $0 }
         return ms.isEmpty ? nil : ms
     }
@@ -609,18 +643,33 @@ public enum RecipeEngine {
     /// Move the median toward a scene-appropriate target and express the move in stops.
     /// EV = log2(target / current) is the physically correct way to say "make it this much
     /// brighter," and it self-limits: a frame already near target barely moves.
-    public static func exposure(_ p: Perception, _ s: ImageStatistics) -> Double {
+    public static func exposure(_ p: Perception, _ s: ImageStatistics,
+                                subjectLuma: Double? = nil) -> Double {
         let median = max(0.02, s.medianLuma)
+
+        // A subject measurably darker than its own frame re-opens the guard below, and is the
+        // MEASUREMENT that replaces `underexposed-subject`. Removing that claim was right — it
+        // fired on 42% of a real corpus and on 17 of 77 frames its net effect was to darken the
+        // picture — but removing it also took away the only way this rule could hear that a
+        // backlit subject needs help, and the reported symptom was exactly that: subjects coming
+        // out much darker. The same deficit and the same 0.12 that `subjectMask` calls `backlit`,
+        // so the two rules cannot disagree about what a dark subject is.
+        let deficit = subjectLuma.map { median - $0 } ?? 0
+        let darkSubject = deficit > subjectDeficitFloor
 
         // Leave a reasonably-exposed frame ALONE. A finished photo is already where the
         // photographer wants it; nudging its exposure toward a generic target only fights their
-        // intent.
-        //
-        // This guard used to be defeated by `!flagged`, so an `underexposed-subject` claim — which
-        // the model made on 42% of a real corpus — pulled ordinary frames back into the rule. On 17
-        // of 77 frames the net effect was to DARKEN the picture. The guard is now unconditional.
-        if median >= 0.30 && median <= 0.60 { return 0 }
+        // intent — unless the thing the photograph is OF is sitting in a hole.
+        if !darkSubject && median >= 0.30 && median <= 0.60 { return 0 }
 
+        // ⚠️ DELIBERATELY NOT scaled by the deficit. Raising the target with `median - subjectLuma`
+        // was tried and reverted the same day: a darker-skinned subject has a lower `subjectLuma`
+        // WHEN CORRECTLY EXPOSED, so that deficit is systematically larger for them and the rule
+        // would brighten darker skin harder — pulling it toward a lighter norm, which is exactly
+        // what `subjectMask` forbids in writing ("never pulls skin toward a universal target
+        // brightness"). A whole-frame lever cannot make a subject-relative judgement safely.
+        // Re-opening the guard is all this rule does; the LIFT belongs to the subject mask, which
+        // is scene-relative by construction.
         let target = exposureTarget(p.scene)
 
         // Gentle pull (0.6), and a deadband so tiny corrections don't happen. Global exposure is
