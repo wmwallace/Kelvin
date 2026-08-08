@@ -125,6 +125,12 @@ public extension RecipeEngine {
             g.blacks = roundedClamp(g.blacks * 0.4, to: -30...0, step: 1)
         }
 
+        // LAST, because it has to see the finished recipe. Every lever above brightens the frame
+        // and `highlightRecovery` was sized from the untouched source, so this is the only place
+        // that knows what the whole edit did to the top end. Applied after the corrective layer
+        // too — a corrective style lifts less, and should therefore buy back less.
+        g.highlights = roundedClamp(g.highlights + highlightHeadroom(g, s), to: -85...0, step: 1)
+
         return Recipe(
             schemaVersion: Recipe.currentSchemaVersion,
             id: style.id,

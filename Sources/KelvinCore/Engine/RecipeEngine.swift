@@ -18,13 +18,36 @@ import Foundation
 public enum RecipeEngine {
     /// Engine version, recorded in provenance so a recipe on disk can be traced to the rules
     /// that made it. Bump on any change that moves the numbers.
-    public static let version = "0.5.0"
+    public static let version = "0.5.1"
 
     /// Below this confidence the engine drops all *stylistic* moves (contrast shaping,
     /// vibrance, point placement) and keeps only *corrective* ones justified purely by
     /// measurement (exposure toward a mid target, highlight/shadow recovery, cast removal).
     /// Rationale: docs/RECIPE-SCHEMA.md — a low-confidence read should not commit to a look.
     public static let confidenceFloor = 0.5
+
+    /// Where the white point is allowed to land after the whole recipe, and how hard `highlights`
+    /// buys back an overshoot. See `highlightHeadroom`. Env-overridable and in `tuningSignature`,
+    /// so they can be swept without a rebuild and a sweep cannot be served cached recipes.
+    static var clipCeiling: Double {
+        ProcessInfo.processInfo.environment["KELVIN_CLIP_CEILING"]
+            .flatMap(Double.init).map { min(1.2, max(0.80, $0)) } ?? 0.98
+    }
+    static var headroomGain: Double {
+        ProcessInfo.processInfo.environment["KELVIN_HEADROOM_GAIN"]
+            .flatMap(Double.init).map { min(600, max(0, $0)) } ?? 200
+    }
+    /// How far the guard may go on its own. Recovery is a real cost — past a point it flattens the
+    /// top end rather than saving it — so this is a taste ceiling, not a safety one.
+    /// 70 chosen by sweep on a held-out backlit interior, on the PROPERTY that the rendered frame
+    /// must not clip more than ~1pp worse than its own source — not on corpus ΔE. At 45 the guard
+    /// saturated and left +1.74pp; at 70 it reaches +0.87pp, and the picture gains readable blind
+    /// slats in a window that was paper white. Above 70 nothing changes: the sum hits the −85
+    /// clamp first. Frames with no overshoot are untouched at any value.
+    static var headroomCap: Double {
+        ProcessInfo.processInfo.environment["KELVIN_HEADROOM_CAP"]
+            .flatMap(Double.init).map { min(85, max(0, $0)) } ?? 70
+    }
 
     /// Everything overridable from the environment that changes what the engine emits, as one
     /// string, so a cache of engine output can be keyed on it.
@@ -52,7 +75,9 @@ public enum RecipeEngine {
             "salientLift:\(SalientLift.scale)",
             "wbEstimator:\(estimator.rawValue)",
             "wbEdgeP:\(ImageStatistics.edgeMinkowskiP)",
-            "wbDeadband:\(castDeadband)"
+            "wbDeadband:\(castDeadband)",
+            "clipCeiling:\(clipCeiling)",
+            "headroomGain:\(headroomGain)/\(headroomCap)"
         ].joined(separator: ";")
     }
 
@@ -219,6 +244,9 @@ public enum RecipeEngine {
             // and is deliberately not being invented in the same change as the deletion.
             g.vibrance = 0
         }
+
+        // Last, for the reason given on `highlightHeadroom`: it has to see the finished recipe.
+        g.highlights = roundedClamp(g.highlights + highlightHeadroom(g, s), to: -85...0, step: 1)
 
         let label = confident ? "Natural" : "Natural (uncertain)"
 
@@ -630,6 +658,41 @@ public enum RecipeEngine {
         let fromBright = max(0, (s.highlightLevel - 0.90) * 200)   // only a bright top end → recover
         let amount = max(fromClip, fromBright)
         return -roundedClamp(amount, to: 0...85, step: 1)
+    }
+
+    /// Close the loop on highlights.
+    ///
+    /// `highlightRecovery` is sized from the SOURCE's clipping, and then exposure, contrast and
+    /// the endpoints brighten the frame with nothing looking again — every `highlightClip`
+    /// reference in this file reads the input statistic. Measured on the default candidate, a
+    /// backlit interior went from 0.673% of pixels at/above 254 to **8.311%**: a window with cloud
+    /// detail in the original rendering as paper white. That fails the v1 criterion "never clips
+    /// highlights worse than the camera JPEG on any image" (docs/EVALUATION.md).
+    ///
+    /// So predict where the white point lands after the levers that lift it, and buy back the
+    /// overshoot with `highlights` — the lever that exists to do exactly this.
+    ///
+    /// ⚠️ This is a PREDICTION, not a measurement of the render. It models the three levers that
+    /// dominate the top end and deliberately not the S-curve or fusion: the curve is anchored at
+    /// 1.0 and fusion mostly opens shadows, so including them was over-correction on frames that
+    /// did not need it. The honest fix is to measure the rendered result, which needs a render
+    /// inside the engine and is a bigger change than this one.
+    ///
+    /// `p99.5` is the anchor rather than `highlightClip` because it is where the brightest REAL
+    /// content sits — a frame can have a specular pixel at 255 and acres of headroom.
+    static func highlightHeadroom(_ g: GlobalAdjustments, _ s: ImageStatistics) -> Double {
+        // Exposure is multiplicative on luminance.
+        var predicted = s.whitePoint * pow(2, g.exposureEV)
+        // Display-referred contrast expands about 0.5 with the renderer's own gain (Renderer:124).
+        if g.contrast != 0 {
+            predicted = 0.5 + (predicted - 0.5) * (1 + g.contrast / 100 * 0.6)
+        }
+        // `whites` lifts the three-quarter knot by w × 0.22 (Renderer:116) and is anchored at 1.0,
+        // so at p99.5 only part of that rise is felt. 0.35 of it, measured against the curve.
+        predicted += g.whites / 100 * 0.22 * 0.35
+        let overshoot = predicted - clipCeiling
+        guard overshoot > 0 else { return 0 }
+        return -roundedClamp(overshoot * headroomGain, to: 0...headroomCap, step: 1)
     }
 
     /// Positive shadows lift crushed darks. Measured shadow clip sets the magnitude; two

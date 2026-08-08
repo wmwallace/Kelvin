@@ -653,9 +653,31 @@ with cloud detail in the original renders as paper white.
 
 This is the same finding `bg-probe` reached from the other side: the photographer makes that
 separation by lifting the **subject** (+0.40 EV median) while the background stays put (+0.04). A
-global lift cannot express that, and the blown window is what it costs. Note this violates the v1
-success criterion "never clips highlights worse than the camera JPEG on any image" — check it
-against that row before treating it as a nicety.
+global lift cannot express that, and the blown window is what it costs.
+
+**Half-closed, 7 August 2026.** `highlightHeadroom` predicts where p99.5 lands after exposure,
+contrast and the endpoints, and buys the overshoot back in `highlights`. Measured as clipped-pixel
+fraction against each frame's own source — the right instrument here, because the criterion is
+per-frame worst case and a corpus mean cannot see it:
+
+| | guard off | guard on |
+|---|---|---|
+| worst regression over source | +2.003pp | **+1.073pp** |
+| frames worse by >1pp | 2 of 4 | 1 of 4 |
+| frames with headroom | +0.000pp | +0.000pp |
+
+Corpus: engine-default 7.47 → 7.44, 12 frames better / 2 worse, ruined frames unchanged at 3, no-op
+77/77. By eye the window regains readable blind slats where it was paper white, and nothing outside
+the highlight region moves.
+
+⚠️ **Still only half.** It is a PREDICTION, not a measurement of the render, and it cannot recover
+what a global lift already destroyed — the remaining +1.07pp needs the subject lifted by a MASK
+rather than by exposure, which is what the photographer does. The constants (`KELVIN_CLIP_CEILING`,
+`KELVIN_HEADROOM_GAIN`, `KELVIN_HEADROOM_CAP`) were chosen on that clipping property, not on ΔE.
+
+⚠️ `highlights` is consequently the one corrective lever that is NOT shared across candidates: the
+guard has to read each style's own contrast and endpoints, or it under-protects the style that
+lifts hardest. `CandidateGenerationTests` pins the surviving invariant — monotone, not identical.
 
 ## Baselines
 

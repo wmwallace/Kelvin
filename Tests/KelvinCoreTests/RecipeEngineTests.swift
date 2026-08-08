@@ -274,6 +274,64 @@ final class RecipeEngineTests: XCTestCase {
         XCTAssertEqual(s.chromaB, 0, accuracy: 1.0)
     }
 
+    // MARK: - Highlight headroom (the loop that was open)
+
+    /// Builds statistics with a given white point; everything else neutral-ish.
+    private func stats(whitePoint: Double, median: Double = 0.25) -> ImageStatistics {
+        ImageStatistics(
+            meanLuma: median, medianLuma: median, blackPoint: 0.02, shadowLevel: 0.05,
+            highlightLevel: whitePoint * 0.9, whitePoint: whitePoint,
+            highlightClip: 0, shadowClip: 0, chromaA: 0, chromaB: 0,
+            shadowMass: 0, shadowRegion: 0
+        )
+    }
+
+    /// A frame with headroom must not be touched. This is the half that keeps the guard from
+    /// becoming a global darkening: measured on two forest frames it moved clipping 0.000 → 0.000.
+    func testAFrameWithHeadroomGetsNoExtraRecovery() {
+        var g = GlobalAdjustments.neutral
+        g.exposureEV = 0.3
+        XCTAssertEqual(RecipeEngine.highlightHeadroom(g, stats(whitePoint: 0.55)), 0,
+                       "a frame nowhere near clipping must not be pulled down")
+    }
+
+    /// ...and a frame with none must be. `highlightRecovery` sizes itself from the SOURCE, so
+    /// without this the exposure lift blows the top end and nothing looks again.
+    func testAFrameWithNoHeadroomBuysItBack() {
+        var lifted = GlobalAdjustments.neutral
+        lifted.exposureEV = 0.9
+        let guarded = RecipeEngine.highlightHeadroom(lifted, stats(whitePoint: 0.97))
+        XCTAssertLessThan(guarded, 0, "lifting a frame already at the white point must buy back")
+
+        // And the size must scale with the overshoot, not step.
+        var gentler = GlobalAdjustments.neutral
+        gentler.exposureEV = 0.3
+        XCTAssertGreaterThan(RecipeEngine.highlightHeadroom(gentler, stats(whitePoint: 0.97)), guarded,
+                             "a smaller lift must buy back less")
+    }
+
+    /// The guard reads `exposureEV`, `contrast` and `whites`, so it has to run after them. If it
+    /// were computed before the style layer it would price a recipe that does not exist.
+    func testTheGuardRespondsToTheLeversThatLiftTheFrame() {
+        // Deliberately a SMALL overshoot: at a large one both arms saturate at the cap and the
+        // comparison silently becomes -70 vs -70, which passes for the wrong reason.
+        let s = stats(whitePoint: 0.90)
+        var exposureOnly = GlobalAdjustments.neutral; exposureOnly.exposureEV = 0.18
+        var plusContrast = exposureOnly; plusContrast.contrast = 30
+        let a = RecipeEngine.highlightHeadroom(exposureOnly, s)
+        let b = RecipeEngine.highlightHeadroom(plusContrast, s)
+        XCTAssertGreaterThan(a, -RecipeEngine.headroomCap, "arm A must not be saturated")
+        XCTAssertLessThan(b, a, "contrast expands about 0.5 and pushes the top end further")
+    }
+
+    /// A sweep and a cache are natural enemies (docs/EVALUATION.md). Both knobs must be in the
+    /// signature or an arm gets served the previous arm's recipes and prints an identical number.
+    func testTheHeadroomKnobsAreInTheTuningSignature() {
+        let sig = RecipeEngine.tuningSignature
+        XCTAssertTrue(sig.contains("clipCeiling:"), "clipCeiling missing from tuningSignature")
+        XCTAssertTrue(sig.contains("headroomGain:"), "headroomGain missing from tuningSignature")
+    }
+
     // MARK: - Detail: noise reduction sized from ISO
 
     func testLowISONoNoiseReduction() {

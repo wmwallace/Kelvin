@@ -57,9 +57,35 @@ final class CandidateGenerationTests: XCTestCase {
         let first = candidates[0].global
         for c in candidates.dropFirst() {
             XCTAssertEqual(c.global.exposureEV, first.exposureEV, accuracy: 0.001)
-            XCTAssertEqual(c.global.highlights, first.highlights, accuracy: 0.001)
             XCTAssertEqual(c.global.shadows, first.shadows, accuracy: 0.001)
         }
+    }
+
+    /// `highlights` is the ONE corrective lever that is deliberately not shared, and this pins why.
+    ///
+    /// `highlightHeadroom` closes the loop on clipping, and it can only do that by reading the
+    /// finished recipe — including `contrast` and `whites`, which are style decisions. Sharing one
+    /// value would mean computing the guard from Natural's restraint and applying it to Dramatic,
+    /// which under-protects exactly the style that lifts the top end hardest: the open-loop bug
+    /// moved one level up rather than fixed.
+    ///
+    /// So the invariant is not "identical" but "monotone": a style that pushes the highlights
+    /// further must never buy back less.
+    func testHighlightRecoveryTracksHowHardEachStyleLiftsTheTopEnd() {
+        let p = makePerception()
+        let s = makeStats()
+        let candidates = RecipeEngine.candidates(perception: p, statistics: s)
+
+        let byStyle = Dictionary(uniqueKeysWithValues: candidates.compactMap { r in
+            r.id.map { ($0, r.global) }
+        })
+        guard let natural = byStyle["natural"], let dramatic = byStyle["dramatic"] else {
+            return XCTFail("expected natural and dramatic in the roster")
+        }
+        XCTAssertGreaterThan(dramatic.contrast, natural.contrast,
+                             "precondition: dramatic lifts the top end harder than natural")
+        XCTAssertLessThanOrEqual(dramatic.highlights, natural.highlights,
+                                 "the style that pushes further must buy back at least as much")
     }
 
     // MARK: - Style Layer Divergence
