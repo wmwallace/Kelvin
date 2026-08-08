@@ -15,6 +15,177 @@
     <link>https://usekelvin.app</link>
     <description>Updates for Kelvin, the local-AI photo editor for macOS.</description>
     <item>
+      <title>Kelvin 0.8.1 &#8212; a face is where the engine knows least</title>
+      <pubDate>Fri, 07 Aug 2026 21:05:00 -0700</pubDate>
+      <sparkle:version>317</sparkle:version>
+      <sparkle:shortVersionString>0.8.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <link>https://github.com/wmwallace/Kelvin/releases/tag/v0.8.1</link>
+      <description><![CDATA[
+        <style>
+          /* Kelvin update notes. Self-contained: no external fonts, images or scripts — Sparkle
+             renders this offline, mid-install, in a narrow pane. */
+          :root {
+            color-scheme: light dark;
+            --ink: #1c1a17;
+            --dim: #6b6660;
+            --faint: #928c84;
+            --bg: #faf8f5;
+            --rule: rgba(0,0,0,0.10);
+            --glow: #b4661a;
+          }
+          @media (prefers-color-scheme: dark) {
+            :root {
+              --ink: #e8e3dc;
+              --dim: #9a938a;
+              --faint: #6f6862;
+              --bg: #131211;
+              --rule: rgba(255,255,255,0.11);
+              --glow: #e9a44c;
+            }
+          }
+          body {
+            margin: 0;
+            padding: 18px 20px 26px;
+            background: var(--bg);
+            color: var(--ink);
+            font: 13px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+            -webkit-font-smoothing: antialiased;
+          }
+          /* The blackbody rail: amber through daylight to blue, which is what the app is named after
+             and the one piece of decoration here that means something. It separates sections the way
+             the temperature rail runs under the canvas in the app itself. */
+          .rail {
+            height: 2px;
+            border: 0;
+            margin: 20px 0 16px;
+            background: linear-gradient(90deg, #e9a44c 0%, #f2ead9 42%, #cfd8e6 68%, #7fa2cc 100%);
+            opacity: 0.85;
+          }
+          .lede {
+            margin: 0;
+            font-size: 15px;
+            line-height: 1.45;
+            letter-spacing: -0.005em;
+          }
+          .version {
+            font: 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--faint);
+            margin: 0 0 9px;
+          }
+          /* Mono, tracked, uppercase — the same label treatment the app uses over its own panel
+             sections, so the notes read in the app's voice rather than a changelog's. */
+          h2 {
+            font: 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+            color: var(--glow);
+            margin: 22px 0 7px;
+          }
+          h2:first-of-type { margin-top: 0; }
+          p { margin: 0 0 9px; }
+          p.note { color: var(--dim); }
+          ul { margin: 0 0 9px; padding-left: 17px; }
+          li { margin-bottom: 4px; }
+          strong { font-weight: 600; }
+          .limit {
+            border-left: 2px solid var(--rule);
+            padding-left: 11px;
+            margin: 12px 0 0;
+            color: var(--dim);
+          }
+          .closing {
+            margin-top: 22px;
+            padding-top: 14px;
+            border-top: 1px solid var(--rule);
+            color: var(--faint);
+            font-size: 12px;
+          }
+        </style>
+        <p class="version">Kelvin 0.8.1</p>
+        <p class="lede">A fix release. Both items were found by using 0.8.0 on real
+        photographs, which is the only way either of them was ever going to turn up.</p>
+
+        <hr class="rail">
+
+        <h2>Faces are no longer lifted toward the brightness of their surroundings</h2>
+        <p>When Kelvin finds a face it meters the skin, and then brightened the subject by half the
+        gap between that skin and the average brightness of the whole photograph.</p>
+        <p>That arithmetic has a consequence nobody intended. <strong>A darker-skinned subject
+        measures further from a frame&rsquo;s average while being correctly exposed</strong>, so the
+        rule prescribed a larger lift for them &mdash; and the visible result was skin lightened
+        toward a lighter norm. On the photograph this was reported from, a person on an overcast
+        beach, it came to +0.56&nbsp;EV and +35 shadows on a face: a harder lift than the
+        photographer whose edits Kelvin is measured against applies by hand.</p>
+        <p>Kelvin never looked at skin tone and still does not &mdash; it meters brightness rather
+        than classifying anyone. But metering only avoids naming a tone; it does not stop a
+        frame-relative target from acting on it. And no single photograph can separate &ldquo;this
+        person is standing in shadow&rdquo; from &ldquo;this person has darker skin&rdquo;.</p>
+        <p>So where Kelvin cannot tell, it now commits least. A metered face caps at 0.25&nbsp;EV,
+        below the by-hand median, so the correction can only ever leave a face closer to how you
+        shot it. On the reported frame the lift becomes +0.18&nbsp;EV and +11 shadows.</p>
+        <p class="note">This costs measured accuracy against the reference edits &mdash; 27 of 77
+        corpus photographs score slightly worse and the headline distance moves 7.43 to 7.48 &mdash;
+        because the photographer those references come from lifts subjects harder than the cap
+        allows. That trade was made deliberately, and the corpus is one photographer and two events,
+        so it cannot price the thing being bought.</p>
+
+        <h2>Highlights are no longer computed open-loop</h2>
+        <p>Highlight recovery was sized from the original photograph, and then exposure, contrast and
+        the endpoints brightened the frame with nothing checking again. A backlit interior went from
+        0.7% of pixels blown to 8.3% &mdash; a window with cloud detail rendering as paper white.</p>
+        <p>Kelvin now predicts where the brightest real tones land after the whole edit and buys the
+        overshoot back. Worst case on real frames improves from +2.0 to +1.1 percentage points of
+        extra clipping, and photographs that had headroom to begin with are untouched.</p>
+        <p class="note">Half a fix, and worth saying so: it cannot recover what a whole-frame lift
+        already destroyed. Doing that properly means lifting the subject with a mask instead of
+        lifting everything, which is the next piece of work.</p>
+
+        <h2>Still wrong</h2>
+        <p>A subject read as very dark is still nudged toward a fixed brightness rather than a
+        scene-relative one &mdash; the same conflation as above with a harder edge. And validating
+        any of this properly needs a set of faces spanning a range of complexions, which does not
+        yet exist.</p>
+
+        <p class="note">Updating recomputes each photograph&rsquo;s recipe the first time you open
+        it, so the first launch on a large library is slower than usual. Your edits are not touched.</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/wmwallace/Kelvin/releases/download/v0.8.1/Kelvin-0.8.1.dmg"
+        sparkle:edSignature="GYw7ESVHs2MYvExW76F2tVSFnW/2tIU0w3xTbMft1x7iDxC+wvnn8us/Zx1P6FQwGVL64rsSZBUqsXYLGAa2Dg=="
+        length="1516167885"
+        type="application/octet-stream"/>
+      <!-- One delta per shipped predecessor, keyed on CFBundleVersion. -->
+      <sparkle:deltas>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.8.1/Kelvin-0.8.1-from-314.delta"
+          sparkle:deltaFrom="314"
+          sparkle:edSignature="s3JNIBLYJn3s2uh7eQUWbtQVQdZkQRUxDVUBTmIoIR2E39Ort8D5+lCx1BIZDuZ1/LgyrJRk+gwinT13zOTcCw=="
+          length="923794"
+          type="application/octet-stream"/>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.8.1/Kelvin-0.8.1-from-308.delta"
+          sparkle:deltaFrom="308"
+          sparkle:edSignature="B+UHYqOnmvGlKszX0fa/tmlra+zrztoip26Lz1whL71I2w8dmh008gPjsdfEp/uVLd6MB4jG0SQrDebHjUf2BQ=="
+          length="1274534"
+          type="application/octet-stream"/>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.8.1/Kelvin-0.8.1-from-297.delta"
+          sparkle:deltaFrom="297"
+          sparkle:edSignature="qZptdnovI+A4A+exTgPH/IPPqQtuWid20Mb2Fdhcm2P+Yg5lHzY9ZiiJm3CphlUeH2oDbiMWtyRLs5uYkHzsBw=="
+          length="1914090"
+          type="application/octet-stream"/>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.8.1/Kelvin-0.8.1-from-276.delta"
+          sparkle:deltaFrom="276"
+          sparkle:edSignature="cWAzvbeX0+/+nBZ+B/pc2RUcbPkzYaEQARbBT3yceo7OKg2J5F73A9U2KFodrf8ubFi4bryJGmvsGfNNx7FbDw=="
+          length="2252406"
+          type="application/octet-stream"/>
+      </sparkle:deltas>
+    </item>
+    <item>
       <title>Kelvin 0.8.0 &#8212; the engine stops asking what it can measure</title>
       <pubDate>Fri, 07 Aug 2026 19:10:00 -0700</pubDate>
       <sparkle:version>314</sparkle:version>
