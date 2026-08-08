@@ -324,9 +324,24 @@ final class RecipeEngineTests: XCTestCase {
         XCTAssertGreaterThan(hi, lo, "more gain → more NR")
     }
 
-    func testNoiseFlagStillFloorsNRWithoutISO() {
-        // No EXIF ISO available, but the model flagged noise → NR still applies.
-        let d = RecipeEngine.detail(perception(scene: .landscape, problems: [.noise]))
-        XCTAssertGreaterThanOrEqual(d?.nrLuma ?? 0, 30)
+    /// Replaces `testNoiseFlagStillFloorsNRWithoutISO`, which asserted the behaviour this change
+    /// deliberately removed: a model `noise` claim used to floor NR at 30. It no longer reaches
+    /// the engine at all — ISO is the measurement, and on the corpus the claim carried nothing
+    /// the sensor gain could not already see.
+    func testAModelNoiseClaimNoLongerReachesTheEngine() {
+        let claimed = RecipeEngine.detail(perception(scene: .landscape, problems: [.noise]))
+        let silent = RecipeEngine.detail(perception(scene: .landscape))
+        XCTAssertEqual(claimed?.nrLuma ?? 0, silent?.nrLuma ?? 0,
+                       "the `noise` flag must be inert — NR comes from ISO")
+        XCTAssertEqual(claimed?.nrLuma ?? 0, 0, "no ISO and a daylight scene means no NR")
+    }
+
+    /// ...and the two things that DO still drive it must keep working, or the deletion would have
+    /// quietly disabled noise reduction rather than re-sourcing it.
+    func testNoiseReductionStillComesFromISOAndFromTheSceneFallback() {
+        XCTAssertGreaterThan(RecipeEngine.detail(perception(scene: .landscape), iso: 6400)?.nrLuma ?? 0, 30,
+                             "high ISO must still drive firm NR")
+        XCTAssertGreaterThan(RecipeEngine.detail(perception(scene: .night))?.nrLuma ?? 0, 0,
+                             "with no ISO, a night scene still gets the conservative fallback")
     }
 }

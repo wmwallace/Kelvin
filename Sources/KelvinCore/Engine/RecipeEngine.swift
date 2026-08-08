@@ -18,7 +18,7 @@ import Foundation
 public enum RecipeEngine {
     /// Engine version, recorded in provenance so a recipe on disk can be traced to the rules
     /// that made it. Bump on any change that moves the numbers.
-    public static let version = "0.4.1"
+    public static let version = "0.5.0"
 
     /// Below this confidence the engine drops all *stylistic* moves (contrast shaping,
     /// vibrance, point placement) and keeps only *corrective* ones justified purely by
@@ -214,9 +214,10 @@ public enum RecipeEngine {
             curve = toneCurve(p, s, strength: curveStrength(p, s) * curveDamping(whites, blacks),
                               grade: 0.45)
         } else {
-            // Corrective-only. Vibrance is allowed a token amount so a flat frame is not left
-            // visibly lifeless, but nothing scene-specific.
-            g.vibrance = p.problems.contains(.flat) ? 4 : 0
+            // Corrective-only, and now literally so: the token lift was gated on the model's
+            // `flat`, which no longer reaches the engine. A measured flatness term belongs here
+            // and is deliberately not being invented in the same change as the deletion.
+            g.vibrance = 0
         }
 
         let label = confident ? "Natural" : "Natural (uncertain)"
@@ -280,8 +281,7 @@ public enum RecipeEngine {
         let deficit = s.medianLuma - luma      // > 0 means the subject is darker than the scene
         let backlit = deficit > 0.12
         let crushed = luma < 0.20              // genuinely underexposed regardless of scene
-        let flagged = p.problems.contains(.underexposedSubject)
-        guard backlit || crushed || flagged else { return nil }
+        guard backlit || crushed else { return nil }
 
         // Recover ~half the backlight gap (scene-relative → tone-preserving), or a small absolute
         // lift for a crushed subject. Never pulls skin toward a universal target brightness.
@@ -363,8 +363,8 @@ public enum RecipeEngine {
 
         // Blown: the sky is near-white or the frame is clipping highlights. Veiled: a bright-ish
         // sky sitting over a lifted black point, or the model called haze — the fog signature.
-        let blown = p.problems.contains(.blownHighlights) || luma > 0.82 || s.highlightClip > 0.03
-        let veiled = p.problems.contains(.haze) || (luma > 0.55 && s.blackPoint > 0.12)
+        let blown = luma > 0.82 || s.highlightClip > 0.03
+        let veiled = luma > 0.55 && s.blackPoint > 0.12
 
         var adj: [String: Double] = [:]
         if blown {
@@ -564,12 +564,13 @@ public enum RecipeEngine {
         if p.subject.present && p.subject.type == .person {
             clarity = min(clarity, 5); texture = min(texture, 2)
         }
-        // Flat frames have the most to gain; hazy ones are already handled by dehaze, so don't stack.
-        if p.problems.contains(.flat) || p.problems.contains(.lowContrast) { clarity += 5 }
-        // Local contrast amplifies noise, which is fine-scale by nature.
-        let noisy = p.problems.contains(.noise) || (iso ?? 0) > 3200
+        // Local contrast amplifies noise, which is fine-scale by nature. ISO is the measurement;
+        // the model's `noise` claim used to be ORed in here and no longer is.
+        let noisy = (iso ?? 0) > 3200
         if noisy { clarity *= 0.5; texture = 0 }
-        if p.problems.contains(.softFocus) { clarity *= 0.6 }   // won't rescue focus, just adds grit
+        // The `flat`/`low-contrast` boost and the `soft-focus` damping both left with the flags
+        // that drove them. Soft-focus is the one capability genuinely lost: `FocusMeasure` could
+        // restore it as a measurement, at a per-frame cost nobody has priced.
 
         return (roundedClamp(clarity, to: 0...30, step: 1),
                 roundedClamp(texture, to: 0...20, step: 1))
@@ -582,17 +583,17 @@ public enum RecipeEngine {
     /// brighter," and it self-limits: a frame already near target barely moves.
     public static func exposure(_ p: Perception, _ s: ImageStatistics) -> Double {
         let median = max(0.02, s.medianLuma)
-        let flagged = p.problems.contains(.underexposedSubject) || p.problems.contains(.overexposed)
 
         // Leave a reasonably-exposed frame ALONE. A finished photo is already where the
         // photographer wants it; nudging its exposure toward a generic target only fights their
-        // intent. Only act when the model flags an exposure problem, or the frame is clearly
-        // dark/bright outside this comfortable band.
-        if !flagged && median >= 0.30 && median <= 0.60 { return 0 }
+        // intent.
+        //
+        // This guard used to be defeated by `!flagged`, so an `underexposed-subject` claim — which
+        // the model made on 42% of a real corpus — pulled ordinary frames back into the rule. On 17
+        // of 77 frames the net effect was to DARKEN the picture. The guard is now unconditional.
+        if median >= 0.30 && median <= 0.60 { return 0 }
 
-        var target = exposureTarget(p.scene)
-        if p.problems.contains(.underexposedSubject) { target += 0.05 }
-        if p.problems.contains(.overexposed) { target -= 0.06 }
+        let target = exposureTarget(p.scene)
 
         // Gentle pull (0.6), and a deadband so tiny corrections don't happen. Global exposure is
         // a blunt instrument (the real subject fix is a later mask), so cap the swing.
@@ -621,14 +622,13 @@ public enum RecipeEngine {
         if p.intent == .archival || p.intent == .productAccurate {
             return s.highlightClip > 0.02 ? -roundedClamp(min(60, s.highlightClip * 400), to: 0...80, step: 1) : 0
         }
-        let flagged = p.problems.contains(.blownHighlights) || p.problems.contains(.overexposed)
         // Recover highlights where there are actually bright highlights to recover — clipping, or a
         // genuinely bright top end (skies, skin speculars). This reveals texture and gives the
         // S-curve room to lift the highlights back with control. A full-range-but-not-bright frame
         // gets nothing here; its punch comes from the endpoints + S-curve instead.
         let fromClip = min(66, s.highlightClip * 400)
         let fromBright = max(0, (s.highlightLevel - 0.90) * 200)   // only a bright top end → recover
-        let amount = max(fromClip, fromBright) + (flagged ? 22 : 0)
+        let amount = max(fromClip, fromBright)
         return -roundedClamp(amount, to: 0...85, step: 1)
     }
 
@@ -636,18 +636,15 @@ public enum RecipeEngine {
     /// judgments (crushed shadows, underexposed subject) add floors.
     static func shadowLift(_ p: Perception, _ s: ImageStatistics) -> Double {
         if p.intent == .archival || p.intent == .productAccurate {
-            let crushed = p.problems.contains(.crushedShadows)
-            guard crushed || s.shadowClip > 0.02 else { return 0 }
-            return roundedClamp(min(45, s.shadowClip * 300) + (crushed ? 28 : 0), to: 0...70, step: 1)
+            guard s.shadowClip > 0.02 else { return 0 }
+            return roundedClamp(min(45, s.shadowClip * 300), to: 0...70, step: 1)
         }
-        let crushed = p.problems.contains(.crushedShadows)
-        let darkSubject = p.problems.contains(.underexposedSubject)
         // Open shadows where there's genuine darkness to open — clipping, or a deep low end. The
         // S-curve puts midtone contrast back so this reveals detail WITHOUT greying the image out.
         // A frame with healthy shadows gets nothing here.
         let fromClip = min(45, s.shadowClip * 300)
         let fromDark = max(0, (0.055 - s.shadowLevel) * 260)      // only a deep low end → lift
-        let amount = max(fromClip, fromDark) + (crushed ? 24 : 0) + (darkSubject ? 14 : 0)
+        let amount = max(fromClip, fromDark)
         return roundedClamp(amount, to: 0...78, step: 1)
     }
 
@@ -663,14 +660,15 @@ public enum RecipeEngine {
         // A defined bright sky means the sky mask owns the defog — don't double-apply globally.
         if let sky = skyLuma, sky > 0.5 { return 0 }
 
-        let flagged = p.problems.contains(.haze)
         let outdoor = p.scene == .landscape || p.scene == .street || p.scene == .other
         // Real haze is BRIGHT and veiled: the black point is high AND the frame isn't dark
         // overall. A dark image with a slightly-lifted black point is not hazy — don't dehaze it.
         let veiled = s.blackPoint > 0.15 && s.medianLuma > 0.38
-        guard flagged || (veiled && outdoor) else { return 0 }
+        guard veiled && outdoor else { return 0 }
         let fromVeil = min(45, (s.blackPoint - 0.10) * 300)   // blackPoint 0.25 → ~45
-        return roundedClamp(max(fromVeil, flagged ? 20 : 0), to: 0...55, step: 1)
+        // The `flagged ? 20 : 0` floor left with the model's `haze` claim. The veil measurement
+        // now sets the amount alone, and the guard above already refuses to fire without it.
+        return roundedClamp(fromVeil, to: 0...55, step: 1)
     }
 
     // MARK: - Contrast (stylistic; confident path only)
@@ -746,7 +744,6 @@ public enum RecipeEngine {
             let shadowGuard = 1 - 0.67 * clamp((s.shadowRegion - 0.25) / 0.25, to: 0...1)
             blacks = -min(24, max(0, (s.blackPoint - 0.02) * 240)) * rangeGate * shadowGuard
         }
-        if p.problems.contains(.flat) { whites += 6 * rangeGate; blacks -= 6 * rangeGate }
         return (roundedClamp(whites, to: 0...30, step: 1), roundedClamp(blacks, to: -30...0, step: 1))
     }
 
@@ -800,7 +797,6 @@ public enum RecipeEngine {
         var st = 0.7
         if s.dynamicRange < 0.5 { st += 0.3 }
         if s.dynamicRange > 0.85 { st -= 0.25 }
-        if p.problems.contains(.flat) || p.problems.contains(.lowContrast) { st += 0.2 }
         switch p.lighting.contrastRange {
         case .extreme: st -= 0.3
         case .high:    st -= 0.15
@@ -1067,7 +1063,6 @@ public enum RecipeEngine {
         default: break
         }
         var v = intentVibranceBase(p.intent)
-        if p.problems.contains(.flat) { v += 5 }
         if p.scene == .landscape { v += 2 }
         // Never over-saturate skin: a person in frame caps vibrance.
         if warmSubject(p) { v = min(v, 6) }   // holds for animals too — warm fur is skin-hued
@@ -1104,17 +1099,16 @@ public enum RecipeEngine {
     /// crispness; a portrait wants **none** — crunchy skin is the tell of an amateur edit, and
     /// over-sharpening reads worse on some skin than others, so we simply don't do it to faces.
     static func detail(_ p: Perception, iso: Double? = nil) -> Detail? {
-        let noisy = p.problems.contains(.noise)
-        // Prefer the real sensor gain when we have it: clean below ~640, ramping to a firm (but not
-        // mushy) ceiling by ~6400. A model-flagged `noise` still guarantees a floor. Without ISO,
-        // fall back to the scene guess (night/indoor shots tend to be high-ISO).
+        // Prefer the real sensor gain when we have it: clean below ~640, ramping to a firm (but
+        // not mushy) ceiling by ~6400. A model-flagged `noise` used to guarantee a floor here and
+        // no longer does — ISO is the measurement and the claim added nothing it could not see.
+        // Without ISO, fall back to the scene guess (night/indoor shots tend to be high-ISO).
         let nr: Double
         if let iso {
-            let isoNR = iso <= 640 ? 0 : min(40, (iso - 640) / 5760 * 40)
-            nr = max(isoNR, noisy ? 30 : 0)
+            nr = iso <= 640 ? 0 : min(40, (iso - 640) / 5760 * 40)
         } else {
             let highISOProne = p.scene == .night || p.scene == .interior || p.lighting.condition == .nightAmbient
-            nr = noisy ? 30 : (highISOProne ? 15 : 0)
+            nr = highISOProne ? 15 : 0
         }
 
         var sharpen: Double
