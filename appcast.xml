@@ -15,6 +15,176 @@
     <link>https://usekelvin.app</link>
     <description>Updates for Kelvin, the local-AI photo editor for macOS.</description>
     <item>
+      <title>Kelvin 0.8.0 &#8212; the engine stops asking what it can measure</title>
+      <pubDate>Fri, 07 Aug 2026 19:10:00 -0700</pubDate>
+      <sparkle:version>314</sparkle:version>
+      <sparkle:shortVersionString>0.8.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <link>https://github.com/wmwallace/Kelvin/releases/tag/v0.8.0</link>
+      <description><![CDATA[
+        <style>
+          /* Kelvin update notes. Self-contained: no external fonts, images or scripts — Sparkle
+             renders this offline, mid-install, in a narrow pane. */
+          :root {
+            color-scheme: light dark;
+            --ink: #1c1a17;
+            --dim: #6b6660;
+            --faint: #928c84;
+            --bg: #faf8f5;
+            --rule: rgba(0,0,0,0.10);
+            --glow: #b4661a;
+          }
+          @media (prefers-color-scheme: dark) {
+            :root {
+              --ink: #e8e3dc;
+              --dim: #9a938a;
+              --faint: #6f6862;
+              --bg: #131211;
+              --rule: rgba(255,255,255,0.11);
+              --glow: #e9a44c;
+            }
+          }
+          body {
+            margin: 0;
+            padding: 18px 20px 26px;
+            background: var(--bg);
+            color: var(--ink);
+            font: 13px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+            -webkit-font-smoothing: antialiased;
+          }
+          /* The blackbody rail: amber through daylight to blue, which is what the app is named after
+             and the one piece of decoration here that means something. It separates sections the way
+             the temperature rail runs under the canvas in the app itself. */
+          .rail {
+            height: 2px;
+            border: 0;
+            margin: 20px 0 16px;
+            background: linear-gradient(90deg, #e9a44c 0%, #f2ead9 42%, #cfd8e6 68%, #7fa2cc 100%);
+            opacity: 0.85;
+          }
+          .lede {
+            margin: 0;
+            font-size: 15px;
+            line-height: 1.45;
+            letter-spacing: -0.005em;
+          }
+          .version {
+            font: 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--faint);
+            margin: 0 0 9px;
+          }
+          /* Mono, tracked, uppercase — the same label treatment the app uses over its own panel
+             sections, so the notes read in the app's voice rather than a changelog's. */
+          h2 {
+            font: 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+            color: var(--glow);
+            margin: 22px 0 7px;
+          }
+          h2:first-of-type { margin-top: 0; }
+          p { margin: 0 0 9px; }
+          p.note { color: var(--dim); }
+          ul { margin: 0 0 9px; padding-left: 17px; }
+          li { margin-bottom: 4px; }
+          strong { font-weight: 600; }
+          .limit {
+            border-left: 2px solid var(--rule);
+            padding-left: 11px;
+            margin: 12px 0 0;
+            color: var(--dim);
+          }
+          .closing {
+            margin-top: 22px;
+            padding-top: 14px;
+            border-top: 1px solid var(--rule);
+            color: var(--faint);
+            font-size: 12px;
+          }
+        </style>
+        <p class="version">Kelvin 0.8.0</p>
+        <p class="lede">Kelvin was asking a small vision model what was wrong with your photograph.
+        It is holding the histogram; it can measure that itself &mdash; and measuring it turns out
+        to be worth more than asking.</p>
+
+        <hr class="rail">
+
+        <h2>The engine stopped asking the model what the histogram already knows</h2>
+        <p>Kelvin&rsquo;s perception layer reports what a photograph <em>is</em> &mdash; the scene,
+        the subject, the light. It was also being asked what was <em>wrong</em> with it: flat, hazy,
+        crushed shadows, blown highlights. Those are properties of a histogram, and the answers were
+        driving real corrections.</p>
+        <p>Checked against the pixels, they did not agree with them. On a corpus of 77 photographs
+        the model reported crushed shadows on 12 frames; the measurement finds it on one, and
+        <strong>not one of the same frames</strong>. Haze: 22 claimed, 3 measured, no overlap at all.</p>
+        <p>So the claims are gone and the measurements stayed. Against 77 photographs with the
+        photographer&rsquo;s own finished edit as the reference, what you open on moves
+        7.67&nbsp;&rarr;&nbsp;7.47, where doing nothing at all scores 7.89. The average matters less
+        than the tail: <strong>photographs that came out worse than not editing at all fall from 13
+        to 3.</strong></p>
+        <p class="note">Two consequences worth naming. A guard that leaves a well-exposed frame alone
+        was being switched off by the model&rsquo;s claim of an exposure problem &mdash; made on 42%
+        of a real corpus &mdash; and on 17 of 77 frames that made the picture <em>darker</em>. It is
+        now always on. And soft-focus damping is gone, because a claim drove it and nothing measures
+        it yet; that is the one thing this release does less of than 0.7.0.</p>
+
+        <h2>A person is never sharpened, whatever the scene is called</h2>
+        <p>Output sharpening was decided by the scene word. A frame of people read as
+        &ldquo;landscape&rdquo; &mdash; which happens, and happens on ordinary photographs of people
+        outdoors &mdash; was sharpened at full strength with no skin protection at all. Crunchy skin
+        is the tell of an amateur edit, and Kelvin already knew not to do it; it was checking the
+        wrong thing.</p>
+
+        <h2>Highlights work in both directions</h2>
+        <p>The highlights control could recover a blown highlight but never lift one. Positive values
+        did nothing whatsoever &mdash; in the global adjustments and in every mask. One of the
+        built-in looks sets a positive highlight bias for a soft, bloomy top end, and had been
+        rendering as nothing at all.</p>
+
+        <h2>Still wrong, and being worked on</h2>
+        <p>A backlit frame can still blow a bright window to paper white. Highlight recovery is
+        computed from the original and nothing re-checks after the rest of the edit brightens the
+        frame. It is the next thing on the list.</p>
+
+        <p class="note">Updating recomputes each photograph&rsquo;s recipe the first time you open it,
+        so the first launch on a large library is slower than usual. Your edits are not touched.</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/wmwallace/Kelvin/releases/download/v0.8.0/Kelvin-0.8.0.dmg"
+        sparkle:edSignature="Iwlbsf9SnyfPgQjZl7xqpofDpTfIT3O//GKZCC9q7K0e7UdFtEVe4d1Qm4psDpPqHopPvFyJ6pysp/PVLFmGAQ=="
+        length="1516089680"
+        type="application/octet-stream"/>
+      <!-- One delta per shipped predecessor, keyed on CFBundleVersion. -->
+      <sparkle:deltas>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.8.0/Kelvin-0.8.0-from-308.delta"
+          sparkle:deltaFrom="308"
+          sparkle:edSignature="e7tE/3ehGQKtTpAclr36kXFhy/TnT9rhA/LmQAQ/0UguJ8QfK8CUjdrTDqks3CFFwLJTPQWyqwaHZP8uOY2WCA=="
+          length="1181758"
+          type="application/octet-stream"/>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.8.0/Kelvin-0.8.0-from-297.delta"
+          sparkle:deltaFrom="297"
+          sparkle:edSignature="3LqR+hLNSdG7ZtRqOgEeCh9CTCRkXOpNAmbWdEgzfbS67wdn7Oh9lHr0mAw9Jg0TcNIcpgkPWNqZ1sLzHsBKAw=="
+          length="1924246"
+          type="application/octet-stream"/>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.8.0/Kelvin-0.8.0-from-276.delta"
+          sparkle:deltaFrom="276"
+          sparkle:edSignature="tI+LPwzacqqvuJP1EPEMf/qo1/8FcMtl4xs3u4FDtnHJWb2Ln1N+35yhveC6w2TQCKrtOwjuAAKqzgTSinMFCw=="
+          length="2195014"
+          type="application/octet-stream"/>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.8.0/Kelvin-0.8.0-from-258.delta"
+          sparkle:deltaFrom="258"
+          sparkle:edSignature="9ya9OFxkX2XSsflCeVD4NZllnOP1oftocEFyoYsKWD+firY9vPjSsq5sgVLK+ZOgVCSVR3Ehn8diSBWvk/sjDg=="
+          length="2352366"
+          type="application/octet-stream"/>
+      </sparkle:deltas>
+    </item>
+    <item>
       <title>Kelvin 0.7.0 &#8212; hold the answers against each other</title>
       <pubDate>Sun, 02 Aug 2026 12:45:00 -0700</pubDate>
       <sparkle:version>308</sparkle:version>
