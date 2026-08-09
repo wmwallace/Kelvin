@@ -35,7 +35,8 @@
          │
          ▼
   ┌─────────────┐
-  │  User pick  │  → preference pair → batch propagation
+  │  User pick  │  → batch propagation
+  │             │  logged, and read by nothing (D18)
   └─────────────┘
 ```
 
@@ -50,9 +51,18 @@ linear buffer keyed by file hash.
 decoded once more at export time and the recipe is replayed against it. This is why the
 app can feel instant on a 45-megapixel file.
 
-**The model sees a thumbnail.** 768px is enough for scene, subject, lighting, and
-problem detection. It is not enough for pixel-level work, and we do not ask it to do
-pixel-level work. Inference cost becomes negligible.
+**The model sees a thumbnail.** 768px is enough for scene, subject and lighting. It is
+not enough for pixel-level work, and we do not ask it to do pixel-level work. Inference
+cost becomes negligible.
+
+**And the engine reads less of that read than the schema suggests.** `problems[]` — the
+model's claims about what has technically gone wrong — had nineteen readers in
+`RecipeEngine` and has had **none** since 0.8.0. Every defect the engine acts on is now
+measured from the histogram, because on 77 real pairs the claims and the measurements were
+not describing the same photographs: `crushed-shadows` was claimed on 12 frames, measured
+on 1, with zero overlap. Replacing scene, lighting, contrast range, direction, intent,
+count, placement and notes with fixed constants costs 0.05 ΔE. `subject.present` and
+`subject.type` are what the read is actually worth. See D19 and `docs/EVALUATION.md`.
 
 **Candidates are parameter swaps.** This is the key performance insight and it falls out
 of the recipe design. Once the proxy is uploaded to the GPU, generating four style
@@ -73,7 +83,7 @@ Sources/KelvinCore/
                   MLX implementation in Integrations/).
   Engine/         perception + stats → [Recipe]. Pure. Deterministic. No I/O.
   Eval/           the harness: corpus, metrics, baselines, degradation builder.
-  Preference/     pick logging and, later, reweighting.
+  Preference/     pick logging. A log with no reader; the learner is deleted (D18).
   Browse/         folder scan, ordering, triage. Flat and file-based — no catalogue.
   Batch/          recipe propagation across a folder, with overwrite refusal.
   Export/         naming and collision policy.

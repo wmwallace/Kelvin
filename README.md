@@ -52,11 +52,15 @@ it will invent one, confidently, and you will never know which answers were gues
 - The full editor: the adjustment set, colour mixer and geometry, with a mask kit — subject, sky,
   radial, graduated, brush, colour range, luminance, skin, per-person
 - On-device scene reading, shown in the panel so you can see what it made of the photograph
-- Candidate generation: three or four finished edits per photograph
+- Candidate generation: three or four finished edits per photograph — and **C** hands the canvas
+  over to them, two up or four up at full size, because "this one or that one" is a question
+  anyone can answer and squinting at thumbnails is not
 - Culling: keep/reject, a filmstrip that groups a shoot by burst, day, place or near-duplicate, and
   a scan that marks the sharpest frame of each burst
 - Batch apply across a folder, and exporting every photo you edited in one go — JPEG, HEIC, PNG or
   16-bit TIFF, at full size or a chosen long edge, in sRGB, Display P3 or Adobe RGB
+- Sharing a finished frame to Messages or AirDrop through the same render the export path uses,
+  with location off by default and offered only when the frame actually carries it
 - Non-destructive throughout: your originals are never written to
 
 **Not yet**
@@ -66,7 +70,7 @@ it will invent one, confidently, and you will never know which answers were gues
 - Auto-masks can be refined and inverted, but not brushed by hand
 - Nothing generative, on purpose
 
-870 tests — 587 over the core, 283 over the app. CI runs on every pull request.
+883 tests — 600 over the core, 283 over the app. CI runs on every pull request.
 
 <p align="center">
 <img src="docs/images/01-hero.webp" width="900" alt="The Kelvin window: the photograph, what the model made of the scene, the candidate list, the adjustment panel and the filmstrip">

@@ -10,8 +10,8 @@ rejected for reasons recorded there.
 
 A local-AI photo editor for macOS. You drop in a photo (RAW, JPEG, or PNG), a small
 vision model reads the scene, and the app hands back three or four fully-formed
-candidate edits. You pick the one you like. It applies that look to the rest of the
-shoot, and it learns from your pick.
+candidate edits. You pick the one you like, and it applies that look to the rest of the
+shoot.
 
 Everything runs on-device. No cloud, no account, no upload.
 
@@ -46,7 +46,7 @@ These are load-bearing. Do not violate them without an explicit conversation.
 ### 1. The model never emits numbers
 
 The VLM outputs **structured judgments only**: scene type, subject, lighting condition,
-what is technically wrong, likely intent. Classification and description.
+likely intent. Classification and description.
 
 The recipe engine computes every actual parameter from the histogram, the EXIF, and the
 mask stack. Deterministic code, unit-tested, debuggable.
@@ -54,6 +54,20 @@ mask stack. Deterministic code, unit-tested, debuggable.
 A small model asked for `exposure_ev: +0.37` will invent it confidently and you will
 never be able to tell a good hallucination from a bad one. This split is the entire
 reason the architecture works with 4B-class models. See `docs/RECIPE-SCHEMA.md`.
+
+**And the engine reads less than the model emits.** That list used to include "what is
+technically wrong". It no longer does: **D19** deleted all nineteen readers of `problems[]`,
+because a categorical claim about clipping is still an unverifiable number wearing a word,
+and the claims did not match the measurements (`crushed-shadows` claimed on 12 frames of 77,
+measured on 1, overlap 0). The field is still emitted, still parsed, and still shown to the
+user in the scene-summary line — but on the same display-only terms as `notes`, and no
+engine decision branches on it. The engine reads a defect off the histogram, which measures
+it exactly.
+
+What the perception read is genuinely worth is `subject.present` and `subject.type` — holding
+the other eight fields constant costs 0.05 ΔE. Spend effort there, not on a better prompt for
+the rest. Before proposing that the engine trust any new model-asserted judgment, read D19,
+and check whether `ImageStatistics` already measures it.
 
 ### 2. Do not build a RAW pipeline
 

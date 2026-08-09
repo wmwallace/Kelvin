@@ -62,6 +62,14 @@ Consequences that fall out of this and are load-bearing:
 - Recipes are diffable, so preference learning is possible at all
 - Sidecars are small enough to version-control
 
+> **Amended 9 August 2026.** The third bullet's justification is dead — D18 dropped preference
+> learning. Diffability itself is untouched and still load-bearing; what it now buys is candidate
+> comparison and `ablate`, which ranks a recipe's levers by the damage each does. The bullet is
+> left as written because this file is a record of what was believed and when, not a description
+> of the current build. Read the fourth bullet's "sidecars" the same way: edits now live in
+> Kelvin's Application Support folder keyed to the photograph, and no `.kelvin` file is written
+> beside anyone's originals — see `CLAUDE.md` non-negotiable #3.
+
 ## D5 — Novelty budget goes to the recipe IR and preference loop · Decided
 
 Everything else uses the most proven approach available.
@@ -69,6 +77,11 @@ Everything else uses the most proven approach available.
 Novel architecture plus novel product is two unsolved problems running simultaneously.
 When output looks wrong you need to know whether it was the model, the mapping, or the
 renderer — and that is only possible if two of the three are boring and well-tested.
+
+> **Amended 9 August 2026.** Read the heading as "the recipe IR and the **candidate-and-choice**
+> loop", which is where `CLAUDE.md` non-negotiable #5 now stands. The decision itself is unchanged
+> and has aged well: the novelty budget still goes to those two things, and D19 is that principle
+> paying out — the engine got *less* clever about perception, not more.
 
 ## D6 — Evaluation harness precedes model work · Decided
 
@@ -980,3 +993,118 @@ that margin the ordering of the other candidates may change and the opening fram
 Evidence that a per-user signal beats the measured per-frame rule — which is a comparison that can
 now actually be run, because `engine-ranked` and the shadow rule give it something to be compared
 against. Not before.
+
+---
+
+## D19 — The engine stops reading the model's defect claims · **Decided 7 August 2026**
+
+**Status:** decided, shipped in 0.8.0. `problems[]` had nineteen readers in `RecipeEngine` and
+now has none. The field, the parser and the prompt are untouched, so stored reads keep decoding and
+nothing in the schema changed. It survives in the scene-summary line the app shows the user, on
+the same display-only terms as `notes` — but no engine decision branches on a claim any more.
+
+This does not weaken non-negotiable #1; it is that rule applied one level further out. The rule
+exists because a small model cannot estimate a magnitude. What 0.8.0 measured is that on this
+corpus it cannot reliably estimate a *defect* either, and a categorical claim about clipping is
+still an unverifiable number wearing a word.
+
+### Why, on the numbers
+
+77 real capture/edit pairs, same binary, same pixels, only the perception JSON varying:
+
+| arm | engine-default | engine-best | frames >1 ΔE worse than doing nothing |
+|---|---|---|---|
+| the shipped model's real reads | 7.670 | 7.027 | **13** |
+| the readers deleted — what shipped | 7.466 | 6.74 | **3** |
+| doing nothing | 7.887 | — | — |
+
+⚠️ `docs/EVALUATION.md` reports 7.502 / 6.757 for what looks like the same thing. It is not
+quite: that arm **empties the field in the input JSON** and leaves the engine's branches
+standing, so measured terms that were ORed with a flag still behave slightly differently. This
+row is the shipped change — the readers themselves deleted. Both land in the same place and on
+the same ruined-frame count; quote whichever you mean and say which it is.
+
+The mean is the wrong instrument and reporting it alone would have hidden this: the read is a
+high-variance, zero-mean perturbation (paired difference −0.143, t = −0.93, bootstrap 95% CI
+[−0.443, +0.151], sign test 38 better / 39 worse). What the deletion changes is how many
+photographs come out **ruined** — 13 to 3 — which no corpus mean will ever show you.
+
+The claims and the measurements were not describing the same photographs. `crushed-shadows`:
+claimed on 12 frames, measured on 1, overlap 0. `haze`: 22 / 3 / 0. `blown-highlights`: 0 / 3 / 0.
+`ImageStatistics` measures every one of these properties exactly.
+
+Checked leave-one-shoot-out, which is why this lands where the per-frame chooser did not: it
+improves on both shoots independently (Wedding 7.6362 → 7.3791, Cannon Beach 7.7438 → 7.6576), so
+the gain is not one event's worth of frames.
+
+### What a better model would not fix
+
+A **correct** read is also worth nothing here. A hand-written read of 12 frames, grounded on
+measured clipping, lands on top of the constant arm (8.991 vs 8.971) rather than above it. And
+replacing scene, lighting, contrast range, direction, intent, count, placement and notes with
+fixed constants costs 0.05 ΔE. `subject.present` and `subject.type` are what the perception read
+is actually worth — which is the part that steers masks, and the part worth spending on.
+
+### Two consequences worth stating plainly
+
+- The exposure leave-alone guard is now unconditional. It was `!flagged && median >= 0.30 &&
+  median <= 0.60`, so an `underexposed-subject` claim — made on 42% of a real corpus — pulled
+  ordinary frames back into the rule, and on 17 of 77 the net effect was to **darken** the
+  picture. The deletion fixes that by accident.
+- `soft-focus` clarity damping is the one capability lost. `FocusMeasure` could restore it as a
+  measurement; nobody has priced the per-frame cost.
+
+### What would reopen it, and what was already tried
+
+Deriving these flags from statistics instead was built and measured (7.353) and is **not**
+shipped: its held-out evidence was uncontrolled against base rate, the synthetic benchmark
+disagreed about where the flags fire, and most of its margin came from the one flag that works by
+disabling the guard above. Do not rebuild it against two shoots. A corpus spanning more events is
+the prerequisite, not a better prompt.
+
+---
+
+## D20 — A metered face lift is capped, and the cap costs ΔE on purpose · **Decided 7 August 2026**
+
+**Status:** owner decision, shipped in 0.8.1. When `subjectLuma` came from a metered face, the
+subject-mask lift caps at 0.25 EV (`faceLiftCapEV`).
+
+### The mechanism, which nobody intended
+
+`LocalMasks` prefers metered **skin** for `subjectLuma` when a face is present, and `subjectMask`
+then sizes the lift as half the gap from that value to the **frame median**. So the rule measures
+how far a person's skin sits from the average brightness of their own photograph — and a
+darker-skinned subject measures further from it *while correctly exposed*. The prescribed lift is
+therefore larger for them, and the visible result is skin lightened toward a lighter norm.
+
+Reported from real use on a frame of a person in front of Haystack Rock: skin luma 0.160, frame
+median 0.41, giving subject-mask `exposure_ev` +0.56 and shadows +35. `bg-probe` measured this
+photographer's own median subject lift at +0.40 EV, so the engine was lifting a face harder than
+the photographer does by hand.
+
+Metering rather than classifying was the right instinct — the engine never branches on skin tone
+and still does not. But metering only avoids *naming* the tone; it does not stop a frame-relative
+target from acting on it.
+
+### Why a cap rather than a better rule
+
+No single photograph can separate "in shadow" from "darker skin". So the engine stops trying to,
+and stops short instead: where it knows least, it commits least. 0.25 EV is deliberately under the
+photographer's measured median, so the cap can only ever leave a face closer to how it was
+captured than to a target.
+
+### The cost, not buried
+
+On the 77 real pairs the cap touches 37 frames — 10 better, **27 worse** — and engine-default goes
+7.43 → 7.48. That is expected and accepted: the reference is one photographer's own edits and they
+lift subjects harder than the cap allows. The corpus is one photographer and two events, so it
+**cannot price the thing being bought**. Ruined frames unchanged at 4, no-op fidelity 77/77.
+
+This is the one place in the project where a measured ΔE regression was shipped deliberately. It
+is here so that a future reader tuning for corpus ΔE does not quietly undo it.
+
+### Not fixed, and named so it is not mistaken for done
+
+The `crushed` branch still lifts toward an absolute 0.24 floor, which is the same conflation with
+a harder edge. Validating any of this properly needs a face corpus spanning complexions, which
+does not exist. `KELVIN_FACE_LIFT_CAP` sweeps the cap and it is in `tuningSignature`.

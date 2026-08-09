@@ -56,11 +56,26 @@ Keep these closed. An open vocabulary makes the recipe engine untestable.
 | `lighting.condition` | `golden-hour`, `blue-hour`, `overcast`, `harsh-sun`, `open-shade`, `indoor-tungsten`, `indoor-mixed`, `indoor-daylight`, `night-ambient`, `flash`, `backlit` |
 | `lighting.direction` | `front`, `side`, `back`, `top`, `diffuse` |
 | `lighting.contrast_range` | `low`, `normal`, `high`, `extreme` |
-| `problems` | `underexposed-subject`, `overexposed`, `blown-highlights`, `crushed-shadows`, `color-cast`, `low-contrast`, `flat`, `noise`, `haze`, `tilted-horizon`, `soft-focus`, `mixed-white-balance` |
+| `problems` | `underexposed-subject`, `overexposed`, `blown-highlights`, `crushed-shadows`, `color-cast`, `low-contrast`, `flat`, `noise`, `haze`, `tilted-horizon`, `soft-focus`, `mixed-white-balance` — **display only, like `notes` and `subject.label`.** Still emitted and still parsed, but the engine has had no readers since 0.8.0. See below and D19 before writing one. |
 | `intent` | `natural`, `documentary`, `portrait-flattering`, `dramatic`, `archival`, `product-accurate` |
 
 `notes` is free text and is **never parsed**. It exists for debugging and for showing
 the user why the app made a choice. Do not build logic on it.
+
+`problems` is the trap in this table. It is the one field that looks like a live engine
+input, reads like the most useful thing in the document, and is inert — it survives only in
+the scene-summary line the app shows the user, on exactly the same terms as `notes` and
+`subject.label`: display only, never something a decision branches on. It was the field the
+engine leaned on hardest — nineteen readers in `RecipeEngine` — until 0.8.0 removed all of
+them, because on 77 real capture/edit pairs the claims and the measurements were not
+describing the same photographs (`crushed-shadows`: claimed 12, measured 1, overlap 0;
+`haze`: claimed 22, measured 3, overlap 0). Deleting the readers took frames rendered more
+than 1 ΔE worse than doing nothing from 13 to 3.
+
+The field stays in the schema and the parser so that stored reads keep decoding and the
+prompt does not have to change. **Do not restore a reader without a corpus of more than two
+shoots.** Deriving these flags from statistics instead was built, measured, and rejected —
+D19 records why, so that it is not rebuilt from scratch a third time.
 
 ### Why this shape
 
@@ -154,7 +169,8 @@ These are tests, not suggestions.
    `temperature_k` neutral at the image's as-shot value; `opacity` neutral at `1.0`;
    nullable fields neutral at `null`.
 3. **Recipes are diffable.** Two recipes must produce a meaningful field-level diff.
-   This is what makes candidate comparison and preference learning possible.
+   This is what makes candidate comparison possible, and what lets the eval harness
+   attribute an error to the individual lever that caused it (`ablate`).
 4. **Recipes are composable.** Applying recipe B on top of recipe A must be
    well-defined. Additive for adjustments, last-wins for curves and masks.
 5. **Order of operations is fixed and documented in code**, not implied by JSON key
