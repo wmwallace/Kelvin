@@ -8350,6 +8350,8 @@ struct HistogramReading: Sendable {
 
 /// The one pass that produces a `HistogramReading`. Same rule as the struct: no actor, any thread.
 enum HistogramReader {
+    /// Channel names, here rather than on the view: the view is `@MainActor` and this is not.
+    static let channelNames = ["R", "G", "B"]
     /// Three 64-bin channel histograms plus exact clipping counts, from one pass over the sample.
     ///
     /// The comment here used to say "Cheap (100×100 sample)" and it was not: `rgba8Sampled`
@@ -8401,7 +8403,7 @@ enum HistogramReader {
         // highlight on a chrome edge is not a blown photograph, and warning about it trains people
         // to stop reading the warning.
         let threshold = max(1, samples / 1000)
-        let names = HistogramView.channelNames
+        let names = channelNames
         let peak = channels.flatMap { $0 }.max() ?? 0
         // A bin holding a handful of stray pixels is noise, not a tone the photograph has. Below
         // that floor it stays transparent rather than contributing a wild mean colour drawn from
@@ -8447,7 +8449,7 @@ struct HistogramView: View {
     private static let channelColors: [Color] = [
         Color(hex: 0xFF4D4D), Color(hex: 0x4DE07A), Color(hex: 0x4D95FF)
     ]
-    static let channelNames = ["R", "G", "B"]
+    private static var channelNames: [String] { HistogramReader.channelNames }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
