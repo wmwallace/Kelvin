@@ -1171,3 +1171,40 @@ version is available" sheet). The 27 July stance (silent install) meant nobody e
 happen, and the install waited on a quit the app could not perform. Owner's words: *it needs to
 prompt for updates, so it needs to be looking for updates more often.* Both switches remain in
 Settings ▸ General; RELEASING.md and the packaging script say the same thing.
+
+## D23 — Views observe properties, not the object; the root never reads a slider · **Decided 21 August 2026**
+
+**Status:** decided, shipped with D21 on the same branch. `AppState` and `PreviewState` are
+`@Observable` (the Observation framework, macOS 14 floor — which the app already had) rather than
+`ObservableObject`; every stored property that was *not* `@Published` is `@ObservationIgnored`, so
+the set of things that can invalidate a view is exactly what it was. The slider sections and the
+footer's temperature readout are their own views; the preview is drawn into a `Canvas`.
+
+### Why, on the numbers
+
+The release notes had admitted for three versions that "the edit panel can stutter while a render or
+scene read is in flight". Profiled with `make trace` (an automated 200–400 step drag) plus `sample`
+of the main thread, the stutter was never the render: it was SwiftUI rebuilding the **whole window**
+on every tick of every slider, because `ContentView.body` — which composes the sidebar, the footer
+and the filmstrip inline — read `appState.edit`, and under `ObservableObject` every `@Published`
+change invalidates every observer anyway.
+
+| step | median stall per tick | what the profile said next |
+|---|---|---|
+| start | 261 ms | 68% histogram render on the main thread (D21 moved it) |
+| histogram off | 187 ms | 23% root body, 22% `applyButtonLabel` → `ShootLook.covers` standardising 874 URLs |
+| `@Observable` | 162 ms | 11% `cachedReading` doing a disk read per filmstrip cell |
+| + covers fast path, reading memo | 124 ms | root body still per tick — the sliders were inline |
+| + slider sections / temperature readout as views | 116 → 60 ms | root body 11× per 200 steps; 37% `sizeThatFits` from the Image swap |
+| + Canvas preview | **~57 ms, worst 0.2 s** (was 2.8 s) | Core Animation commit and the dragged slider itself |
+
+### The rule this leaves behind
+
+A view that reads a property that changes per tick must be *small*, and it must not be the root. When
+adding a readout of live edit state, give it its own `struct`; the cost of the alternative is the
+window. The drag harness prints "root body evaluations during the run" — compare it to the step
+count; if they match, something inline is reading the edit.
+
+**Tried and not kept:** a `CALayer` with the render's `CGImage` as `contents` instead of the `Canvas`
+— same numbers, more code. `EquatableView` around the slider row — declined by SwiftUI for views
+holding dynamic properties (the comment on `ToneSlider` already recorded this).
