@@ -12,13 +12,18 @@ BUILD_PATH ?= $(TMPDIR)kelvin-build
 SWIFT := swift
 SWIFTFLAGS := --scratch-path "$(BUILD_PATH)"
 
-.PHONY: build test release clean bin eval render app open stage-model app-staged delta trace sparkle-guard
+.PHONY: build test ratchet release clean bin eval render app open stage-model app-staged delta trace sparkle-guard
 
 build:
 	$(SWIFT) build $(SWIFTFLAGS)
 
-test:
+# The Task.detached ratchet runs first: it is a one-second grep and the thing it guards against
+# (D21) cost an afternoon to diagnose. CI's core job runs `make test`, so it is enforced there too.
+test: ratchet
 	$(SWIFT) test $(SWIFTFLAGS)
+
+ratchet:
+	@scripts/check-detached.sh
 
 release:
 	$(SWIFT) build -c release $(SWIFTFLAGS)

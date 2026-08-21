@@ -179,29 +179,30 @@ struct CandidateViewModel: Identifiable {
 
 // MARK: - App state (pipeline logic unchanged; presentation reimagined)
 
+@Observable
 @MainActor
-final class AppState: ObservableObject {
-    @Published var imageURL: URL?
-    @Published var fullResCI: CIImage?
-    @Published var proxyCI: CIImage?
+final class AppState {
+    var imageURL: URL?
+    var fullResCI: CIImage?
+    var proxyCI: CIImage?
     // Subject mask at proxy resolution (for live previews) and the measured subject brightness.
     /// Proxy-resolution subject/sky bitmaps for live previews (keyed "subject"/"sky").
-    private var proxyMaskBitmaps: [String: CIImage] = [:]
-    private var subjectLuma: Double?
+    @ObservationIgnored private var proxyMaskBitmaps: [String: CIImage] = [:]
+    @ObservationIgnored private var subjectLuma: Double?
     /// What produced this frame's subject mask. Passed to the engine so a person lift is only
     /// applied to a mask that actually found a person — see `RecipeEngine.subjectMask`.
-    private var subjectOrigin: SubjectMask.Origin?
-    private var skyLuma: Double?
-    @Published var imageId: String = ""
-    @Published var perception: Perception?
-    @Published var candidates: [CandidateViewModel] = []
-    @Published var selectedCandidateId: String?
+    @ObservationIgnored private var subjectOrigin: SubjectMask.Origin?
+    @ObservationIgnored private var skyLuma: Double?
+    var imageId: String = ""
+    var perception: Perception?
+    var candidates: [CandidateViewModel] = []
+    var selectedCandidateId: String?
     /// NOT `@Published`, deliberately. It is rebuilt on every tick of every drag, and publishing it
     /// woke the whole panel a second time per tick for something no view reads: the export and the
     /// craft-fix paths take it directly, and the only view that ever wanted anything out of it was
     /// the temperature rail, which reads the same number from `edit` (the recipe's globals ARE
     /// `edit` — see `updateActiveRecipe`).
-    var activeRecipe: Recipe?
+    @ObservationIgnored var activeRecipe: Recipe?
     /// A preview image and THE PHOTO IT WAS MADE FROM. The pair is the unit here, never the image
     /// on its own.
     ///
@@ -230,38 +231,38 @@ final class AppState: ObservableObject {
     /// and nothing else. `AppState` still owns it — this is about who is woken, not about where the
     /// state belongs.
     let preview = PreviewState()
-    @Published private var original: TaggedPreview?
+    private var original: TaggedPreview?
 
     /// The current edit, rendered — nil until the first render for THIS photo has landed.
     var activePreviewImage: NSImage? { preview.active.flatMap { $0.url == imageURL ? $0.image : nil } }
     /// The untouched original (proxy) of the photo now open, for the press-and-hold compare.
     var originalPreviewImage: NSImage? { original.flatMap { $0.url == imageURL ? $0.image : nil } }
-    @Published var showingOriginal = false
+    var showingOriginal = false
     /// Objective craft flags on the current edit (clipping, skin, cast) — empty when clean.
-    @Published var activeCraftIssues: [AestheticEvaluator.Issue] = []
+    var activeCraftIssues: [AestheticEvaluator.Issue] = []
     /// The measurement those flags came from, kept so a fix can be sized from what is on screen and
     /// so the UI can ask whether a fix has anywhere left to go (see `canFix`).
-    @Published private var lastCraftReading: CraftFix.Reading?
+    private var lastCraftReading: CraftFix.Reading?
     /// Subject fixes that have been clicked and come back with nothing to give — the control is at
     /// its ceiling, or it cannot move this photo's metric at all. Cleared whenever the base changes
     /// (new photo, new candidate, reset), because then the question is open again.
-    @Published private var exhaustedFixes: Set<AestheticEvaluator.Issue> = []
+    private var exhaustedFixes: Set<AestheticEvaluator.Issue> = []
 
     /// The full editable global adjustment set, held as ABSOLUTE values rather than deltas. Sliders bind
     /// straight to its fields; it starts from the chosen candidate and the user takes it from there.
-    @Published var edit = GlobalAdjustments.neutral
+    var edit = GlobalAdjustments.neutral
     /// The candidate's values as generated — the baseline manual edits are measured against (for
     /// the "carry my tweaks to the batch" and preference logging), and what Reset returns to.
-    private var editBaseline = GlobalAdjustments.neutral
+    @ObservationIgnored private var editBaseline = GlobalAdjustments.neutral
     /// Manual straighten angle (degrees); auto-crops the corners. Per-photo framing.
-    @Published var straighten = 0.0
+    var straighten = 0.0
     /// What the camera recorded — body, lens, exposure, when and where.
-    @Published var capture = CaptureInfo()
+    var capture = CaptureInfo()
     /// The creative look layered on the chosen candidate, if any (see `LookPreset`).
-    @Published var activeLookId: String?
+    var activeLookId: String?
     /// Per-colour HSL (the colour mixer): band → {h,s,l}. Empty bands are dropped.
-    @Published var hsl: [String: HSLAdjustment] = [:]
-    @Published var hslBand = "red"
+    var hsl: [String: HSLAdjustment] = [:]
+    var hslBand = "red"
     let hslBands = ["red", "orange", "yellow", "green", "aqua", "blue", "purple", "magenta"]
 
     /// A binding to one HSL component of the currently-selected colour band.
@@ -276,20 +277,20 @@ final class AppState: ObservableObject {
             })
     }
     /// Manual mask control: which auto-masks are on, and each one's strength (0…100 → opacity).
-    @Published var maskEnabled: [String: Bool] = [:]
-    @Published var maskStrength: [String: Double] = [:]
-    private var baseMasks: [Mask] = []
+    var maskEnabled: [String: Bool] = [:]
+    var maskStrength: [String: Double] = [:]
+    @ObservationIgnored private var baseMasks: [Mask] = []
     /// Per-mask local adjustments the user has edited, keyed by mask id then by adjustment name.
     /// The engine proposes values (a sky mask arrives with highlights pulled down); these are the
     /// overrides on top, so an untouched mask keeps exactly what the engine chose.
-    @Published var maskAdjustments: [String: [String: Double]] = [:]
-    @Published var maskFeather: [String: Double] = [:]
-    @Published var maskTightness: [String: Double] = [:]
-    @Published var maskInvert: [String: Bool] = [:]
-    @Published var showMaskOverlay: Bool = false
+    var maskAdjustments: [String: [String: Double]] = [:]
+    var maskFeather: [String: Double] = [:]
+    var maskTightness: [String: Double] = [:]
+    var maskInvert: [String: Bool] = [:]
+    var showMaskOverlay: Bool = false
     /// True while a mask's TONE slider is being dragged, which hides the overlay for the duration
     /// so the photograph is visible underneath. Set by the editors, not by the renderer.
-    @Published var isAdjustingMaskTone: Bool = false
+    var isAdjustingMaskTone: Bool = false
 
     /// Whether the overlay is actually drawing anything — the toggle being on is not enough, since
     /// with nothing selected there is no mask to draw. The pill and the `O` key report this rather
@@ -370,15 +371,15 @@ final class AppState: ObservableObject {
         onEdit()
     }
     /// Hand-added parametric gradient masks (radial / linear) — the user's own local edits.
-    @Published var userMasks: [UserMaskVM] = []
+    var userMasks: [UserMaskVM] = []
 
     /// Every separable subject Vision found in this photo — *this* person, *that* dog, the hillside
     /// — each with its own mask, ready to be edited on its own. Empty is a real answer (a flat
     /// landscape has no subject), not a failure.
-    @Published var subjectInstances: [SubjectInstances.Instance] = []
+    var subjectInstances: [SubjectInstances.Instance] = []
     /// The instance the pointer is over in the list, outlined on the canvas. A row reading
     /// "Person 2" tells you nothing about which person that is until you can see it.
-    @Published var highlightedInstanceId: String?
+    var highlightedInstanceId: String?
 
     /// True while the pointer is over the Repair controls, which draws a ring around every detected
     /// spot on the photograph.
@@ -391,12 +392,12 @@ final class AppState: ObservableObject {
     ///
     /// Deliberately NOT a before/after: the app already has one. Hold to compare shows the frame
     /// with the spots back, which answers "what did it change". This answers "what did it find".
-    @Published var showingRepairSpots = false
+    var showingRepairSpots = false
     /// The transient cousin: rings shown because the pointer is over the Repair controls. Kept
     /// separate from the latched toggle above so a hover-out cannot switch off something the
     /// user deliberately switched on — which is exactly what happened when one flag served both:
     /// the rings vanished the moment the pointer moved toward the photograph to look at them.
-    @Published var hoveringRepairControls = false
+    var hoveringRepairControls = false
 
     /// Instances that already have a mask, so the list can show which are in play and clicking one
     /// again selects it rather than adding a duplicate.
@@ -442,7 +443,7 @@ final class AppState: ObservableObject {
     /// already means pan-and-do-nothing, and silently turning it into "create a mask and give it a
     /// +0.3 exposure nudge" would make the canvas unpredictable — you would stop being able to
     /// click a picture just to look at it.
-    @Published var pickingInstance = false
+    var pickingInstance = false
 
     /// Pick the detected subject under a click on the canvas.
     ///
@@ -510,14 +511,14 @@ final class AppState: ObservableObject {
     /// `brushRadius` for that reason, and it deliberately does NOT reset between strokes: erasing
     /// the spill off a mask takes several passes, and a mode that snapped back to Add after each
     /// one would make the second pass silently undo the first.
-    @Published var brushErases = false
+    var brushErases = false
 
     /// Which wand mask is waiting for its seed click, if any.
     ///
     /// Carries the mask's id rather than a bare flag, unlike `pickingInstance`: a wand click sets
     /// the seed of a PARTICULAR mask, and with two wands in the list a bare flag would drop the
     /// second one's seed onto the first.
-    @Published var seedingMaskId: UUID?
+    var seedingMaskId: UUID?
 
     /// Put a wand mask's seed where the photographer clicked.
     ///
@@ -640,19 +641,19 @@ final class AppState: ObservableObject {
     ///
     /// These are placed by clicking, not detected. The detector that used to fill this array is
     /// gone; see `SpotHeal` for the measurement that killed it.
-    @Published private(set) var healSpots: [HealSpot] = []
+    private(set) var healSpots: [HealSpot] = []
 
     /// Whether the heal tool has the canvas: a click places a spot rather than doing whatever a
     /// click normally does.
-    @Published var healToolActive = false
+    var healToolActive = false
 
     /// Heal size, as a fraction of the shorter edge. Small by default because this is for touch-ups
     /// — a sensor mote, a stray hair, a bit of litter on the sand — and a too-large first click is
     /// the one that makes the tool feel destructive.
-    @Published var healRadius = 0.012
+    var healRadius = 0.012
 
-    @Published var isProcessing = false
-    @Published var statusMessage = "Drop a photo or a folder to read the light."
+    var isProcessing = false
+    var statusMessage = "Drop a photo or a folder to read the light."
 
     private let store: PreferenceStore
     /// GPU-backed Core Image context — the "accelerator". A Metal device + cached intermediates and
@@ -670,8 +671,8 @@ final class AppState: ObservableObject {
         return CIContext(options: opts)
     }()
     /// Zoom (1 = fit) and pan (view points) for inspecting the photo.
-    @Published var zoom = 1.0
-    @Published var pan = CGSize.zero
+    var zoom = 1.0
+    var pan = CGSize.zero
     // The real on-device VLM. An actor, so the model loads once and is reused across photos.
     private let perceptionProvider = MLXPerceptionProvider()
 
@@ -685,7 +686,7 @@ final class AppState: ObservableObject {
 
     /// True while a text field is taking keystrokes, so the single-key shortcuts can get out of the
     /// way — see the shortcut block in `ContentView`.
-    @Published private(set) var isEditingText = false
+    private(set) var isEditingText = false
 
     init() {
         Self.assertCoversTheContract()
@@ -741,9 +742,9 @@ final class AppState: ObservableObject {
 
     /// The other photos sitting in the folder you opened from, for the filmstrip, in the order the
     /// strip shows them.
-    @Published var folderPhotos: [URL] = []
+    var folderPhotos: [URL] = []
     /// Photos whose edit differs from the candidate Kelvin generated (drives the strip's dot).
-    @Published var editedURLs: Set<URL> = []
+    var editedURLs: Set<URL> = []
 
     // MARK: The shoot's look
 
@@ -753,10 +754,10 @@ final class AppState: ObservableObject {
     /// Written by `loadShootLook`, `applyLookToShoot` and `clearShootLook`, and by tests that need a
     /// shoot already in a look; nothing else should assign it. Assigning here does NOT persist —
     /// `applyLookToShoot` is the path that writes.
-    @Published var shootLook: ShootLook?
+    var shootLook: ShootLook?
     /// Which folder `shootLook` describes, so opening a different shoot doesn't inherit the last
     /// one's look. One folder at a time, for the same reason `captureIndex` is.
-    private var shootLookFolder: URL?
+    @ObservationIgnored private var shootLookFolder: URL?
 
     /// Point the shoot look at a folder, reading whatever was applied to it before. Cheap — one
     /// small JSON read, and only when the folder actually changes.
@@ -882,25 +883,25 @@ final class AppState: ObservableObject {
     // MARK: Reading the shoot ahead of time
 
     /// How far the background read has got. Zero total means nothing is running.
-    @Published private(set) var shootReadDone = 0
-    @Published private(set) var shootReadTotal = 0
+    private(set) var shootReadDone = 0
+    private(set) var shootReadTotal = 0
 
     /// ONE queue, one loop, one progress surface. Both background-read callers feed the same
     /// engine: `applyLookToShoot` seeds the full scope (`readShootAhead`), browsing seeds the
     /// sixteen nearest unread frames (`seedNeighborhoodRead`). The policy — ordering, dedupe,
     /// the energy bound, what a stop suppresses — lives in `ReadAheadQueue`, where it is tested.
-    private var readQueue = ReadAheadQueue()
+    @ObservationIgnored private var readQueue = ReadAheadQueue()
     /// The single loop draining `readQueue`. Started by `ensureReadLoop`, ended by teardown or
     /// by the queue running dry.
-    private var readLoopTask: Task<Void, Never>?
+    @ObservationIgnored private var readLoopTask: Task<Void, Never>?
     /// The background read currently ON THE MODEL, held separately from the loop so the
     /// foreground can cancel the generation without killing the loop — the provider checks
     /// cancellation mid-generation, the loop catches it and re-enqueues the frame. See the
     /// perceive site in `loadPhoto`.
-    private var backgroundReadTask: Task<Perception, Error>?
+    @ObservationIgnored private var backgroundReadTask: Task<Perception, Error>?
     /// The neighborhood being computed off the main actor, so a seed for a photo the user has
     /// already left never lands.
-    private var seedTask: Task<Void, Never>?
+    @ObservationIgnored private var seedTask: Task<Void, Never>?
     /// The whole-shoot sweep's own seed, held apart from the neighborhood's.
     ///
     /// They shared one slot, and the mode guard that was supposed to keep browsing from outranking
@@ -908,7 +909,7 @@ final class AppState: ObservableObject {
     /// touching the strip — which is exactly what someone does next, since the whole point is that
     /// the read happens while they carry on culling — cancelled the sweep outright, and nothing
     /// ever re-seeded it. Export then paid the perception cost per frame, with someone waiting.
-    private var sweepSeedTask: Task<Void, Never>?
+    @ObservationIgnored private var sweepSeedTask: Task<Void, Never>?
 
     var isReadingShoot: Bool { shootReadTotal > 0 && shootReadDone < shootReadTotal }
     /// Whether the current read is the whole-shoot sweep (Apply) rather than the browsing
@@ -1071,6 +1072,7 @@ final class AppState: ObservableObject {
                     // text rather than throwing — so a preempted read leaves `job` as
                     // `CancellationError`, never as a parseable-looking partial.
                     PerceptionStore.save(read, for: url, modelId: modelId)
+                    readingNotes[url] = .some(read.notes)
                     readQueue.markDone()
                 } catch {
                     backgroundReadTask = nil
@@ -1167,14 +1169,24 @@ final class AppState: ObservableObject {
     /// not: it cannot be interrupted, and two seconds of nothing before a quit is the wrong way
     /// to spend them. `isBusy` still reports it, so the caller takes the `_exit` route.
     func awaitQuiescenceForQuit() async -> Bool {
-        let deadline = Date().addingTimeInterval(2)
+        //
+        // AND IF ANYTHING WAS BUSY WHEN QUIT WAS ASKED FOR, THE ANSWER IS "NOT CLEAN" EVEN AFTER THE
+        // WAIT. `isGenerating` drops when `perceive` returns — but a cancelled generation returns
+        // while mlx-swift-lm's own token task is still finishing the step it was on, and an
+        // `exit()` in that window ran the destructors under it and crashed (caught by the drag
+        // harness on 21 August 2026, after three hand tests had passed on timing). There is no
+        // way to see that inner task from here, so: busy at the moment of asking means the process
+        // leaves through `_exit`, which skips the destructors. Nothing is lost — edits are on
+        // disk as they are made — and the wait still lets a render or an export finish its file.
         func gpuBusy() -> Bool {
             Offload.depth(of: .decode) + Offload.depth(of: .render) + Offload.depth(of: .export) > 0
         }
-        while perceptionProvider.isGenerating || gpuBusy(), Date() < deadline {
+        let wasBusy = perceptionProvider.isBusy || gpuBusy()
+        let deadline = Date().addingTimeInterval(2)
+        while gpuBusy() || perceptionProvider.isGenerating, Date() < deadline {
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
-        return !perceptionProvider.isBusy && !gpuBusy()
+        return !wasBusy && !perceptionProvider.isBusy && !gpuBusy()
     }
 
     private func tearDownReadAhead(halting: Bool) {
@@ -1250,9 +1262,9 @@ final class AppState: ObservableObject {
 
     /// The frames picked out in the strip. Empty means "the whole shoot", which is what every
     /// action here defaults to.
-    @Published var selectedPhotos: Set<URL> = []
+    var selectedPhotos: Set<URL> = []
     /// The anchor a shift-click extends from — the last frame clicked without shift.
-    private var selectionAnchor: URL?
+    @ObservationIgnored private var selectionAnchor: URL?
 
     /// A click in the strip, with whatever modifiers were held.
     ///
@@ -1305,8 +1317,8 @@ final class AppState: ObservableObject {
     /// a property of the folder — a wedding wants time, a folder of numbered scans wants names —
     /// so carrying last week's choice into an unrelated shoot would be a worse guess than the
     /// default is.
-    @Published var photoSort: PhotoSortKey = .captureTime { didSet { reorderFolderPhotos() } }
-    @Published var photoSortReversed = false { didSet { reorderFolderPhotos() } }
+    var photoSort: PhotoSortKey = .captureTime { didSet { reorderFolderPhotos() } }
+    var photoSortReversed = false { didSet { reorderFolderPhotos() } }
 
     /// When and where each photo in `captureIndexFolder` was taken. Empty until the background read
     /// lands, which `PhotoOrder.sorted` treats as "nothing is dated" — so the strip shows filename
@@ -1317,16 +1329,16 @@ final class AppState: ObservableObject {
     /// double the slowest part of opening a shoot.
     /// Written by `loadCaptureIndex` and by tests that need a folder with known dates and positions;
     /// nothing else should assign it.
-    @Published var captureIndex = PhotoOrder.CaptureIndex()
+    var captureIndex = PhotoOrder.CaptureIndex()
     /// Which directory `captureIndex` describes. One folder at a time, which is how a shoot is
     /// worked: opening every frame of a 437-shot folder must not re-read 437 EXIF headers each
     /// time. Leaving for another folder and coming back costs one re-read, which is the price of
     /// not carrying an unbounded cache of dates for folders nobody is looking at.
-    private var captureIndexFolder: URL?
-    private var captureIndexTask: Task<Void, Never>?
+    @ObservationIgnored private var captureIndexFolder: URL?
+    @ObservationIgnored private var captureIndexTask: Task<Void, Never>?
     /// True while the read is in flight, so the strip's sort control can say the order is not
     /// settled yet instead of appearing to have sorted wrongly.
-    @Published private(set) var captureInfoPending = false
+    private(set) var captureInfoPending = false
 
     /// Whether the order on screen is still provisional. Only true under capture-time sort — the
     /// read also runs when you are sorting by name (so switching later is instant), but a name
@@ -1375,7 +1387,7 @@ final class AppState: ObservableObject {
 
     /// The folder whose detail has not been read yet, held so unfolding the strip can pay the cost
     /// then instead of on open.
-    private var pendingFolderDetail: (folder: URL, photos: [URL])?
+    @ObservationIgnored private var pendingFolderDetail: (folder: URL, photos: [URL])?
 
     /// Called when the strip is unfolded. Pays the deferred cost, once.
     func filmstripDidExpand() {
@@ -1473,7 +1485,7 @@ final class AppState: ObservableObject {
     // per photo is what makes culling slow.
 
     /// Keep/reject per photo, loaded for the current folder.
-    @Published var flags: [URL: PhotoFlag] = [:]
+    var flags: [URL: PhotoFlag] = [:]
 
     /// Which frames the strip is showing.
     enum StripFilter: String, CaseIterable {
@@ -1494,7 +1506,7 @@ final class AppState: ObservableObject {
             }
         }
     }
-    @Published var stripFilter: StripFilter = .all {
+    var stripFilter: StripFilter = .all {
         didSet {
             // ASKING FOR THE ANSWER IS ASKING FOR THE MEASUREMENT — the same rule `stripGrouping`
             // already applies to the `Similar` lens, and the reasoning recorded there applies here
@@ -1701,7 +1713,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    @Published var stripGrouping: StripGrouping = .none {
+    var stripGrouping: StripGrouping = .none {
         didSet {
             // Similarity needs fingerprints, and the fingerprints come out of the scan the "Check
             // focus" button already runs — one pass, one 1200 px proxy per frame, both readings.
@@ -1865,11 +1877,11 @@ final class AppState: ObservableObject {
 
     /// Acuity per photo, filled in by the scan. Absent = not yet measured, which is distinct from
     /// measured-and-fine and is why this is not a Set.
-    @Published var focus: [URL: FocusMeasure.Reading] = [:]
-    @Published var focusScanProgress: Double?      // nil = not scanning
+    var focus: [URL: FocusMeasure.Reading] = [:]
+    var focusScanProgress: Double?      // nil = not scanning
     /// The scan's time remaining, already phrased ("about 2 minutes left"). nil until the pace
     /// is measurable, and always nil when `focusScanProgress` is. See `ProgressETA`.
-    @Published var focusScanETA: String?
+    var focusScanETA: String?
 
     /// What a scan concluded about each frame, beyond sharpness.
     ///
@@ -1888,7 +1900,7 @@ final class AppState: ObservableObject {
     /// Nothing read the dictionary either, so it cost nothing and did nothing — the same shape as
     /// the dead `onFlag` the audit found, and it is why the near-duplicate grouping had no
     /// fingerprints to group on.
-    @Published var triage: [URL: PhotoTriage.Verdict] = [:]
+    var triage: [URL: PhotoTriage.Verdict] = [:]
 
     var softCount: Int { folderPhotos.filter { focus[$0]?.isSoft == true }.count }
 
@@ -1929,8 +1941,20 @@ final class AppState: ObservableObject {
     /// guess.
     func cachedReading(for url: URL) -> String? {
         if url == imageURL, let note = perception?.notes { return note }
-        return PerceptionStore.load(for: url, modelId: perceptionProvider.activeModelID)?.notes
+        // IN MEMORY, NOT ON DISK. This is read by every filmstrip cell's accessibility label on every
+        // evaluation of the strip — and the strip evaluates often. `PerceptionStore.load` is a file
+        // open and a JSON decode; a profile of a slider drag found 11% of main-thread time here,
+        // reading the same 437 sentences again and again. Misses are remembered too (`.some(nil)`),
+        // or an unread shoot would stat every frame every pass until the model caught up.
+        if let known = readingNotes[url] { return known }
+        let note = PerceptionStore.load(for: url, modelId: perceptionProvider.activeModelID)?.notes
+        readingNotes[url] = .some(note)
+        return note
     }
+
+    /// `cachedReading`'s memo. Filled on first ask and whenever a read lands (`rememberPerception`,
+    /// the read-ahead loop), so a frame's sentence appears in the strip as soon as it exists.
+    @ObservationIgnored private var readingNotes: [URL: String?] = [:]
 
     /// Did the scan notice anything at all about this frame — sharpness or exposure.
     ///
@@ -1997,12 +2021,12 @@ final class AppState: ObservableObject {
     }
 
     /// The scan, held so leaving the folder can stop it. See `scanFocus` for why that matters.
-    private var scanTask: Task<Void, Never>?
+    @ObservationIgnored private var scanTask: Task<Void, Never>?
     /// Which scan is CURRENT. A cancelled scan's task group can take seconds to drain its
     /// in-flight decodes, and its trailing flush and epilogue run after that — by which time the
     /// next folder's scan may own the dictionaries and the progress flag. Bumped on every start
     /// and every external cancel; a task whose captured epoch no longer matches publishes nothing.
-    private var scanEpoch = 0
+    @ObservationIgnored private var scanEpoch = 0
 
     /// Measure every frame in the folder, newest results published as they arrive so the strip
     /// fills in progressively rather than freezing until the end.
@@ -2154,7 +2178,7 @@ final class AppState: ObservableObject {
     /// Persisted, because it is a property of how you work rather than of one export. A photographer
     /// who strips location does it every time, and asking them to remember a checkbox per file is how
     /// the one that matters gets missed.
-    @Published var stripLocationOnExport = UserDefaults.standard.bool(forKey: AppState.stripLocationKey) {
+    var stripLocationOnExport = UserDefaults.standard.bool(forKey: AppState.stripLocationKey) {
         didSet { UserDefaults.standard.set(stripLocationOnExport, forKey: AppState.stripLocationKey) }
     }
     static let stripLocationKey = "export.stripLocation"
@@ -2166,33 +2190,33 @@ final class AppState: ObservableObject {
     /// is how a home address rides into a stranger's Messages thread — the rare cost here is
     /// re-ticking a box, the rare cost there is a leak, so the box resets. Same reasoning as
     /// `exportLabel`.
-    @Published var shareIncludeLocation = false
+    var shareIncludeLocation = false
     /// The photograph whose share render is (or was last) in the picker — what
     /// `SharePresenter.onDidChoose` checks before logging the pick. Not published; nothing draws it.
-    var pendingSharePickURL: URL?
+    @ObservationIgnored var pendingSharePickURL: URL?
 
     /// True from share press to file-on-disk — the Share button's re-entry guard and spinner.
     /// Separate from `isProcessing`, which belongs to the status line and is set by half a dozen
     /// longer flows; a share must not un-busy an export or vice versa.
-    @Published var isPreparingShare = false
+    var isPreparingShare = false
 
     // The rest of the export configuration. Persisted for the same reason: a photographer who
     // exports 2048 px sRGB JPEGs for a gallery does it every time, and re-choosing it per file is
     // how the one that matters gets exported at the wrong size.
-    @Published var exportFormatId = UserDefaults.standard.string(forKey: "export.format") ?? "jpeg" {
+    var exportFormatId = UserDefaults.standard.string(forKey: "export.format") ?? "jpeg" {
         didSet { UserDefaults.standard.set(exportFormatId, forKey: "export.format") }
     }
-    @Published var exportQuality = UserDefaults.standard.object(forKey: "export.quality") as? Double ?? 0.97 {
+    var exportQuality = UserDefaults.standard.object(forKey: "export.quality") as? Double ?? 0.97 {
         didSet { UserDefaults.standard.set(exportQuality, forKey: "export.quality") }
     }
     /// 0 means full resolution. Stored as a plain number so the setting survives a schema change.
-    @Published var exportLongEdge = UserDefaults.standard.object(forKey: "export.longEdge") as? Int ?? 0 {
+    var exportLongEdge = UserDefaults.standard.object(forKey: "export.longEdge") as? Int ?? 0 {
         didSet { UserDefaults.standard.set(exportLongEdge, forKey: "export.longEdge") }
     }
-    @Published var exportColorSpaceId = UserDefaults.standard.string(forKey: "export.colorSpace") ?? "sRGB" {
+    var exportColorSpaceId = UserDefaults.standard.string(forKey: "export.colorSpace") ?? "sRGB" {
         didSet { UserDefaults.standard.set(exportColorSpaceId, forKey: "export.colorSpace") }
     }
-    @Published var exportNamingId = UserDefaults.standard.string(forKey: "export.naming") ?? "descriptive" {
+    var exportNamingId = UserDefaults.standard.string(forKey: "export.naming") ?? "descriptive" {
         didSet { UserDefaults.standard.set(exportNamingId, forKey: "export.naming") }
     }
 
@@ -2239,7 +2263,7 @@ final class AppState: ObservableObject {
     /// statement about *this shoot*, and a remembered "Tuscany" is how a Reykjavik wedding gets
     /// delivered labelled Tuscany. Same reasoning as `exportKeepersOnly`, with a worse failure:
     /// that one exports the wrong count, this one puts the wrong word on a client's files.
-    @Published var exportLabel = ""
+    var exportLabel = ""
 
     /// A word pinned to the FRONT of every exported name, and one pinned to the END.
     ///
@@ -2257,10 +2281,10 @@ final class AppState: ObservableObject {
     ///
     /// `exportLabel` stays per-shoot. It is the one that is a statement about *this* job by
     /// definition, and it is already cleared when the shoot changes.
-    @Published var exportPrefix = UserDefaults.standard.string(forKey: "export.prefix") ?? "" {
+    var exportPrefix = UserDefaults.standard.string(forKey: "export.prefix") ?? "" {
         didSet { UserDefaults.standard.set(exportPrefix, forKey: "export.prefix") }
     }
-    @Published var exportSuffix = UserDefaults.standard.string(forKey: "export.suffix") ?? "" {
+    var exportSuffix = UserDefaults.standard.string(forKey: "export.suffix") ?? "" {
         didSet { UserDefaults.standard.set(exportSuffix, forKey: "export.suffix") }
     }
 
@@ -2288,7 +2312,7 @@ final class AppState: ObservableObject {
     ///
     /// Note this only governs LISTING. Nothing in the folder is read — no EXIF, no sidecars, no
     /// thumbnails — until the strip is unfolded; see `loadFolderDetailIfVisible`.
-    @Published var includeFolderOnOpen = UserDefaults.standard.object(forKey: AppState.includeFolderKey) as? Bool ?? true {
+    var includeFolderOnOpen = UserDefaults.standard.object(forKey: AppState.includeFolderKey) as? Bool ?? true {
         didSet { UserDefaults.standard.set(includeFolderOnOpen, forKey: AppState.includeFolderKey) }
     }
     static let includeFolderKey = "open.includeFolder"
@@ -2296,7 +2320,7 @@ final class AppState: ObservableObject {
     /// Not persisted, on purpose: which photos to export is a per-shoot decision, and a remembered
     /// "kept only" from last week is how someone exports three photos and believes they exported
     /// thirty.
-    @Published var exportKeepersOnly = false
+    var exportKeepersOnly = false
 
     /// The photos an "Export edited" run will write, in filmstrip order. Pure and separated from
     /// the export loop so the rule is testable without rendering anything.
@@ -2368,7 +2392,7 @@ final class AppState: ObservableObject {
     }
 
     /// Same idea for Batch apply. Not persisted, same reason as `exportKeepersOnly`.
-    @Published var batchKeepersOnly = false
+    var batchKeepersOnly = false
 
     /// The photos a batch run over the open shoot will adapt, in filmstrip order. An edit is not
     /// required — batch creates edits — so the only narrowing is the Keep flag when asked.
@@ -2401,11 +2425,11 @@ final class AppState: ObservableObject {
     }
     /// Frames dismissed from the strip this session. Held separately because opening any photo
     /// re-scans the folder — without this, a dismissed frame simply reappeared.
-    private var dismissedURLs: Set<URL> = []
+    @ObservationIgnored private var dismissedURLs: Set<URL> = []
     /// Full editing state per photo, so switching away and back is instant and lossless — no
     /// re-running the model. Bounded, because each entry pins decoded images.
-    var sessions: [URL: PhotoSession] = [:]
-    private var sessionOrder: [URL] = []
+    @ObservationIgnored var sessions: [URL: PhotoSession] = [:]
+    @ObservationIgnored private var sessionOrder: [URL] = []
     private static let maxSessions = 8
 
     /// Put a mask measured on one image onto another's extent.
@@ -2446,9 +2470,9 @@ final class AppState: ObservableObject {
         let covered = Set(scope)
         return cached.filter { covered.contains($0) && $0 != loadedURL && !editedURLs.contains($0) }
     }
-    @Published private var thumbnails: [URL: NSImage] = [:]
+    private var thumbnails: [URL: NSImage] = [:]
     /// URLs whose thumbnail is being fetched, so a redrawn strip doesn't queue the same work twice.
-    private var thumbnailsInFlight: Set<URL> = []
+    @ObservationIgnored private var thumbnailsInFlight: Set<URL> = []
 
     /// A filmstrip thumbnail, **never decoded on the calling thread**.
     ///
@@ -2466,8 +2490,8 @@ final class AppState: ObservableObject {
     /// meant a dozen full passes in the middle of a gesture — the "jumpy" in a jumpy resize — and
     /// scanning a shoot did the same thing hundreds of times over. Buffered and flushed together,
     /// a burst becomes one update.
-    private var thumbnailBuffer: [URL: NSImage] = [:]
-    private var thumbnailFlushScheduled = false
+    @ObservationIgnored private var thumbnailBuffer: [URL: NSImage] = [:]
+    @ObservationIgnored private var thumbnailFlushScheduled = false
 
     private func scheduleThumbnailFlush() {
         guard !thumbnailFlushScheduled else { return }
@@ -2551,7 +2575,7 @@ final class AppState: ObservableObject {
     // threshold, so "close enough to reuse" means exactly what "close enough to group" means — one
     // definition of near-duplicate in the app rather than two that can disagree.
 
-    private var perceptionBySignature: [(signature: PhotoTriage.Signature, perception: Perception)] = []
+    @ObservationIgnored private var perceptionBySignature: [(signature: PhotoTriage.Signature, perception: Perception)] = []
     private static let maxRememberedReads = 32
 
     /// The signature for `url`, from the scan if it has run, measured now if not. Cheap either way
@@ -2592,6 +2616,7 @@ final class AppState: ObservableObject {
     }
 
     private func rememberPerception(_ perception: Perception, for url: URL) async {
+        readingNotes[url] = .some(perception.notes)
         guard let signature = await signature(for: url), signature.isMeasurable else { return }
         perceptionBySignature.append((signature, perception))
         if perceptionBySignature.count > Self.maxRememberedReads {
@@ -2633,7 +2658,7 @@ final class AppState: ObservableObject {
 
     /// Whether any photograph has been read since launch. Only ever used to tell the truth about
     /// how long the first one takes.
-    private var hasReadAPhoto = false
+    @ObservationIgnored private var hasReadAPhoto = false
 
     /// The current edit, in the form that goes to disk. Internal rather than private so the
     /// round-trip test can save exactly what the app saves.
@@ -2732,7 +2757,7 @@ final class AppState: ObservableObject {
     /// filed the FIRST photo's images, edit and sidecar under the SECOND photo's URL, and reopening
     /// that frame from the strip then showed someone else's picture.
     /// Internal, not private, so the photo-switch rules below can be pinned by test.
-    var loadedURL: URL?
+    @ObservationIgnored var loadedURL: URL?
 
     /// Whether the per-photo state has been torn down but `loadedURL` has not moved on yet.
     ///
@@ -2742,7 +2767,7 @@ final class AppState: ObservableObject {
     /// panel under the previous photograph: overwriting its session, and, because the cleared state
     /// reads as untouched, deleting its saved edit off disk. `dismiss` already defends against
     /// exactly this by nil-ing `loadedURL` first; this covers every other route into the window.
-    var perPhotoStateIsCleared = false
+    @ObservationIgnored var perPhotoStateIsCleared = false
 
     /// Capture the current photo's state before leaving it.
     func stashCurrentSession() {
@@ -2866,7 +2891,7 @@ final class AppState: ObservableObject {
     // MARK: Removing frames — from the working set, or from the disk
 
     /// Frames awaiting a confirmed trash. Non-empty puts the confirmation in front of the user.
-    @Published var pendingTrash: [URL] = []
+    var pendingTrash: [URL] = []
 
     /// Ask to move frames to the Trash. Nothing happens until `confirmTrash` runs.
     func requestTrash(_ urls: [URL]) {
@@ -3183,7 +3208,7 @@ final class AppState: ObservableObject {
     /// Whether the open photograph lives on a share. Read from a stored flag rather than asked per
     /// view update — `StorageVolume.isNetwork` is a syscall on first sight of a volume, and this is
     /// on the path that draws the footer.
-    @Published private(set) var onNetworkVolume = false
+    private(set) var onNetworkVolume = false
 
     /// Said once a shoot is open, and only when it is somewhere slow.
     ///
@@ -3729,13 +3754,13 @@ final class AppState: ObservableObject {
     // MARK: Comparing candidates
 
     /// Whether the compare grid has the canvas.
-    @Published var comparing = false
+    var comparing = false
     /// Two at a time or all four. Remembered for the session — someone who wants the survey wants
     /// it on the next frame too — but not persisted, because it is a way of looking rather than a
     /// setting.
-    @Published var compareMode: CandidateCompare.Mode = .two
+    var compareMode: CandidateCompare.Mode = .two
     /// What the chosen candidate is being held against in 2-up. Nil means "the next one".
-    @Published var comparePartnerId: String?
+    var comparePartnerId: String?
     /// Canvas-resolution renders, keyed by candidate id.
     ///
     /// The picker's own thumbnails are 768 px because at 62 points that is ample; shown a foot wide
@@ -3743,10 +3768,10 @@ final class AppState: ObservableObject {
     /// the candidates are re-rendered once, on the proxy the canvas itself draws, through the same
     /// `Renderer` call — a comparison of anything other than what you would actually get is worse
     /// than no comparison.
-    @Published private(set) var compareRenders: [String: NSImage] = [:]
+    private(set) var compareRenders: [String: NSImage] = [:]
     /// Guards a render batch against the photograph moving on under it, exactly like the candidate
     /// build it mirrors.
-    private var compareRenderToken = 0
+    @ObservationIgnored private var compareRenderToken = 0
 
     /// Comparing needs two things to compare and a proxy to draw them from.
     var canCompare: Bool { candidates.count >= 2 && proxyCI != nil }
@@ -3808,7 +3833,7 @@ final class AppState: ObservableObject {
     }
 
     /// True while a Fix click is still working, so a second click can't start a parallel loop.
-    @Published private(set) var fixInProgress = false
+    private(set) var fixInProgress = false
 
     /// Apply a targeted correction for a flagged craft issue — the "Fix" the warning offers.
     ///
@@ -4152,12 +4177,12 @@ final class AppState: ObservableObject {
 
     // MARK: Undo / redo (coalesced edit history)
 
-    @Published var canUndo = false
-    @Published var canRedo = false
-    private var undoStack: [EditSnapshot] = []
-    private var redoStack: [EditSnapshot] = []
-    private var committed: EditSnapshot?
-    private var commitToken = 0
+    var canUndo = false
+    var canRedo = false
+    @ObservationIgnored private var undoStack: [EditSnapshot] = []
+    @ObservationIgnored private var redoStack: [EditSnapshot] = []
+    @ObservationIgnored private var committed: EditSnapshot?
+    @ObservationIgnored private var commitToken = 0
 
     private func snapshot() -> EditSnapshot {
         EditSnapshot(edit: edit, userMasks: userMasks, maskEnabled: maskEnabled,
@@ -4249,8 +4274,8 @@ final class AppState: ObservableObject {
 
     /// Which brush mask is currently being painted (drag on the preview paints into it), and the
     /// brush size (fraction of the smaller edge).
-    @Published var paintingMaskId: UUID?
-    @Published var brushRadius = 0.09
+    var paintingMaskId: UUID?
+    var brushRadius = 0.09
     /// The user mask being edited ON THE CANVAS (drag its handles to move/size it).
     /// WHICH MASK IS BEING WORKED ON — auto (subject/sky) or hand-drawn, one selection covering
     /// both. It used to be `selectedUserMaskId: UUID?`, which could only ever name a hand-drawn
@@ -4267,7 +4292,7 @@ final class AppState: ObservableObject {
         case auto(String)       // "subject", "sky" — the engine's own masks
         case user(UUID)         // anything hand-drawn or picked from the subject list
     }
-    @Published var selectedMask: MaskRef?
+    var selectedMask: MaskRef?
 
     /// The hand-drawn selection, for the call sites that only make sense for one (canvas handles,
     /// brush painting). Setting it selects; reading it yields nil when an auto mask is selected.
@@ -4336,7 +4361,7 @@ final class AppState: ObservableObject {
     /// Space: back and forth between fitted and the last magnification used, which is how every
     /// other editor's spacebar behaves. Remembering the ratio matters — a zoom toggle that always
     /// returned to 2× would lose the 6× someone was inspecting focus at.
-    @Published private(set) var lastZoomRatio: Double = 2
+    private(set) var lastZoomRatio: Double = 2
     func toggleZoomRatio() {
         if zoom > 1.01 { lastZoomRatio = zoom; setZoom(1) } else { setZoom(lastZoomRatio) }
     }
@@ -4438,7 +4463,7 @@ final class AppState: ObservableObject {
     }
 
     /// The user's saved mask presets, loaded once and written through on every change.
-    @Published var customMaskPresets: [MaskPreset] = MaskPresetStore.load()
+    var customMaskPresets: [MaskPreset] = MaskPresetStore.load()
 
     /// Start a mask from a preset — an ordinary mask wearing the preset's settings and name.
     func addPresetMask(_ preset: MaskPreset) {
@@ -4693,11 +4718,11 @@ final class AppState: ObservableObject {
     /// The scene read currently in flight, so opening a newer photo can cancel it. See the
     /// perceive site in `loadPhoto` — an actor queues reads, and only cancellation stops an
     /// abandoned one from spending real seconds ahead of the photo on screen.
-    private var perceiveTask: Task<Perception, Error>?
+    @ObservationIgnored private var perceiveTask: Task<Perception, Error>?
 
     /// The content hash being computed in the background, so the two things that actually want it can
     /// wait for it rather than record a blank. See the deferred hash in `loadPhoto`.
-    private var hashTask: Task<Void, Never>?
+    @ObservationIgnored private var hashTask: Task<Void, Never>?
 
     /// The photograph's `sha256:…` identity, waiting for the background hash if it is still running.
     ///
@@ -4711,12 +4736,12 @@ final class AppState: ObservableObject {
 
     /// The last rendered proxy (for the histogram + the debounced craft check). Lives on
     /// `preview` for the reason given there.
-    private var craftToken = 0
+    @ObservationIgnored private var craftToken = 0
 
     /// Baked brush strokes, keyed by mask id, with the stamp count they were baked at. Compositing
     /// a long stroke costs O(stamps) *per render* (18 ms at 1200 stamps — worse than the whole rest
     /// of the pipeline), so it's flattened to a concrete bitmap once and reused until it changes.
-    private var brushCache: [UUID: (count: Int, image: CIImage)] = [:]
+    @ObservationIgnored private var brushCache: [UUID: (count: Int, image: CIImage)] = [:]
 
     /// Pre-baked preview bitmaps for the user's brush masks, to hand the renderer.
     /// Grown wand regions, keyed by mask id, with the seed they were grown from.
@@ -4731,7 +4756,7 @@ final class AppState: ObservableObject {
     /// Keyed on the SEED, not a counter: the two things that change it are a click and a tolerance
     /// drag, and both must invalidate. Note this is by analogy with the brush's measured cost rather
     /// than a fresh measurement of the fill — if the wand ever feels slow, measure before tuning.
-    private var wandCache: [UUID: (seed: RegionSeed, image: CIImage)] = [:]
+    @ObservationIgnored private var wandCache: [UUID: (seed: RegionSeed, image: CIImage)] = [:]
 
     /// Pre-grown regions for the user's wand masks, to hand the renderer.
     private func wandBitmaps(extent: CGRect, source: CIImage) -> [String: CIImage] {
@@ -4829,8 +4854,8 @@ final class AppState: ObservableObject {
         let ctx: CIContext
         let overlay: (bitmap: CIImage, invert: Bool, feather: Double, tightness: Double)?
     }
-    private var renderInFlight = false
-    private var renderDirty = false
+    @ObservationIgnored private var renderInFlight = false
+    @ObservationIgnored private var renderDirty = false
 
     /// Build the recipe (fast, on the main thread — export always sees the latest), then hand the
     /// GPU render + read-back to a background task so the UI thread stays free while you drag. Only
@@ -4944,9 +4969,9 @@ final class AppState: ObservableObject {
     /// Built lazily, on the first fine render after a photo opens, so opening a photograph costs
     /// exactly what it did before. Roughly 22 MB materialised; held for the open frame only and
     /// dropped on switch.
-    private var displayCI: CIImage?
-    private var displayCIURL: URL?
-    private var fineToken = 0
+    @ObservationIgnored private var displayCI: CIImage?
+    @ObservationIgnored private var displayCIURL: URL?
+    @ObservationIgnored private var fineToken = 0
 
     /// Re-render the frame at display resolution once the user stops interacting.
     ///
@@ -5986,22 +6011,23 @@ final class AppState: ObservableObject {
 }
 
 /// What a finished render produces, and the only thing a render wakes.
+@Observable
 @MainActor
-final class PreviewState: ObservableObject {
+final class PreviewState {
     /// The rendered proxy, tagged with the photograph it belongs to so a frame that lands after a
     /// photo switch is ignored rather than shown under the new one's name.
-    @Published var active: AppState.TaggedPreview?
+    var active: AppState.TaggedPreview?
     /// The same pixels as a CIImage, for the histogram and the craft self-check. Materialised from
     /// the CGImage rather than left as a filter graph — see the render site.
-    @Published var lastRenderedCI: CIImage?
+    var lastRenderedCI: CIImage?
     /// The histogram of `lastRenderedCI`, computed on the render lane with it. See `RenderOutput`.
-    @Published var histogram: HistogramView.Reading?
+    var histogram: HistogramView.Reading?
 }
 
 /// The photograph on the canvas. Its own view so that a new render redraws the image without
 /// re-evaluating the panel beside it.
 struct PreviewImage: View {
-    @ObservedObject var preview: PreviewState
+    @Bindable var preview: PreviewState
     let url: URL?
     let showingOriginal: Bool
     let originalImage: NSImage?
@@ -6014,10 +6040,26 @@ struct PreviewImage: View {
     var body: some View {
         let live = preview.active.flatMap { $0.url == url ? $0.image : nil }
         if let img = showingOriginal ? originalImage : (live ?? originalImage) {
-            Image(nsImage: img)
-                .resizable().scaledToFit()
+            // DRAWN INTO A CANVAS, NOT LAID OUT AS AN IMAGE. `Image(nsImage:).resizable().scaledToFit()`
+            // is the obvious spelling, and it is what this was — but a new `NSImage` arrives on every
+            // tick of a slider drag, and every new image view value invalidated its layout, which
+            // invalidated every flexible stack above it, which re-measured the whole window: 37% of
+            // main-thread time in a profile of the drag was `sizeThatFits` and nothing else. A
+            // `Canvas` takes whatever size it is offered and has no intrinsic size to re-ask about,
+            // so swapping the pixels inside it costs a draw and no layout. The fit is the same
+            // arithmetic `scaledToFit` does, with the 24 pt padding applied as an inset. (A CALayer
+            // with the CGImage as `contents` was tried next and measured no better — the remaining
+            // cost is Core Animation's own commit, which every spelling pays.)
+            Canvas { ctx, size in
+                let natural = img.size
+                guard natural.width > 0, natural.height > 0 else { return }
+                let available = CGSize(width: max(0, size.width - 48), height: max(0, size.height - 48))
+                let scale = min(available.width / natural.width, available.height / natural.height)
+                let w = natural.width * scale, h = natural.height * scale
+                ctx.draw(Image(nsImage: img),
+                         in: CGRect(x: (size.width - w) / 2, y: (size.height - h) / 2, width: w, height: h))
+            }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(24)
                 // The photograph itself. Announced as what the model read rather than as "image",
                 // and marked `.updatesFrequently` so VoiceOver does not re-read the whole label on
                 // every tick of a slider drag.
@@ -6037,7 +6079,7 @@ struct PreviewImage: View {
 /// The histogram, likewise: it reads the rendered pixels, so it belongs to the render rather than
 /// to the panel it is drawn at the top of.
 struct HistogramHost: View {
-    @ObservedObject var preview: PreviewState
+    @Bindable var preview: PreviewState
     var body: some View { HistogramView(reading: preview.histogram) }
 }
 
@@ -6121,7 +6163,7 @@ private struct ShareAnchor: NSViewRepresentable {
 struct ContentView: View {
     /// Owned by `KelvinApp` rather than created here, so the File menu can drive the same state
     /// the window shows — a menu command with no route to the app's state is a dead menu.
-    @ObservedObject var appState: AppState
+    @Bindable var appState: AppState
     @State private var isTargeted = false
     @State private var panStart = CGSize.zero
     /// How tall the preview column is, so the filmstrip can be told what it may take.
@@ -6134,6 +6176,11 @@ struct ContentView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
+        // `KELVIN_PRINT_CHANGES=1` prints which dependency re-evaluated this body, per evaluation.
+        // Diagnostics only: this is the root of the window, and a body evaluation here is the
+        // expensive kind. See Diagnostics.swift for the rest of the instruments.
+        let _ = Diagnostics.noteRootBodyEvaluation()
+        let _ = Diagnostics.printChangesEnabled ? Self._printChanges() : ()
         VStack(spacing: 0) {
             header
             Divider().overlay(Theme.hairline)
@@ -7059,7 +7106,6 @@ struct ContentView: View {
     }
 
     private var previewFooter: some View {
-        let temp = appState.activeTemperature
         return VStack(spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
                 Text(appState.selectedCandidateId?.capitalized ?? "—")
@@ -7100,11 +7146,9 @@ struct ContentView: View {
                     }
                 }
                 Spacer()
-                Text(temp.map { "\(Int($0)) K" } ?? "as-shot")
-                    .font(Theme.mono(12))
-                    .foregroundColor(temp.map(KelvinScale.color) ?? Theme.inkDim)
+                TemperatureLabel(appState: appState)
             }
-            TemperatureRail(marks: temp.map { [($0, true)] } ?? [])
+            LiveTemperatureRail(appState: appState)
             // Craft self-check: each flagged problem gets a one-click Fix.
             //
             // Deliberately NOT animated. These flags appear and disappear as the craft check
@@ -7573,7 +7617,7 @@ struct ContentView: View {
     /// next to "+ Colour" is a paragraph to be read rather than a palette to be reached into. The
     /// glyph says what kind of selection you are about to make; the word stays because a picture
     /// of a mask type is not a name for one.
-    private func addMaskLabel(_ text: String, icon: String) -> some View {
+    static func addMaskLabel(_ text: String, icon: String) -> some View {
         HStack(spacing: 5) {
             Image(systemName: icon)
                 .font(.system(size: 10))
@@ -7691,73 +7735,23 @@ struct ContentView: View {
                 // is exposed and coloured by its light source. Open by default because this is
                 // what gets touched on essentially every photograph.
                 CollapsibleSection("Light", icon: "sun.max", defaultOpen: true) {
-                VStack(spacing: 14) {
-                    ToneSlider(label: "Temp", value: appState.temperatureBinding, range: 2500...9500, step: 10, unit: " K", onChange: ch, identity: .temperature, neutral: 6500)
-                    ToneSlider(label: "Tint", value: $appState.edit.tint, range: -100...100, step: 1, unit: "", onChange: ch, identity: .tint)
-                    Divider().overlay(Theme.hairline).padding(.vertical, 2)
-                    ToneSlider(label: "Exposure", value: $appState.edit.exposureEV, range: -5...5, step: 0.05, unit: " EV", onChange: ch, identity: .exposure)
-                    ToneSlider(label: "Contrast", value: $appState.edit.contrast, range: -100...100, step: 1, unit: "", onChange: ch, identity: .contrast)
-                    // RECOVERY ONLY, exactly as the masked version already is. `CIHighlightShadowAdjust`
-                    // documents its highlight amount as 0…1 with 1.0 meaning no change, so the
-                    // renderer's `1.0 + highlights/100` clamps for every positive value and does
-                    // nothing — measured at ΔE 0.0 when this was found on the mask panel. The
-                    // global slider went through byte-identical code and was left at full range,
-                    // so half its travel moved a number and not the photograph.
-                    ToneSlider(label: "Highlight recovery", value: $appState.edit.highlights, range: -100...0, step: 1, unit: "", onChange: ch, identity: .highlights)
-                    ToneSlider(label: "Shadows", value: $appState.edit.shadows, range: -100...100, step: 1, unit: "", onChange: ch, identity: .shadows)
-                    ToneSlider(label: "Whites", value: $appState.edit.whites, range: -100...100, step: 1, unit: "", onChange: ch, identity: .highlights)
-                    ToneSlider(label: "Blacks", value: $appState.edit.blacks, range: -100...100, step: 1, unit: "", onChange: ch, identity: .shadows)
-                }
+                    LightSliders(appState: appState)
                 }
 
                 }
                 Group {
                 CollapsibleSection("Presence", icon: "sun.haze") {
-                VStack(spacing: 14) {
-                    ToneSlider(label: "Texture", value: $appState.edit.texture, range: -100...100, step: 1, unit: "", onChange: ch, identity: .presence)
-                    ToneSlider(label: "Clarity", value: $appState.edit.clarity, range: -100...100, step: 1, unit: "", onChange: ch, identity: .presence)
-                    ToneSlider(label: "Dehaze", value: $appState.edit.dehaze, range: 0...100, step: 1, unit: "", onChange: ch, identity: .presence)
-                    // Fusion lives in Presence but is not one: it opens the shadows and holds the
-                    // highlights, so it wears the shadow rail rather than the haze one.
-                    ToneSlider(label: "Fusion", value: $appState.edit.fusion, range: 0...100, step: 1, unit: "", onChange: ch, identity: .shadows)
-                }
+                    PresenceSliders(appState: appState)
                 }
 
                 // COLOUR — the global pair and the per-colour mixer are the same decision at two
                 // levels of detail, so they live together rather than as two headings.
                 CollapsibleSection("Colour", icon: "paintpalette") {
-                VStack(spacing: 14) {
-                    ToneSlider(label: "Vibrance", value: $appState.edit.vibrance, range: -100...100, step: 1, unit: "", onChange: ch, identity: .saturation(hue: nil))
-                    ToneSlider(label: "Saturation", value: $appState.edit.saturation, range: -100...100, step: 1, unit: "", onChange: ch, identity: .saturation(hue: nil))
-                }
-                VStack(spacing: 12) {
-                    Divider().overlay(Theme.hairline).padding(.vertical, 2)
-                    HStack(spacing: 6) {
-                        ForEach(appState.hslBands, id: \.self) { band in
-                            Circle().fill(Self.bandColor(band))
-                                .frame(width: 22, height: 22)
-                                .overlay(Circle().stroke(appState.hslBand == band ? Theme.ink : Theme.hairline,
-                                                         lineWidth: appState.hslBand == band ? 2.5 : 1))
-                                .overlay(Circle().stroke(.white.opacity(appState.hsl[band] != nil ? 0.9 : 0), lineWidth: 1).padding(3))
-                                .onTapGesture { appState.hslBand = band }
-                        }
-                    }
-                    // The mixer's rails follow the selected band, so the panel shows which colour is
-                    // under the knife — the swatch row above says which band, not what it does.
-                    ToneSlider(label: "Hue", value: appState.hslBinding(\.h), range: -100...100, step: 1, unit: "", onChange: ch,
-                               identity: .hueShift(center: ToneIdentity.bandHue(appState.hslBand)))
-                    ToneSlider(label: "Saturation", value: appState.hslBinding(\.s), range: -100...100, step: 1, unit: "", onChange: ch,
-                               identity: .saturation(hue: ToneIdentity.bandHue(appState.hslBand)))
-                    ToneSlider(label: "Luminance", value: appState.hslBinding(\.l), range: -100...100, step: 1, unit: "", onChange: ch, identity: .exposure)
-                }
+                    ColourSliders(appState: appState)
                 }
 
                 CollapsibleSection("Geometry", icon: "crop.rotate") {
-                VStack(spacing: 12) {
-                    ToneSlider(label: "Straighten", value: $appState.straighten, range: -15...15, step: 0.1, unit: "°", onChange: ch)
-                    Button(action: appState.autoStraighten) { addMaskLabel("Auto-level horizon", icon: "level") }
-                        .buttonStyle(.plain)
-                }
+                    GeometrySliders(appState: appState)
                 }
 
                 CollapsibleSection("Masks", icon: "circle.dashed", trailing: appState.maskCountLabel) {
@@ -7777,7 +7771,7 @@ struct ContentView: View {
                         Button {
                             appState.pickingInstance.toggle()
                         } label: {
-                            addMaskLabel(appState.pickingInstance
+                            ContentView.addMaskLabel(appState.pickingInstance
                                          ? "Click a subject on the photo… (esc)"
                                          : "Select a subject on the photo",
                                          icon: "hand.point.up.left")
@@ -7864,19 +7858,19 @@ struct ContentView: View {
                         Text("ADD A MASK — PICK WHAT DEFINES THE REGION")
                             .font(Theme.mono(9)).tracking(1.4).foregroundColor(Theme.inkFaint)
                         HStack(spacing: 6) {
-                            Button(action: { appState.addUserMask(.radial) }) { addMaskLabel("Radial", icon: "circle.circle") }.buttonStyle(.plain)
-                            Button(action: { appState.addUserMask(.linear) }) { addMaskLabel("Grad", icon: "rectangle.tophalf.filled") }.buttonStyle(.plain)
-                            Button(action: { appState.addUserMask(.brush) }) { addMaskLabel("Brush", icon: "paintbrush") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.radial) }) { ContentView.addMaskLabel("Radial", icon: "circle.circle") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.linear) }) { ContentView.addMaskLabel("Grad", icon: "rectangle.tophalf.filled") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.brush) }) { ContentView.addMaskLabel("Brush", icon: "paintbrush") }.buttonStyle(.plain)
                         }
                         HStack(spacing: 6) {
-                            Button(action: { appState.addUserMask(.colorRange) }) { addMaskLabel("Colour", icon: "eyedropper") }.buttonStyle(.plain)
-                            Button(action: { appState.addUserMask(.luminance) }) { addMaskLabel("Luma", icon: "circle.lefthalf.filled") }.buttonStyle(.plain)
-                            Button(action: { appState.addUserMask(.skin) }) { addMaskLabel("Skin", icon: "face.smiling") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.colorRange) }) { ContentView.addMaskLabel("Colour", icon: "eyedropper") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.luminance) }) { ContentView.addMaskLabel("Luma", icon: "circle.lefthalf.filled") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.skin) }) { ContentView.addMaskLabel("Skin", icon: "face.smiling") }.buttonStyle(.plain)
                         }
                         HStack(spacing: 6) {
-                            Button(action: { appState.addUserMask(.subject) }) { addMaskLabel("Subject", icon: "person.fill") }.buttonStyle(.plain)
-                            Button(action: { appState.addUserMask(.background) }) { addMaskLabel("Background", icon: "photo") }.buttonStyle(.plain)
-                            Button(action: { appState.addUserMask(.sky) }) { addMaskLabel("Sky", icon: "cloud.sun") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.subject) }) { ContentView.addMaskLabel("Subject", icon: "person.fill") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.background) }) { ContentView.addMaskLabel("Background", icon: "photo") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.sky) }) { ContentView.addMaskLabel("Sky", icon: "cloud.sun") }.buttonStyle(.plain)
                         }
                         // The wand sits beside Colour rather than with the automatic masks, because
                         // that is what it is the other half of: Colour takes every matching pixel in
@@ -7884,7 +7878,7 @@ struct ContentView: View {
                         // answer for everything Vision will not segment — a sea stack, a headland,
                         // a wall — which is most of a landscape.
                         HStack(spacing: 6) {
-                            Button(action: { appState.addUserMask(.wand) }) { addMaskLabel("Wand", icon: "wand.and.stars") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.wand) }) { ContentView.addMaskLabel("Wand", icon: "wand.and.stars") }.buttonStyle(.plain)
                             Spacer(minLength: 0)
                         }
                         // Presets: the same masks with the settings already in them. Built-ins
@@ -7911,7 +7905,7 @@ struct ContentView: View {
                                         }
                                     }
                                 } label: {
-                                    addMaskLabel(group.label, icon: group.icon)
+                                    ContentView.addMaskLabel(group.label, icon: group.icon)
                                 }
                                 .menuStyle(.borderlessButton)
                                 .menuIndicator(.hidden)
@@ -8166,6 +8160,115 @@ struct ContentView: View {
 }
 
 // MARK: - Candidate row
+
+
+// MARK: - Slider sections
+//
+// Each section is its own View, and the reason is invalidation rather than tidiness. SwiftUI
+// re-evaluates a body when something it READ has changed; with these inline in `sidebar`, the
+// sidebar — and through it the whole of `ContentView.body`, the footer and the filmstrip — read
+// `appState.edit`, and every tick of every slider drag rebuilt the entire window. Measured during an
+// automated drag: the window's body evaluation and layout were most of a 170 ms stall per tick. Each
+// of these reads the edit state on its own, so a tick invalidates the one section being dragged.
+
+private struct LightSliders: View {
+    @Bindable var appState: AppState
+    var body: some View {
+        VStack(spacing: 14) {
+            ToneSlider(label: "Temp", value: appState.temperatureBinding, range: 2500...9500, step: 10, unit: " K", onChange: appState.onEdit, identity: .temperature, neutral: 6500)
+            ToneSlider(label: "Tint", value: $appState.edit.tint, range: -100...100, step: 1, unit: "", onChange: appState.onEdit, identity: .tint)
+            Divider().overlay(Theme.hairline).padding(.vertical, 2)
+            ToneSlider(label: "Exposure", value: $appState.edit.exposureEV, range: -5...5, step: 0.05, unit: " EV", onChange: appState.onEdit, identity: .exposure)
+            ToneSlider(label: "Contrast", value: $appState.edit.contrast, range: -100...100, step: 1, unit: "", onChange: appState.onEdit, identity: .contrast)
+            // RECOVERY ONLY, exactly as the masked version already is. `CIHighlightShadowAdjust`
+            // documents its highlight amount as 0…1 with 1.0 meaning no change, so the
+            // renderer's `1.0 + highlights/100` clamps for every positive value and does
+            // nothing — measured at ΔE 0.0 when this was found on the mask panel. The
+            // global slider went through byte-identical code and was left at full range,
+            // so half its travel moved a number and not the photograph.
+            ToneSlider(label: "Highlight recovery", value: $appState.edit.highlights, range: -100...0, step: 1, unit: "", onChange: appState.onEdit, identity: .highlights)
+            ToneSlider(label: "Shadows", value: $appState.edit.shadows, range: -100...100, step: 1, unit: "", onChange: appState.onEdit, identity: .shadows)
+            ToneSlider(label: "Whites", value: $appState.edit.whites, range: -100...100, step: 1, unit: "", onChange: appState.onEdit, identity: .highlights)
+            ToneSlider(label: "Blacks", value: $appState.edit.blacks, range: -100...100, step: 1, unit: "", onChange: appState.onEdit, identity: .shadows)
+        }
+    }
+}
+
+private struct PresenceSliders: View {
+    @Bindable var appState: AppState
+    var body: some View {
+        VStack(spacing: 14) {
+            ToneSlider(label: "Texture", value: $appState.edit.texture, range: -100...100, step: 1, unit: "", onChange: appState.onEdit, identity: .presence)
+            ToneSlider(label: "Clarity", value: $appState.edit.clarity, range: -100...100, step: 1, unit: "", onChange: appState.onEdit, identity: .presence)
+            ToneSlider(label: "Dehaze", value: $appState.edit.dehaze, range: 0...100, step: 1, unit: "", onChange: appState.onEdit, identity: .presence)
+            // Fusion lives in Presence but is not one: it opens the shadows and holds the
+            // highlights, so it wears the shadow rail rather than the haze one.
+            ToneSlider(label: "Fusion", value: $appState.edit.fusion, range: 0...100, step: 1, unit: "", onChange: appState.onEdit, identity: .shadows)
+        }
+    }
+}
+
+private struct ColourSliders: View {
+    @Bindable var appState: AppState
+    var body: some View {
+        VStack(spacing: 14) {
+            ToneSlider(label: "Vibrance", value: $appState.edit.vibrance, range: -100...100, step: 1, unit: "", onChange: appState.onEdit, identity: .saturation(hue: nil))
+            ToneSlider(label: "Saturation", value: $appState.edit.saturation, range: -100...100, step: 1, unit: "", onChange: appState.onEdit, identity: .saturation(hue: nil))
+        }
+        VStack(spacing: 12) {
+            Divider().overlay(Theme.hairline).padding(.vertical, 2)
+            HStack(spacing: 6) {
+                ForEach(appState.hslBands, id: \.self) { band in
+                    Circle().fill(ContentView.bandColor(band))
+                        .frame(width: 22, height: 22)
+                        .overlay(Circle().stroke(appState.hslBand == band ? Theme.ink : Theme.hairline,
+                                                 lineWidth: appState.hslBand == band ? 2.5 : 1))
+                        .overlay(Circle().stroke(.white.opacity(appState.hsl[band] != nil ? 0.9 : 0), lineWidth: 1).padding(3))
+                        .onTapGesture { appState.hslBand = band }
+                }
+            }
+            // The mixer's rails follow the selected band, so the panel shows which colour is
+            // under the knife — the swatch row above says which band, not what it does.
+            ToneSlider(label: "Hue", value: appState.hslBinding(\.h), range: -100...100, step: 1, unit: "", onChange: appState.onEdit,
+                       identity: .hueShift(center: ToneIdentity.bandHue(appState.hslBand)))
+            ToneSlider(label: "Saturation", value: appState.hslBinding(\.s), range: -100...100, step: 1, unit: "", onChange: appState.onEdit,
+                       identity: .saturation(hue: ToneIdentity.bandHue(appState.hslBand)))
+            ToneSlider(label: "Luminance", value: appState.hslBinding(\.l), range: -100...100, step: 1, unit: "", onChange: appState.onEdit, identity: .exposure)
+        }
+    }
+}
+
+private struct GeometrySliders: View {
+    @Bindable var appState: AppState
+    var body: some View {
+        VStack(spacing: 12) {
+            ToneSlider(label: "Straighten", value: $appState.straighten, range: -15...15, step: 0.1, unit: "°", onChange: appState.onEdit)
+            Button(action: appState.autoStraighten) { ContentView.addMaskLabel("Auto-level horizon", icon: "level") }
+                .buttonStyle(.plain)
+        }
+    }
+}
+
+/// The footer's temperature readout, as its own view for the reason the slider sections are: it
+/// reads `activeTemperature`, which moves on every tick of a temperature drag, and read inline it
+/// took the whole of `ContentView.body` with it on every one.
+private struct TemperatureLabel: View {
+    @Bindable var appState: AppState
+    var body: some View {
+        let temp = appState.activeTemperature
+        Text(temp.map { "\(Int($0)) K" } ?? "as-shot")
+            .font(Theme.mono(12))
+            .foregroundColor(temp.map(KelvinScale.color) ?? Theme.inkDim)
+    }
+}
+
+/// Same reasoning, for the rail under it.
+private struct LiveTemperatureRail: View {
+    @Bindable var appState: AppState
+    var body: some View {
+        TemperatureRail(marks: appState.activeTemperature.map { [($0, true)] } ?? [])
+    }
+}
 
 struct CandidateRow: View {
     let candidate: CandidateViewModel

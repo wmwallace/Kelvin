@@ -71,7 +71,7 @@ enum CandidateCompare {
 /// The compare grid itself. Draws over the canvas, borrows the canvas's zoom and pan so every tile
 /// is showing the same part of the photograph, and hands a click straight to the pick.
 struct CandidateCompareView: View {
-    @ObservedObject var appState: AppState
+    @Bindable var appState: AppState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var ids: [String] {

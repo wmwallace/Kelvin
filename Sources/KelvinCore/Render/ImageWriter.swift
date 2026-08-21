@@ -206,6 +206,15 @@ public enum ImageWriter {
         }
 
         let space = colorSpace.cgColorSpace
+        // WRITTEN BESIDE, THEN MOVED INTO PLACE. A 60 MP JPEG takes seconds to encode, and a quit,
+        // a crash or a cancelled export in the middle of that used to leave a truncated file under
+        // the real name — which every viewer opens as "a photo", half grey. Encoding into a hidden
+        // sibling and renaming is atomic on every filesystem macOS mounts, and a file under the
+        // real name is therefore always a whole one. The temp is a sibling rather than in the
+        // system temp directory so the final step is a rename, never a cross-volume copy.
+        let partial = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).partial-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: partial) }
         do {
             switch fmt {
             case .jpeg(let quality):
@@ -214,14 +223,14 @@ public enum ImageWriter {
                     rawValue: kCGImageDestinationLossyCompressionQuality as String)
                 try exportContext.writeJPEGRepresentation(
                     of: image,
-                    to: url,
+                    to: partial,
                     colorSpace: space,
                     options: [qualityKey: max(0, min(1, quality))]
                 )
             case .png:
                 try exportContext.writePNGRepresentation(
                     of: image,
-                    to: url,
+                    to: partial,
                     format: .RGBA8,
                     colorSpace: space,
                     options: [:]
@@ -231,7 +240,7 @@ public enum ImageWriter {
                 // file that is no more editable, which is the whole reason to choose TIFF.
                 try exportContext.writeTIFFRepresentation(
                     of: image,
-                    to: url,
+                    to: partial,
                     format: .RGBA16,
                     colorSpace: space,
                     options: [:]
@@ -241,11 +250,19 @@ public enum ImageWriter {
                     rawValue: kCGImageDestinationLossyCompressionQuality as String)
                 try exportContext.writeHEIFRepresentation(
                     of: image,
-                    to: url,
+                    to: partial,
                     format: .RGBA8,
                     colorSpace: space,
                     options: [qualityKey: max(0, min(1, quality))]
                 )
+            }
+            // `replaceItemAt` rather than `moveItem`: the destination may already exist (an export
+            // re-run over the same name), and this swaps it in one step instead of delete-then-move,
+            // which has a window with no file at all.
+            if FileManager.default.fileExists(atPath: url.path) {
+                _ = try FileManager.default.replaceItemAt(url, withItemAt: partial)
+            } else {
+                try FileManager.default.moveItem(at: partial, to: url)
             }
         } catch {
             throw Error.encodingFailed(url)
