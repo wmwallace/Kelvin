@@ -1147,25 +1147,34 @@ final class AppState: ObservableObject {
         tearDownReadAhead(halting: false)
     }
 
-    /// Everything that has to happen before `exit()` may run, in order: stop asking for more work,
-    /// take the model back from whatever it is reading, and wait — briefly — for it to let go.
-    /// Returns whether it did. The caller (`DocumentOpenDelegate.applicationShouldTerminate`) has
-    /// the story of why a quit that skips this crashes.
-    func prepareToQuit() async -> Bool {
+    /// Everything that has to stop before `exit()` may run: the read-ahead, the in-flight read,
+    /// the scans. Synchronous — see `DocumentOpenDelegate.applicationShouldTerminate` for why it
+    /// must not live inside a Task. `awaitQuiescenceForQuit` is the wait that follows.
+    func cancelForQuit() {
         tearDownReadAhead(halting: true)
         perceiveTask?.cancel(); perceiveTask = nil
         scanTask?.cancel()
         captureIndexTask?.cancel()
         hashTask?.cancel()
-        // Wait for a GENERATION to notice its cancellation — a token or two, well under a second.
-        // A model load is not waited for: it cannot be interrupted, and two seconds of nothing
-        // before a quit is the wrong way to spend them. `isBusy` still reports it, so the caller
-        // leaves through `_exit` rather than run destructors under a thread that is inside MLX.
+    }
+
+    /// Wait — briefly — for the model and the GPU lanes to let go. Returns whether they did; the
+    /// caller leaves through `_exit` when they did not, because `exit()` under a thread that is
+    /// still inside MLX or mid-command-buffer in Core Image aborts in Metal (the crash reports of
+    /// 21 August 2026).
+    ///
+    /// A GENERATION is waited for — a cancelled one ends within a token or two. A model load is
+    /// not: it cannot be interrupted, and two seconds of nothing before a quit is the wrong way
+    /// to spend them. `isBusy` still reports it, so the caller takes the `_exit` route.
+    func awaitQuiescenceForQuit() async -> Bool {
         let deadline = Date().addingTimeInterval(2)
-        while perceptionProvider.isGenerating, Date() < deadline {
+        func gpuBusy() -> Bool {
+            Offload.depth(of: .decode) + Offload.depth(of: .render) + Offload.depth(of: .export) > 0
+        }
+        while perceptionProvider.isGenerating || gpuBusy(), Date() < deadline {
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
-        return !perceptionProvider.isBusy
+        return !perceptionProvider.isBusy && !gpuBusy()
     }
 
     private func tearDownReadAhead(halting: Bool) {
@@ -2771,7 +2780,7 @@ final class AppState: ObservableObject {
     /// state — a switch is arriving somewhere rather than leaving. `loadedURL` deliberately stays
     /// put until the new photo actually loads, so a failed load can still be retried.
     func clearPerPhotoState() {
-        activeRecipe = nil; preview.active = nil; original = nil; preview.lastRenderedCI = nil
+        activeRecipe = nil; preview.active = nil; original = nil; preview.lastRenderedCI = nil; preview.histogram = nil
         candidates = []; selectedCandidateId = nil; perception = nil
         activeCraftIssues = []; lastCraftReading = nil; exhaustedFixes = []
         userMasks = []; paintingMaskId = nil; selectedMask = nil; pickingInstance = false
@@ -2842,7 +2851,7 @@ final class AppState: ObservableObject {
         fullResCI = nil; proxyCI = nil
         candidates = []; selectedCandidateId = nil
         activeRecipe = nil; preview.active = nil; original = nil
-        preview.lastRenderedCI = nil; activeCraftIssues = []; lastCraftReading = nil; exhaustedFixes = []
+        preview.lastRenderedCI = nil; preview.histogram = nil; activeCraftIssues = []; lastCraftReading = nil; exhaustedFixes = []
         userMasks = []; paintingMaskId = nil; selectedMask = nil; pickingInstance = false
         subjectInstances = []; highlightedInstanceId = nil
         brushCache = [:]
@@ -4803,7 +4812,14 @@ final class AppState: ObservableObject {
     private struct RenderInput: @unchecked Sendable {
         let recipe: Recipe; let proxy: CIImage; let bitmaps: [String: CIImage]
     }
-    private struct RenderOutput: @unchecked Sendable { let ci: CIImage; let cg: CGImage? }
+    private struct RenderOutput: @unchecked Sendable {
+        let ci: CIImage; let cg: CGImage?
+        /// The histogram of those pixels, read where the pixels are. It used to be read in
+        /// `HistogramView.body` — a Core Image render, on the main thread, waiting on a GPU that
+        /// the preview render and the model were already using. Sampled during an automated drag:
+        /// 68% of main-thread time was that wait. The view now draws numbers it is handed.
+        let histogram: HistogramView.Reading?
+    }
     /// The two things the detached render captures that the SDK cannot always vouch for: a
     /// CIContext, and the overlay bitmap. Both are Sendable on the macOS 27 SDK and neither is
     /// on the one CI builds against, where capturing them directly makes the closure itself
@@ -4870,7 +4886,8 @@ final class AppState: ObservableObject {
                     rendered = Renderer.renderMaskOverlay(rendered, maskBitmap: ov.bitmap, invert: ov.invert, feather: ov.feather, tightness: ov.tightness, opacity: 0.6)
                 }
                 let cg = side.ctx.createCGImage(rendered, from: rendered.extent)
-                return RenderOutput(ci: cg.map { CIImage(cgImage: $0) } ?? rendered, cg: cg)
+                let concrete = cg.map { CIImage(cgImage: $0) } ?? rendered
+                return RenderOutput(ci: concrete, cg: cg, histogram: HistogramReader.read(concrete))
             }
             // PUBLISH THE PIXELS, NOT THE RECIPE FOR THEM. `rendered` is a lazy CIImage — a filter
             // graph — and handing that to the UI means everything that later reads it re-runs the
@@ -4891,6 +4908,7 @@ final class AppState: ObservableObject {
             await MainActor.run {
                 MainWork.record("render (detached)", ms: renderMs)
                 self.preview.lastRenderedCI = out.ci
+                self.preview.histogram = out.histogram
                 if let cg = out.cg, let renderedURL {
                     self.preview.active = TaggedPreview(url: renderedURL,
                                                 image: NSImage(cgImage: cg, size: .zero))
@@ -5976,6 +5994,8 @@ final class PreviewState: ObservableObject {
     /// The same pixels as a CIImage, for the histogram and the craft self-check. Materialised from
     /// the CGImage rather than left as a filter graph — see the render site.
     @Published var lastRenderedCI: CIImage?
+    /// The histogram of `lastRenderedCI`, computed on the render lane with it. See `RenderOutput`.
+    @Published var histogram: HistogramView.Reading?
 }
 
 /// The photograph on the canvas. Its own view so that a new render redraws the image without
@@ -6018,7 +6038,7 @@ struct PreviewImage: View {
 /// to the panel it is drawn at the top of.
 struct HistogramHost: View {
     @ObservedObject var preview: PreviewState
-    var body: some View { HistogramView(image: preview.lastRenderedCI) }
+    var body: some View { HistogramView(reading: preview.histogram) }
 }
 
 // MARK: - Signature: the temperature rail
@@ -8254,6 +8274,154 @@ struct CandidateRow: View {
 
 // MARK: - Histogram (live tonal distribution + clipping)
 
+/// The histogram as numbers. Lives outside `HistogramView` so that it carries no main-actor
+/// isolation: it is computed on the render lane, beside the pixels it describes, and only drawn on
+/// the main thread. (SwiftUI views are `@MainActor`, and so is everything nested in them; the
+/// runtime flagged the first attempt that left this inside.)
+/// What one pass over the sampled pixels yields. Plain numbers, so it can be computed on the
+/// render lane beside the pixels it describes and published to the main thread as data.
+struct HistogramReading: Sendable {
+    var channels: [[Double]]          // R, G, B — 64 bins each
+    var peak: Double                  // shared across channels, so casts stay visible
+    var shadowClipped: [String]
+    var highlightClipped: [String]
+    /// The mean colour of the pixels in each luma bin, and how many there were. Zero weight
+    /// means the photograph has nothing at that brightness.
+    var signature: [(r: Double, g: Double, b: Double, weight: Double)]
+
+    /// The signature as gradient stops.
+    ///
+    /// The colour is lifted toward full brightness before it is drawn. A mean shadow colour is
+    /// by definition dark, and dark-on-near-black is invisible — so the strip shows each tone's
+    /// *hue and saturation* at a legible lightness rather than its literal value, which the
+    /// curves above already carry. Without this the left half of the strip is a black smear.
+    var signatureStops: [Gradient.Stop] {
+        signature.enumerated().map { i, t in
+            let location = Double(i) / Double(max(1, signature.count - 1))
+            guard t.weight > 0 else { return .init(color: .clear, location: location) }
+            let peak = max(t.r, max(t.g, t.b))
+            // Scale so the strongest channel lands at 0.92. NOT clamped to 1 — clamping is what
+            // a first draft did, and since every shadow tone has a peak below 1 the "lift" could
+            // then only ever darken, leaving the left half of the strip the black smear it was
+            // written to prevent.
+            //
+            // But the gain is FLOORED AND CAPPED, because unbounded normalisation is its own
+            // bug and it was visible on screen: a bin averaging almost-black has a peak around
+            // 0.008, which asked for a seventy-eight-fold lift and turned 8-bit rounding noise
+            // into a confident white band at the shadow end. Below the floor there is no hue
+            // left in the data to show; above it the cap means very dark tones stay legibly
+            // darker than midtones instead of every tone being normalised to one brightness.
+            guard peak > 0.04 else {
+                return .init(color: Color(white: 0.12), location: location)
+            }
+            let lift = min(0.92 / peak, 6)
+            return .init(color: Color(red: min(1, t.r * lift),
+                                      green: min(1, t.g * lift),
+                                      blue: min(1, t.b * lift)),
+                         location: location)
+        }
+    }
+
+    /// Clipping in words. Colour and position say it first; this says it in a form that survives
+    /// being colourblind, printed, or simply not looked at closely.
+    var clippingSummary: String {
+        var parts: [String] = []
+        if !shadowClipped.isEmpty { parts.append("▼ \(shadowClipped.joined())") }
+        if !highlightClipped.isEmpty { parts.append("▲ \(highlightClipped.joined())") }
+        return parts.joined(separator: "  ")
+    }
+
+    var tooltip: String {
+        guard !clippingSummary.isEmpty else {
+            return "Tonal distribution by channel — where the three agree they read grey, "
+                + "so colour here means a cast"
+        }
+        var out: [String] = []
+        if !shadowClipped.isEmpty {
+            out.append("\(shadowClipped.joined(separator: ", ")) crushed to pure black")
+        }
+        if !highlightClipped.isEmpty {
+            out.append("\(highlightClipped.joined(separator: ", ")) blown to pure white")
+        }
+        return out.joined(separator: " · ") + " — detail is gone, not just dark or bright"
+    }
+}
+
+
+/// The one pass that produces a `HistogramReading`. Same rule as the struct: no actor, any thread.
+enum HistogramReader {
+    /// Three 64-bin channel histograms plus exact clipping counts, from one pass over the sample.
+    ///
+    /// The comment here used to say "Cheap (100×100 sample)" and it was not: `rgba8Sampled`
+    /// rasterises the image at its FULL extent and only then downsamples, so asking for 100×100
+    /// rendered all 1200 px of the proxy first. That happened inside a `Canvas` draw closure — the
+    /// main thread — on every render, which means on every tick of every slider drag.
+    ///
+    /// Scaling the CIImage down BEFORE the raster makes the claim true. Done here rather than in
+    /// `rgba8Sampled` because a dozen measurement paths depend on that function's exact resampling,
+    /// and this is a histogram: a few bins of difference are invisible, whereas silently moving
+    /// `FaceSkin` or `SubjectMask` numbers is how a calibrated threshold stops meaning what it did.
+    ///
+    /// Three channels cost no more than the one this replaced: it is the same raster and the same
+    /// single walk of the buffer, binning three values per pixel instead of computing one.
+    static func read(_ image: CIImage?) -> HistogramReading? {
+        guard let image else { return nil }
+        let small = PerceptionProxy.downsample(image, maxEdge: 100)
+        guard let data = try? ImageWriter.rgba8Sampled(small, width: 100, height: 100) else { return nil }
+
+        var channels = [[Double]](repeating: [Double](repeating: 0, count: 64), count: 3)
+        var atFloor = [0, 0, 0], atCeiling = [0, 0, 0]
+        // Colour summed per LUMA bin — the tone-colour signature. Same walk, three more adds.
+        var toneSum = [[Double]](repeating: [Double](repeating: 0, count: 3), count: 64)
+        var toneCount = [Double](repeating: 0, count: 64)
+        var samples = 0
+        data.withUnsafeBytes { rp in
+            let px = rp.bindMemory(to: UInt8.self)
+            for i in stride(from: 0, to: data.count, by: 4) {
+                samples += 1
+                let r = Double(px[i]), g = Double(px[i + 1]), b = Double(px[i + 2])
+                let luma = 0.299 * r + 0.587 * g + 0.114 * b
+                let bin = min(63, Int(luma) >> 2)
+                toneSum[bin][0] += r; toneSum[bin][1] += g; toneSum[bin][2] += b
+                toneCount[bin] += 1
+                for c in 0..<3 {
+                    let v = px[i + c]
+                    channels[c][Int(v) >> 2] += 1
+                    // CLIPPING IS MEASURED ON THE RAW VALUE, not on the end bin. A 64-bin bin covers
+                    // four levels, so "bin 63 is tall" also fires on a frame that merely has bright
+                    // highlights with all their detail intact — which is how a clipping warning
+                    // becomes something people learn to ignore.
+                    if v == 0 { atFloor[c] += 1 }
+                    if v == 255 { atCeiling[c] += 1 }
+                }
+            }
+        }
+        guard samples > 0 else { return nil }
+        // A tenth of a percent of the frame. Below that it is a stray pixel or two — a specular
+        // highlight on a chrome edge is not a blown photograph, and warning about it trains people
+        // to stop reading the warning.
+        let threshold = max(1, samples / 1000)
+        let names = HistogramView.channelNames
+        let peak = channels.flatMap { $0 }.max() ?? 0
+        // A bin holding a handful of stray pixels is noise, not a tone the photograph has. Below
+        // that floor it stays transparent rather than contributing a wild mean colour drawn from
+        // three pixels.
+        let toneFloor = max(1.0, Double(samples) / 2000)
+        let signature = (0..<64).map { i -> (r: Double, g: Double, b: Double, weight: Double) in
+            let n = toneCount[i]
+            guard n >= toneFloor else { return (0, 0, 0, 0) }
+            return (toneSum[i][0] / n / 255, toneSum[i][1] / n / 255, toneSum[i][2] / n / 255, n)
+        }
+        return HistogramReading(
+            channels: channels,
+            peak: peak,
+            shadowClipped: (0..<3).filter { atFloor[$0] > threshold }.map { names[$0] },
+            highlightClipped: (0..<3).filter { atCeiling[$0] > threshold }.map { names[$0] },
+            signature: signature)
+    }
+}
+
+
 /// The tonal readout: three channel curves, additively blended, over a quarter-stop grid.
 ///
 /// **It used to be one grey silhouette of luma, and luma is the one thing a photographer can already
@@ -8270,17 +8438,18 @@ struct CandidateRow: View {
 /// Drawn thin and lit rather than as three saturated blocks, because saturated fills at this size
 /// read as a toy. Fills sit low and the strokes carry the shape.
 struct HistogramView: View {
-    let image: CIImage?
+    typealias Reading = HistogramReading
+    /// Computed off the main thread, where the pixels were rendered; this view only draws it.
+    let reading: Reading?
 
     /// Channel colours, lifted off the primaries so they stay legible on a near-black surface while
     /// still summing to something that reads as neutral where all three overlap.
     private static let channelColors: [Color] = [
         Color(hex: 0xFF4D4D), Color(hex: 0x4DE07A), Color(hex: 0x4D95FF)
     ]
-    private static let channelNames = ["R", "G", "B"]
+    static let channelNames = ["R", "G", "B"]
 
     var body: some View {
-        let reading = Self.read(image)
         VStack(alignment: .leading, spacing: 5) {
             Canvas { ctx, size in
                 // The grid first and underneath everything: solid hairlines one shade off the
@@ -8454,143 +8623,6 @@ struct HistogramView: View {
         return path
     }
 
-    /// What one pass over the sampled pixels yields.
-    struct Reading {
-        var channels: [[Double]]          // R, G, B — 64 bins each
-        var peak: Double                  // shared across channels, so casts stay visible
-        var shadowClipped: [String]
-        var highlightClipped: [String]
-        /// The mean colour of the pixels in each luma bin, and how many there were. Zero weight
-        /// means the photograph has nothing at that brightness.
-        var signature: [(r: Double, g: Double, b: Double, weight: Double)]
-
-        /// The signature as gradient stops.
-        ///
-        /// The colour is lifted toward full brightness before it is drawn. A mean shadow colour is
-        /// by definition dark, and dark-on-near-black is invisible — so the strip shows each tone's
-        /// *hue and saturation* at a legible lightness rather than its literal value, which the
-        /// curves above already carry. Without this the left half of the strip is a black smear.
-        var signatureStops: [Gradient.Stop] {
-            signature.enumerated().map { i, t in
-                let location = Double(i) / Double(max(1, signature.count - 1))
-                guard t.weight > 0 else { return .init(color: .clear, location: location) }
-                let peak = max(t.r, max(t.g, t.b))
-                // Scale so the strongest channel lands at 0.92. NOT clamped to 1 — clamping is what
-                // a first draft did, and since every shadow tone has a peak below 1 the "lift" could
-                // then only ever darken, leaving the left half of the strip the black smear it was
-                // written to prevent.
-                //
-                // But the gain is FLOORED AND CAPPED, because unbounded normalisation is its own
-                // bug and it was visible on screen: a bin averaging almost-black has a peak around
-                // 0.008, which asked for a seventy-eight-fold lift and turned 8-bit rounding noise
-                // into a confident white band at the shadow end. Below the floor there is no hue
-                // left in the data to show; above it the cap means very dark tones stay legibly
-                // darker than midtones instead of every tone being normalised to one brightness.
-                guard peak > 0.04 else {
-                    return .init(color: Color(white: 0.12), location: location)
-                }
-                let lift = min(0.92 / peak, 6)
-                return .init(color: Color(red: min(1, t.r * lift),
-                                          green: min(1, t.g * lift),
-                                          blue: min(1, t.b * lift)),
-                             location: location)
-            }
-        }
-
-        /// Clipping in words. Colour and position say it first; this says it in a form that survives
-        /// being colourblind, printed, or simply not looked at closely.
-        var clippingSummary: String {
-            var parts: [String] = []
-            if !shadowClipped.isEmpty { parts.append("▼ \(shadowClipped.joined())") }
-            if !highlightClipped.isEmpty { parts.append("▲ \(highlightClipped.joined())") }
-            return parts.joined(separator: "  ")
-        }
-
-        var tooltip: String {
-            guard !clippingSummary.isEmpty else {
-                return "Tonal distribution by channel — where the three agree they read grey, "
-                    + "so colour here means a cast"
-            }
-            var out: [String] = []
-            if !shadowClipped.isEmpty {
-                out.append("\(shadowClipped.joined(separator: ", ")) crushed to pure black")
-            }
-            if !highlightClipped.isEmpty {
-                out.append("\(highlightClipped.joined(separator: ", ")) blown to pure white")
-            }
-            return out.joined(separator: " · ") + " — detail is gone, not just dark or bright"
-        }
-    }
-
-    /// Three 64-bin channel histograms plus exact clipping counts, from one pass over the sample.
-    ///
-    /// The comment here used to say "Cheap (100×100 sample)" and it was not: `rgba8Sampled`
-    /// rasterises the image at its FULL extent and only then downsamples, so asking for 100×100
-    /// rendered all 1200 px of the proxy first. That happened inside a `Canvas` draw closure — the
-    /// main thread — on every render, which means on every tick of every slider drag.
-    ///
-    /// Scaling the CIImage down BEFORE the raster makes the claim true. Done here rather than in
-    /// `rgba8Sampled` because a dozen measurement paths depend on that function's exact resampling,
-    /// and this is a histogram: a few bins of difference are invisible, whereas silently moving
-    /// `FaceSkin` or `SubjectMask` numbers is how a calibrated threshold stops meaning what it did.
-    ///
-    /// Three channels cost no more than the one this replaced: it is the same raster and the same
-    /// single walk of the buffer, binning three values per pixel instead of computing one.
-    static func read(_ image: CIImage?) -> Reading? {
-        guard let image else { return nil }
-        let small = PerceptionProxy.downsample(image, maxEdge: 100)
-        guard let data = try? ImageWriter.rgba8Sampled(small, width: 100, height: 100) else { return nil }
-
-        var channels = [[Double]](repeating: [Double](repeating: 0, count: 64), count: 3)
-        var atFloor = [0, 0, 0], atCeiling = [0, 0, 0]
-        // Colour summed per LUMA bin — the tone-colour signature. Same walk, three more adds.
-        var toneSum = [[Double]](repeating: [Double](repeating: 0, count: 3), count: 64)
-        var toneCount = [Double](repeating: 0, count: 64)
-        var samples = 0
-        data.withUnsafeBytes { rp in
-            let px = rp.bindMemory(to: UInt8.self)
-            for i in stride(from: 0, to: data.count, by: 4) {
-                samples += 1
-                let r = Double(px[i]), g = Double(px[i + 1]), b = Double(px[i + 2])
-                let luma = 0.299 * r + 0.587 * g + 0.114 * b
-                let bin = min(63, Int(luma) >> 2)
-                toneSum[bin][0] += r; toneSum[bin][1] += g; toneSum[bin][2] += b
-                toneCount[bin] += 1
-                for c in 0..<3 {
-                    let v = px[i + c]
-                    channels[c][Int(v) >> 2] += 1
-                    // CLIPPING IS MEASURED ON THE RAW VALUE, not on the end bin. A 64-bin bin covers
-                    // four levels, so "bin 63 is tall" also fires on a frame that merely has bright
-                    // highlights with all their detail intact — which is how a clipping warning
-                    // becomes something people learn to ignore.
-                    if v == 0 { atFloor[c] += 1 }
-                    if v == 255 { atCeiling[c] += 1 }
-                }
-            }
-        }
-        guard samples > 0 else { return nil }
-        // A tenth of a percent of the frame. Below that it is a stray pixel or two — a specular
-        // highlight on a chrome edge is not a blown photograph, and warning about it trains people
-        // to stop reading the warning.
-        let threshold = max(1, samples / 1000)
-        let names = channelNames
-        let peak = channels.flatMap { $0 }.max() ?? 0
-        // A bin holding a handful of stray pixels is noise, not a tone the photograph has. Below
-        // that floor it stays transparent rather than contributing a wild mean colour drawn from
-        // three pixels.
-        let toneFloor = max(1.0, Double(samples) / 2000)
-        let signature = (0..<64).map { i -> (r: Double, g: Double, b: Double, weight: Double) in
-            let n = toneCount[i]
-            guard n >= toneFloor else { return (0, 0, 0, 0) }
-            return (toneSum[i][0] / n / 255, toneSum[i][1] / n / 255, toneSum[i][2] / n / 255, n)
-        }
-        return Reading(
-            channels: channels,
-            peak: peak,
-            shadowClipped: (0..<3).filter { atFloor[$0] > threshold }.map { names[$0] },
-            highlightClipped: (0..<3).filter { atCeiling[$0] > threshold }.map { names[$0] },
-            signature: signature)
-    }
 }
 
 // MARK: - Tone slider (instrument readout)

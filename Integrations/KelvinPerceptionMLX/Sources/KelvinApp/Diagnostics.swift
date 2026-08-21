@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import AppKit
 
 // Instruments for the one bug the release notes admit to: "the edit panel can stutter while a
 // render or scene read is in flight".
@@ -216,6 +217,12 @@ enum StressDrag {
             cpu, wall, cpu / wall * 100).utf8))
         HitchMonitor.shared.report("drag of \(steps) steps")
         MainWork.report()
-        if exitsWhenDone { exit(0) }
+        // Through the app's own quit path, never a bare `exit(0)`: the read-ahead is usually
+        // generating when the drag finishes, and `exit()` under a live MLX generation aborts in
+        // Metal (`addCompletedHandler` after commit) — a crash report for a successful run.
+        // As a run-loop block, not from inside this task: `terminate` spins a nested run loop
+        // waiting for the delegate's reply, and that loop can only run main-actor work if the
+        // actor is free — which, from inside a task, it is not. Found the hard way.
+        if exitsWhenDone { RunLoop.main.perform { NSApplication.shared.terminate(nil) } }
     }
 }

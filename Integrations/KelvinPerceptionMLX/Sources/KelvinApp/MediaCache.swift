@@ -136,7 +136,11 @@ struct MediaCache: Sendable {
     }
 
     private func readImage(at entry: URL) -> CGImage? {
-        guard let source = CGImageSourceCreateWithURL(entry as CFURL, nil),
+        // A miss is the ordinary case on a first visit, and ImageIO logs an ERROR line for every
+        // file it is asked to open that is not there — one per thumbnail, hundreds per shoot, in
+        // the unified log where someone is trying to find a real problem. Ask the filesystem first.
+        guard FileManager.default.fileExists(atPath: entry.path),
+              let source = CGImageSourceCreateWithURL(entry as CFURL, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
         else { return nil }
         return image

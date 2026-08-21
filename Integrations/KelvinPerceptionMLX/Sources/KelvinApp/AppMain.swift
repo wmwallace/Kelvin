@@ -79,21 +79,31 @@ final class DocumentOpenDelegate: NSObject, NSApplicationDelegate {
         guard !quitting, let state = OpenRequests.shared.attachedState else { return .terminateNow }
         quitting = true
         Self.log.notice("quit requested")
-        // The escape hatch runs on GCD, deliberately: it must fire even when Swift's cooperative
-        // pool — the thing the fix in `Offload` exists to protect — has been exhausted after all.
+        // Cancel SYNCHRONOUSLY, here, on the main thread — not inside the Task below. AppKit
+        // answers `.terminateLater` by spinning a nested run loop inside this very call, and if
+        // the quit was asked for from within a main-actor task (a script, a test driver, anything
+        // that calls `terminate` from Swift concurrency) that nested loop cannot run another
+        // main-actor job: the actor is occupied by the caller. A cancellation that lived in the
+        // Task would then never happen. Found by exactly that — the drag-stress harness hung in
+        // `_shouldTerminate` with nothing cancelled and nothing replying.
+        state.cancelForQuit()
+        // The escape hatch is on a GLOBAL queue for the same reason: the main queue is the main
+        // actor, and in that nested-loop case it is not draining. `_exit` is safe from any thread
+        // and it must be reachable even when the pool — the thing `Offload` protects — has been
+        // exhausted after all.
         let hatch = DispatchWorkItem {
             Self.log.fault("quit did not complete in time — leaving through _exit")
             _exit(0)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: hatch)
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 3, execute: hatch)
         Task { @MainActor in
-            let clean = await state.prepareToQuit()
+            let clean = await state.awaitQuiescenceForQuit()
             hatch.cancel()
             if clean {
-                Self.log.notice("quit: model idle, terminating")
+                Self.log.notice("quit: model and GPU lanes idle, terminating")
                 sender.reply(toApplicationShouldTerminate: true)
             } else {
-                Self.log.fault("quit: the model was still busy after the grace period — leaving through _exit")
+                Self.log.fault("quit: the model or a render was still busy after the grace period — leaving through _exit")
                 _exit(0)
             }
         }
