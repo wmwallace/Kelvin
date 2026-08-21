@@ -223,6 +223,8 @@ enum StressDrag {
         // As a run-loop block, not from inside this task: `terminate` spins a nested run loop
         // waiting for the delegate's reply, and that loop can only run main-actor work if the
         // actor is free — which, from inside a task, it is not. Found the hard way.
-        if exitsWhenDone { RunLoop.main.perform { NSApplication.shared.terminate(nil) } }
+        if exitsWhenDone {
+            RunLoop.main.perform { MainActor.assumeIsolated { NSApplication.shared.terminate(nil) } }
+        }
     }
 }
