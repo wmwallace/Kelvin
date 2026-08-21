@@ -1108,3 +1108,66 @@ is here so that a future reader tuning for corpus ΔE does not quietly undo it.
 The `crushed` branch still lifts toward an absolute 0.24 floor, which is the same conflation with
 a harder edge. Validating any of this properly needs a face corpus spanning complexions, which
 does not exist. `KELVIN_FACE_LIFT_CAP` sweeps the cap and it is in `tuningSignature`.
+
+## D21 — Blocking work never runs on Swift's cooperative pool · **Decided 21 August 2026**
+
+**Status:** decided, in `Integrations/KelvinPerceptionMLX/Sources/KelvinApp/Offload.swift`. Every
+Core Image render, RAW decode, Vision request, export write and file-system pass the app makes goes
+through a width-limited GCD lane and is *awaited*; nothing in the app blocks a cooperative thread
+any more. The one known exception is the model's token loop, which mlx-swift-lm runs on an
+unstructured `Task` of its own that inherits no executor preference (tried, measured: the executor
+never ran a job); it is bounded to one at a time by the provider actor and `PoolWatchdog` logs a
+fault if the pool ever starves again.
+
+### Why
+
+The installed 0.8.1 was found on the owner's Mac with no windows, sitting in the Dock for three and
+a half hours, unable to quit and unable to show a window on a Dock click. The main thread was idle.
+All ten cooperative-pool threads (one per core) were parked in `-[CIContext lock]` — nine candidate
+renders and a foreground decode, all `Task.detached`, behind a read-ahead RAW decode that was itself
+`dispatch_sync`-ing into Apple's RawCamera queue. Swift's pool does not grow; once it is full of
+blocked threads no `Task {}` in the process runs again, including the ones SwiftUI needs to finish
+quitting or build a new window. A `sample` during ordinary fast browsing on a dev build showed 4–7
+of the 10 threads blocked inside Core Image in every one-second window — the deadlock was the
+unlucky end of a state the app was in constantly.
+
+After the change, the same 60-key arrow burst over 60 MP RAWs: **0** cooperative threads blocked in
+Core Image in any sample, and the app reached the last frame. Lanes: decode 1 (Apple's RawCamera
+provider queue is serial, and two RAW renders in flight through one context was the deadlock's
+shape), render 2 (a context serialises its own renders; more is threads waiting), vision 1 (Vision
+crashes when requests race — already documented at the candidate build), export 1, io 6, scan
+bounded as before. The decode lane has its own `CIContext` so a decode can never hold a lock the
+preview is waiting on. Stale work is declined at the lane door (`latestRequest`): a burst of arrow
+presses used to queue a second of decode per frame you had already left.
+
+### The quit path, which was three bugs
+
+1. Pool exhausted → SwiftUI's termination never completes (above).
+2. ⌘Q while the model is generating → `exit()` runs MLX's C++ static destructors under a thread
+   still inside MLX → `EXC_BAD_ACCESS` in `CustomKernel::eval_gpu` under `__cxa_finalize_ranges`.
+   The process died, as a crash report, on every quit that happened during a read.
+3. Nothing cancelled the read-ahead or the in-flight read on quit.
+
+`applicationShouldTerminate` now cancels everything, returns `.terminateLater`, waits up to two
+seconds for a *generation* to notice (a model load is not waited for — it cannot be interrupted),
+and replies; if the model is still inside MLX after that, or if the reply never comes, the process
+leaves through `_exit(0)`, which skips the destructors. Measured: ⌘Q mid-load 0.4 s, mid-sweep
+1.4 s, and no crash report in any of the three scenarios.
+
+**Do not reintroduce `Task.detached { blocking call }` "just this once".** The pattern was used in
+thirty places and every one of them was reasonable on its own.
+
+## D22 — Closing the window quits, and updates ask · **Decided 21 August 2026**
+
+**Status:** decided, shipped with D21. `applicationShouldTerminateAfterLastWindowClosed` is true.
+Kelvin is one window; the owner's report "when I click to quit the app it doesn't always quit, or
+it's showing that it's running even though it's not really running" described exactly the ghost
+this removes — and, that day, literally the deadlock in D21. With the window gone there is nothing
+to keep the process for.
+
+Updates: checks stay automatic and become **hourly** (`SUScheduledCheckInterval` 3600, the shortest
+Sparkle allows); installing now **asks** (`SUAutomaticallyUpdate` false — the standard "a new
+version is available" sheet). The 27 July stance (silent install) meant nobody ever saw an update
+happen, and the install waited on a quit the app could not perform. Owner's words: *it needs to
+prompt for updates, so it needs to be looking for updates more often.* Both switches remain in
+Settings ▸ General; RELEASING.md and the packaging script say the same thing.

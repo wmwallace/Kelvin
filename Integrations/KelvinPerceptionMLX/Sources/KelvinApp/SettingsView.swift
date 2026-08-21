@@ -272,7 +272,7 @@ private struct PerceptionSettings: View {
         .task {
             // Measured when the pane appears rather than on every redraw: it is a directory walk,
             // and a settings pane that stats a few thousand files per keystroke would be its own bug.
-            cacheBytes = await Task.detached(priority: .utility) { MediaCache.shared.totalBytes() }.value
+            cacheBytes = await Offload.run(.io, qos: .utility) { MediaCache.shared.totalBytes() }
         }
     }
 

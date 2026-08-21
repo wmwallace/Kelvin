@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 import Metal
 import KelvinCore
 import KelvinPerceptionMLX
+import os
 
 // MARK: - Design system: "an instrument for light"
 //
@@ -939,9 +940,9 @@ final class AppState: ObservableObject {
             // the moment Apply was clicked — off the main actor, like the neighborhood seed and
             // every other per-file pass in this file. Same pattern, previously applied to one
             // seeder and not the other.
-            let targets = await Task.detached(priority: .userInitiated) {
+            let targets = await Offload.run(.io) {
                 scope.filter { PerceptionStore.load(for: $0, modelId: modelId) == nil }
-            }.value
+            }
             guard let self, !Task.isCancelled else { return }
             self.readQueue.seedSweep(targets)
             self.publishReadProgress()
@@ -970,11 +971,11 @@ final class AppState: ObservableObject {
             // The unread filter is a `stat` and a JSON read per neighbor, and the walk visits
             // more than it keeps once nearby frames are read — off the main actor, like every
             // other per-file pass in this file.
-            let picks = await Task.detached(priority: .utility) {
+            let picks = await Offload.run(.io, qos: .utility) {
                 ReadAheadQueue.neighborhood(around: anchor, in: folder) {
                     PerceptionStore.load(for: $0, modelId: modelId) == nil
                 }
-            }.value
+            }
             guard let self, !Task.isCancelled, self.imageURL == anchor else { return }
             self.readQueue.seedNeighborhood(picks)
             self.publishReadProgress()
@@ -1115,12 +1116,21 @@ final class AppState: ObservableObject {
     /// Decode one frame and hand back ONLY its perception proxy. The full-resolution decode
     /// lives and dies inside the `autoreleasepool` — the read-ahead never holds a 60 MP frame
     /// beyond the downsample, which is what makes running one decode ahead affordable.
+    ///
+    /// On the decode lane at LOW priority, behind anything the foreground asks for: the photograph
+    /// on screen must never queue behind one nobody is looking at yet. `.utility` rather than
+    /// `.background` QoS, because the lane is serial and a background-throttled decode at its head
+    /// would hold up a foreground decode queued behind it — the old priority inversion in new
+    /// clothes. The lane and its own context are what keep this decode from ever holding a lock
+    /// the preview or the candidate build is waiting on; see `Offload`.
     private nonisolated static func decodeReadProxy(_ url: URL) -> Task<ReadAheadProxy, Error> {
-        Task.detached(priority: .background) {
-            try autoreleasepool {
-                let image = try ImageDecoder.decode(url: url)
-                return ReadAheadProxy(
-                    proxy: Self.materialiseShared(PerceptionProxy.downsample(image)))
+        Task {
+            try await Offload.run(.decode, qos: .utility, priority: .low) {
+                try autoreleasepool {
+                    let image = try ImageDecoder.decode(url: url)
+                    return ReadAheadProxy(
+                        proxy: Self.materialiseDecoded(PerceptionProxy.downsample(image)))
+                }
             }
         }
     }
@@ -1135,6 +1145,27 @@ final class AppState: ObservableObject {
     /// Leaving the shoot ends the read-ahead with it, but the NEXT folder starts clean.
     func resetReadAhead() {
         tearDownReadAhead(halting: false)
+    }
+
+    /// Everything that has to happen before `exit()` may run, in order: stop asking for more work,
+    /// take the model back from whatever it is reading, and wait — briefly — for it to let go.
+    /// Returns whether it did. The caller (`DocumentOpenDelegate.applicationShouldTerminate`) has
+    /// the story of why a quit that skips this crashes.
+    func prepareToQuit() async -> Bool {
+        tearDownReadAhead(halting: true)
+        perceiveTask?.cancel(); perceiveTask = nil
+        scanTask?.cancel()
+        captureIndexTask?.cancel()
+        hashTask?.cancel()
+        // Wait for a GENERATION to notice its cancellation — a token or two, well under a second.
+        // A model load is not waited for: it cannot be interrupted, and two seconds of nothing
+        // before a quit is the wrong way to spend them. `isBusy` still reports it, so the caller
+        // leaves through `_exit` rather than run destructors under a thread that is inside MLX.
+        let deadline = Date().addingTimeInterval(2)
+        while perceptionProvider.isGenerating, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return !perceptionProvider.isBusy
     }
 
     private func tearDownReadAhead(halting: Bool) {
@@ -1326,9 +1357,9 @@ final class AppState: ObservableObject {
     /// this class has twice put the window on the floor by doing per-file work on the main thread.
     private func loadEditedMarkers(among photos: [URL]) {
         Task { [weak self] in
-            let edited = await Task.detached(priority: .utility) {
+            let edited = await Offload.run(.io, qos: .utility) {
                 EditStore.edited(among: photos)
-            }.value
+            }
             self?.editedURLs.formUnion(edited)
         }
     }
@@ -1378,13 +1409,13 @@ final class AppState: ObservableObject {
         focus = focus.filter { keep.contains($0.key) }
         triage = triage.filter { keep.contains($0.key) }
         captureIndexTask = Task { [weak self] in
-            let index = await Task.detached(priority: .utility) {
+            let index = await Offload.run(.io, qos: .utility) {
                 // Through the cache rather than `PhotoOrder.captureIndex` directly. The ordering
                 // rules stay in `PhotoOrder` where they are tested; the difference is only that a
                 // folder opened yesterday does not re-read 437 EXIF headers to draw the same strip.
                 // Locally that saves a second; over SMB it is the dominant cost of opening a shoot.
                 MediaCache.shared.captureIndex(for: photos)
-            }.value
+            }
             guard !Task.isCancelled, let self else { return }
             // Guard against a folder switch that started while this read was running — a late
             // result must not re-sort the strip you are looking at now using another folder's
@@ -2031,7 +2062,10 @@ final class AppState: ObservableObject {
                     // measures via `PhotoTriage.read` and writes through. Either way the result
                     // lands below exactly as a fresh measurement would — `triage` AND `focus`.
                     group.addTask(priority: .userInitiated) {
-                        (url, MediaCache.shared.verdict(for: url))
+                        // The decode is on the scan lane, not on this pool thread: the group only
+                        // bounds how many are asked for at once, Offload is what keeps them off
+                        // the cooperative pool while they run.
+                        (url, await Offload.run(.scan) { MediaCache.shared.verdict(for: url) })
                     }
                 }
                 for _ in 0..<min(limit, pending.count) { start() }
@@ -2450,9 +2484,9 @@ final class AppState: ObservableObject {
             // the macOS 27 SDK and is unavailable on the one CI builds against, so handing one out
             // of a detached task compiles here and fails there. CGImage is Sendable on both, and
             // the NSImage is wanted on the main actor anyway.
-            let cg = await Task.detached(priority: .utility) {
+            let cg = await Offload.run(.io, qos: .utility) {
                 PhotoBrowser.thumbnailCG(for: url)
-            }.value
+            }
             let image = cg.map { NSImage(cgImage: $0, size: .zero) }
             guard let self else { return }
             self.thumbnailsInFlight.remove(url)
@@ -2532,11 +2566,11 @@ final class AppState: ObservableObject {
     /// decision and not one to make by accident.
     private func signature(for url: URL) async -> PhotoTriage.Signature? {
         if let known = triage[url]?.signature { return known }
-        return await Task.detached(priority: .userInitiated) {
+        return await Offload.run(.scan) {
             guard let proxy = PerceptionProxy.measurementProxy(url, maxEdge: PhotoTriage.proxyEdge)
             else { return nil }
             return PhotoTriage.signature(of: proxy)
-        }.value
+        }
     }
 
     private func reusablePerception(for url: URL) async -> Perception? {
@@ -2970,9 +3004,9 @@ final class AppState: ObservableObject {
         // plus a stat per entry, and on a share that is the first place the window can freeze.
         let siblings: [URL]
         if includeFolderOnOpen {
-            let listed = await Task.detached(priority: .userInitiated) {
+            let listed = await Offload.run(.io) {
                 PhotoBrowser.siblings(of: url)
-            }.value
+            }
             siblings = listed.filter { !dismissedURLs.contains($0) || $0 == url }
         } else {
             siblings = [url]
@@ -3038,7 +3072,7 @@ final class AppState: ObservableObject {
         // cannot paint and there is no way to cancel. That is the beachball people reported when
         // opening a photograph from a NAS, and it happened before Kelvin had read a single byte of
         // the file.
-        let probe = await Task.detached(priority: .userInitiated) { () -> OpenTarget in
+        let probe = await Offload.run(.io) { () -> OpenTarget in
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
                 return .missing
@@ -3049,7 +3083,7 @@ final class AppState: ObservableObject {
             let files = (try? BatchApply.imageFiles(in: url))
                 .map { PhotoOrder.sorted($0, by: .filename) } ?? []
             return .folder(first: files.first)
-        }.value
+        }
 
         switch probe {
         case .missing:
@@ -3153,6 +3187,9 @@ final class AppState: ObservableObject {
     }
 
     func loadPhoto(from url: URL) async {
+        Self.latestRequest.set(url)
+        let openedAt = Date()
+        Self.lifecycle.notice("open \(url.lastPathComponent, privacy: .public)")
         isProcessing = true
         statusMessage = "Decoding…"
         // Keep whatever you were working on before this photo takes over.
@@ -3174,11 +3211,11 @@ final class AppState: ObservableObject {
         // An EXIF header read, off the main actor and through the cache. It is one file open, which
         // is nothing locally and a round trip on a share — and it sat on the main thread in front of
         // the decode, so the window could not even paint the new filename until it came back.
-        let opened = await Task.detached(priority: .userInitiated) {
+        let opened = await Offload.run(.io) {
             // Both answers come out of the same trip to the filesystem, and neither belongs on the
             // main thread. `isNetwork` is one `statfs` and cached per volume after the first frame.
             (capture: MediaCache.shared.captureInfo(for: url), onNetwork: StorageVolume.isNetwork(url))
-        }.value
+        }
         guard imageURL == url else { return }
         capture = opened.capture
         onNetworkVolume = opened.onNetwork
@@ -3199,7 +3236,11 @@ final class AppState: ObservableObject {
             // SHA-256-ing a 60 MB file together take many seconds; run on the main thread they
             // block every frame, so the window could not paint and the app looked dead on exactly
             // the files it exists to edit.
-            let decoded = try await Task.detached(priority: .userInitiated) { () throws -> DecodedPhoto in
+            //
+            // ON THE DECODE LANE, AT THE HEAD OF IT. This is the photograph somebody is waiting
+            // for; a read-ahead decode queued on the same lane yields its place. See `Offload`.
+            let decoded = try await Offload.run(.decode, priority: .veryHigh) { () throws -> DecodedPhoto in
+                guard Self.latestRequest.isCurrent(url) else { throw CancellationError() }
                 let fullRes = try ImageDecoder.decode(url: url)
 
                 // The model wants a small 768px proxy (non-negotiable #4); the EDIT proxy is a bit
@@ -3234,14 +3275,17 @@ final class AppState: ObservableObject {
                 // why taking the camera's embedded preview would be wrong rather than merely
                 // faster.
                 let proxy = PerceptionProxy.fromFile(url, maxEdge: 1200, matching: fullRes.extent)
-                    ?? Self.materialiseShared(PerceptionProxy.downsample(fullRes, maxEdge: 1200))
+                    ?? Self.materialiseDecoded(PerceptionProxy.downsample(fullRes, maxEdge: 1200))
                 // Derived from the edit proxy above, and materialised for the same reason it is:
                 // left lazy, every measurement downstream would re-run the 1200 px scale.
-                let perceptionProxy = Self.materialiseShared(PerceptionProxy.downsample(proxy))
+                let perceptionProxy = Self.materialiseDecoded(PerceptionProxy.downsample(proxy))
+                let preview = Self.decodeContext.createCGImage(proxy, from: proxy.extent)
+                    .map { NSImage(cgImage: $0, size: NSZeroSize) }
                 return DecodedPhoto(fullRes: fullRes, perceptionProxy: perceptionProxy,
-                                    proxy: proxy, originalPreview: Self.ciToNSImageShared(proxy))
-            }.value
+                                    proxy: proxy, originalPreview: preview)
+            }
             guard imageURL == url else { return }
+            Self.lifecycle.notice("decoded \(url.lastPathComponent, privacy: .public) in \(Int(Date().timeIntervalSince(openedAt) * 1000)) ms")
 
             // The decode has landed, so these images now belong to `url` — and `loadedURL` moves
             // with them, in the same breath, never before.
@@ -3260,7 +3304,7 @@ final class AppState: ObservableObject {
             self.imageId = ""
             self.hashTask?.cancel()
             self.hashTask = Task { [weak self] in
-                let id = await Task.detached(priority: .utility) { MediaCache.shared.imageId(for: url) }.value
+                let id = await Offload.run(.io, qos: .utility) { MediaCache.shared.imageId(for: url) }
                 guard let self, let id, self.imageURL == url else { return }
                 self.imageId = id
             }
@@ -3324,6 +3368,7 @@ final class AppState: ObservableObject {
             }
             guard imageURL == url else { return }
             self.perception = perceptionRead
+            Self.lifecycle.notice("perceived \(url.lastPathComponent, privacy: .public) at \(Int(Date().timeIntervalSince(openedAt) * 1000)) ms — \(self.statusMessage, privacy: .public)")
 
             hasReadAPhoto = true
             statusMessage = "Measuring…"
@@ -3349,8 +3394,12 @@ final class AppState: ObservableObject {
             // The image every recipe decision is measured on. Named, because the difference between
             // this and `proxy` is load-bearing — see the block below.
             let measureOn = perceptionProxy
+            let measureInputs = MeasureInputs(proxy: proxy, measureOn: measureOn)
             let measurement = try await Task.detached(priority: .userInitiated) { () throws -> MeasuredPhoto in
-                async let focus = FocusMeasure.read(proxy)
+                // Two lanes, AWAITED from this task rather than run on it: the focus read is Core
+                // Image and overlaps; everything that touches Vision goes through the serial vision
+                // lane. Neither holds a cooperative thread while it works — see `Offload`.
+                async let focus = Offload.run(.render) { FocusMeasure.read(measureInputs.proxy) }
 
                 // MEASURED ON THE PERCEPTION PROXY, NOT THE EDIT PROXY — and this is the whole
                 // point of the change, not an optimisation.
@@ -3371,14 +3420,17 @@ final class AppState: ObservableObject {
                 // `focus` and `instances` deliberately stay on the 1200 px edit proxy: neither
                 // feeds a recipe or a curation decision. They are the strip's triage and the
                 // click-to-mask targets, and they want the finer image.
-                let sampleBytes = try ImageMetrics.sample(measureOn)
-                let stats = ImageStatistics.compute(from: sampleBytes)
-                // Serial, deliberately. Do not turn these into `async let`.
-                let masks = LocalMasks.measure(in: measureOn)
-                let instances = SubjectInstances.detect(in: proxy)
-
-                return await MeasuredPhoto(stats: stats, masks: masks,
-                                           focus: focus, instances: instances)
+                let rest = try await Offload.run(.vision) { () throws -> MeasuredSansFocus in
+                    guard Self.latestRequest.isCurrent(url) else { throw CancellationError() }
+                    let sampleBytes = try ImageMetrics.sample(measureInputs.measureOn)
+                    let stats = ImageStatistics.compute(from: sampleBytes)
+                    // Serial, deliberately. Do not turn these into `async let`.
+                    let masks = LocalMasks.measure(in: measureInputs.measureOn)
+                    let instances = SubjectInstances.detect(in: measureInputs.proxy)
+                    return MeasuredSansFocus(stats: stats, masks: masks, instances: instances)
+                }
+                return await MeasuredPhoto(stats: rest.stats, masks: rest.masks,
+                                           focus: focus, instances: rest.instances)
             }.value
 
             guard imageURL == url else { return }
@@ -3469,30 +3521,44 @@ final class AppState: ObservableObject {
                 }
                 let inputs = Inputs(measureOn: measureOn, masks: proxyMasks)
 
-                var prepared: [Prepared] = await withTaskGroup(of: Prepared?.self) { group in
+                let prepared: [Prepared] = await withTaskGroup(of: Prepared?.self) { group in
                     for (index, recipe) in recipes.enumerated() {
                         group.addTask {
-                            // Rendered on the 768 px measurement image, matching `adaptedRecipe`
-                            // exactly. The previews are picker thumbnails, so 768 is ample.
-                            let renderedCI = Renderer.render(inputs.measureOn, with: recipe,
-                                                             maskBitmaps: inputs.masks)
-                            guard let cg = Self.sharedContext.createCGImage(
-                                      renderedCI, from: renderedCI.extent),
-                                  let stats = try? ImageStatistics.compute(renderedCI)
-                            else { return nil }
-                            return Prepared(index: index, recipe: recipe,
-                                            rendered: renderedCI, cg: cg, stats: stats)
+                            // ON THE RENDER LANE, not on this pool thread. Eight of these used to
+                            // block eight cooperative threads on one context's lock — see the note
+                            // at the top of `Offload` for what that cost. The group still runs
+                            // them together; the lane decides how many render at once.
+                            await Offload.run(.render) { () -> Prepared? in
+                                guard Self.latestRequest.isCurrent(url) else { return nil }
+                                // Rendered on the 768 px measurement image, matching
+                                // `adaptedRecipe` exactly. The previews are picker thumbnails,
+                                // so 768 is ample.
+                                let renderedCI = Renderer.render(inputs.measureOn, with: recipe,
+                                                                 maskBitmaps: inputs.masks)
+                                guard let cg = Self.sharedContext.createCGImage(
+                                          renderedCI, from: renderedCI.extent),
+                                      let stats = try? ImageStatistics.compute(renderedCI)
+                                else { return nil }
+                                return Prepared(index: index, recipe: recipe,
+                                                rendered: renderedCI, cg: cg, stats: stats)
+                            }
                         }
                     }
                     var out: [Prepared] = []
                     for await item in group { if let item { out.append(item) } }
-                    return out
+                    // A task group completes in whatever order the work finishes. The curator is
+                    // fed a list and ties on score are broken by position, so an order that
+                    // depends on which GPU job landed first would make the candidate set
+                    // non-deterministic between runs on the same photograph. Sorted back into
+                    // engine order.
+                    return out.sorted { $0.index < $1.index }
                 }
-                // A task group completes in whatever order the work finishes. The curator is fed a
-                // list and ties on score are broken by position, so an order that depends on which
-                // GPU job landed first would make the candidate set non-deterministic between runs
-                // on the same photograph. Sorted back into engine order.
-                prepared.sort { $0.index < $1.index }
+
+                // The Vision half, on its serial lane.
+                return await Offload.run(.vision) { () -> CandidateBatch in
+                guard Self.latestRequest.isCurrent(url) else {
+                    return CandidateBatch(scored: [], previews: [:])
+                }
 
                 // ONE face detection for the whole set, not one per candidate.
                 //
@@ -3507,7 +3573,7 @@ final class AppState: ObservableObject {
                 // Holding the face set constant across the eight also makes the comparison a fairer
                 // one than it was — a detection that shifted between candidates would have them
                 // answering slightly different questions.
-                let faces = FaceSkin.detect(in: measureOn)
+                let faces = FaceSkin.detect(in: inputs.measureOn)
 
                 var scored: [CandidateCurator.Scored] = []
                 var previews: [String: NSImage] = [:]
@@ -3519,12 +3585,14 @@ final class AppState: ObservableObject {
                     scored.append(.init(recipe: item.recipe, score: score))
                 }
                 return CandidateBatch(scored: scored, previews: previews)
+                }
             }.value
             // Building candidates is now asynchronous, so a second photo can be opened while the
             // first is still working. Without this guard those results would land on whichever
             // photo happens to be showing — thumbnails from one frame beside the preview of
             // another. If we've moved on, drop them.
             guard imageURL == url else { return }
+            Self.lifecycle.notice("candidates for \(url.lastPathComponent, privacy: .public) at \(Int(Date().timeIntervalSince(openedAt) * 1000)) ms — \(built.scored.count) scored")
             let scored = built.scored
             let previews = built.previews
             // THE SHOOT'S LOOK DECIDES WHICH CANDIDATE OPENS, when the shoot is in one — and the
@@ -3704,7 +3772,7 @@ final class AppState: ObservableObject {
         compareRenderToken += 1
         let token = compareRenderToken
         Task { [weak self] in
-            let rendered = await Task.detached(priority: .userInitiated) { () -> CompareRenders in
+            let rendered = await Offload.run(.render) { () -> CompareRenders in
                 var out: [String: NSImage] = [:]
                 for item in items {
                     let ci = Renderer.render(proxy, with: item.recipe, maskBitmaps: masks)
@@ -3713,7 +3781,7 @@ final class AppState: ObservableObject {
                     }
                 }
                 return CompareRenders(images: out)
-            }.value
+            }
             guard let self, self.compareRenderToken == token, self.imageURL == url else { return }
             self.compareRenders = rendered.images
         }
@@ -3769,18 +3837,22 @@ final class AppState: ObservableObject {
                 .merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked }
                 .merging(wandBitmaps(extent: proxy.extent, source: proxy)) { _, grown in grown })
         Task.detached(priority: .userInitiated) {
-            // Vision's face-rectangle detector fires on animals — it reports a face on a cat — so
-            // every skin rule would otherwise be applied to fur. The semantic person segmentation
-            // answers honestly, and its cost is one click's worth, not one render's.
-            let isPerson = SubjectMask.person(in: input.proxy) != nil
-            let settled = try? CraftFix.converge(issue: issue, from: start,
-                                                 subjectIsPerson: isPerson) { g in
-                var recipe = input.recipe
-                recipe.global = g
-                let rendered = Renderer.render(input.proxy, with: recipe, maskBitmaps: input.bitmaps)
-                return CraftFix.Reading(stats: try ImageStatistics.compute(rendered),
-                                        face: FaceSkin.read(in: rendered))
-            }.global
+            // On the vision lane: every probe renders and reads Vision. See `Offload`.
+            let settled = await Offload.run(.vision) {
+                // Vision's face-rectangle detector fires on animals — it reports a face on a cat —
+                // so every skin rule would otherwise be applied to fur. The semantic person
+                // segmentation answers honestly, and its cost is one click's worth, not one
+                // render's.
+                let isPerson = SubjectMask.person(in: input.proxy) != nil
+                return (try? CraftFix.converge(issue: issue, from: start,
+                                               subjectIsPerson: isPerson) { g in
+                    var recipe = input.recipe
+                    recipe.global = g
+                    let rendered = Renderer.render(input.proxy, with: recipe, maskBitmaps: input.bitmaps)
+                    return CraftFix.Reading(stats: try ImageStatistics.compute(rendered),
+                                            face: FaceSkin.read(in: rendered))
+                })?.global
+            }
             await MainActor.run {
                 // Cleared even when the result is discarded, or the Fix buttons stay wedged on the
                 // photograph you moved to.
@@ -3817,13 +3889,15 @@ final class AppState: ObservableObject {
                 .merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked }
                 .merging(wandBitmaps(extent: proxy.extent, source: proxy)) { _, grown in grown })
         Task.detached(priority: .userInitiated) {
-            let isPerson = SubjectMask.person(in: input.proxy) != nil
-            let run = try? CraftFix.fixAll(from: start, subjectIsPerson: isPerson) { g in
-                var recipe = input.recipe
-                recipe.global = g
-                let rendered = Renderer.render(input.proxy, with: recipe, maskBitmaps: input.bitmaps)
-                return CraftFix.Reading(stats: try ImageStatistics.compute(rendered),
-                                        face: FaceSkin.read(in: rendered))
+            let run = await Offload.run(.vision) {
+                let isPerson = SubjectMask.person(in: input.proxy) != nil
+                return try? CraftFix.fixAll(from: start, subjectIsPerson: isPerson) { g in
+                    var recipe = input.recipe
+                    recipe.global = g
+                    let rendered = Renderer.render(input.proxy, with: recipe, maskBitmaps: input.bitmaps)
+                    return CraftFix.Reading(stats: try ImageStatistics.compute(rendered),
+                                            face: FaceSkin.read(in: rendered))
+                }
             }
             await MainActor.run {
                 self.fixInProgress = false
@@ -3914,17 +3988,19 @@ final class AppState: ObservableObject {
                 .merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked }
                 .merging(wandBitmaps(extent: proxy.extent, source: proxy)) { _, grown in grown })
         Task.detached(priority: .userInitiated) {
-            let settled = try? CraftFix.convergeSubject(issue: issue, from: start) { state in
-                var trial = input.recipe
-                var vm = UserMaskVM(kind: .subject)
-                vm.id = maskId
-                vm.exposure = state.exposureEV
-                vm.contrast = state.contrast
-                vm.saturation = saturation
-                trial.masks = others + [vm.toMask()]
-                let rendered = Renderer.render(input.proxy, with: trial, maskBitmaps: input.bitmaps)
-                return CraftFix.Reading(stats: try ImageStatistics.compute(rendered),
-                                        face: FaceSkin.read(in: rendered))
+            let settled = await Offload.run(.vision) {
+                try? CraftFix.convergeSubject(issue: issue, from: start) { state in
+                    var trial = input.recipe
+                    var vm = UserMaskVM(kind: .subject)
+                    vm.id = maskId
+                    vm.exposure = state.exposureEV
+                    vm.contrast = state.contrast
+                    vm.saturation = saturation
+                    trial.masks = others + [vm.toMask()]
+                    let rendered = Renderer.render(input.proxy, with: trial, maskBitmaps: input.bitmaps)
+                    return CraftFix.Reading(stats: try ImageStatistics.compute(rendered),
+                                            face: FaceSkin.read(in: rendered))
+                }
             }
             await MainActor.run {
                 self.fixInProgress = false
@@ -4038,9 +4114,9 @@ final class AppState: ObservableObject {
         let input = ImageBox(image: proxy)
         let photo = imageURL            // see `applyFix`: a horizon belongs to one photograph
         Task { [weak self] in
-            let deg = await Task.detached(priority: .userInitiated) {
+            let deg = await Offload.run(.vision) {
                 HorizonDetector.levelingAngle(in: input.image)
-            }.value
+            }
             guard let self, self.imageURL == photo else { return }
             // EVERY outcome says something. This returned silently when no horizon was found and
             // rotated by ~0° when the frame was already level — two different kinds of nothing,
@@ -4786,11 +4862,16 @@ final class AppState: ObservableObject {
                                   overlay: showOverlay ? activeSelectedMaskBitmap(extent: proxy.extent) : nil)
         Task.detached(priority: .userInitiated) {
             let renderStart = Date()
-            var rendered = Renderer.render(input.proxy, with: input.recipe, maskBitmaps: input.bitmaps)
-            if let ov = side.overlay {
-                rendered = Renderer.renderMaskOverlay(rendered, maskBitmap: ov.bitmap, invert: ov.invert, feather: ov.feather, tightness: ov.tightness, opacity: 0.6)
+            // The render itself is on the render lane at interactive QoS — a slider is being
+            // dragged — and this task only waits for it. See `Offload`.
+            let out = await Offload.run(.render, qos: .userInteractive) { () -> RenderOutput in
+                var rendered = Renderer.render(input.proxy, with: input.recipe, maskBitmaps: input.bitmaps)
+                if let ov = side.overlay {
+                    rendered = Renderer.renderMaskOverlay(rendered, maskBitmap: ov.bitmap, invert: ov.invert, feather: ov.feather, tightness: ov.tightness, opacity: 0.6)
+                }
+                let cg = side.ctx.createCGImage(rendered, from: rendered.extent)
+                return RenderOutput(ci: cg.map { CIImage(cgImage: $0) } ?? rendered, cg: cg)
             }
-            let cg = side.ctx.createCGImage(rendered, from: rendered.extent)
             // PUBLISH THE PIXELS, NOT THE RECIPE FOR THEM. `rendered` is a lazy CIImage — a filter
             // graph — and handing that to the UI means everything that later reads it re-runs the
             // whole chain, on whichever thread asks. Two things ask, and both ask on the main one:
@@ -4806,7 +4887,6 @@ final class AppState: ObservableObject {
             // gives every downstream reader concrete 8-bit pixels. The craft measurements are 8-bit
             // regardless — `ImageStatistics` samples through `rgba8Sampled` — so nothing that was
             // being measured changes.
-            let out = RenderOutput(ci: cg.map { CIImage(cgImage: $0) } ?? rendered, cg: cg)
             let renderMs = Date().timeIntervalSince(renderStart) * 1000
             await MainActor.run {
                 MainWork.record("render (detached)", ms: renderMs)
@@ -4931,20 +5011,25 @@ final class AppState: ObservableObject {
             // Build the display image if this is the first fine render for this photograph. For
             // anything that is not RAW, ImageIO decodes straight to the size we want; RAW goes
             // through the decode already in hand rather than reading the file twice.
-            let display: CIImage
-            if let cached = inputs.cached {
-                display = cached
-            } else if let fast = PerceptionProxy.fromFile(url, maxEdge: target,
-                                                          matching: inputs.fullRes.extent) {
-                display = Self.materialiseShared(fast)
-            } else {
-                display = Self.materialiseShared(
-                    PerceptionProxy.downsample(inputs.fullRes, maxEdge: target))
-            }
-            let extent = display.extent
-            let bitmaps = inputs.masks.mapValues { Self.scaleMask($0, to: extent) }
-            let rendered = Renderer.render(display, with: recipe, maskBitmaps: bitmaps)
-            guard let cg = Self.sharedContext.createCGImage(rendered, from: rendered.extent) else {
+            //
+            // The RAW path is a real decode, so it queues on the decode lane like every other one;
+            // the render that follows is on the render lane. Neither occupies this task's thread.
+            let display: CIImage = await Offload.run(.decode, qos: .utility) { () -> ImageBox in
+                if let cached = inputs.cached { return ImageBox(image: cached) }
+                if let fast = PerceptionProxy.fromFile(url, maxEdge: target,
+                                                       matching: inputs.fullRes.extent) {
+                    return ImageBox(image: Self.materialiseDecoded(fast))
+                }
+                return ImageBox(image: Self.materialiseDecoded(
+                    PerceptionProxy.downsample(inputs.fullRes, maxEdge: target)))
+            }.image
+            let displayBox = ImageBox(image: display)
+            guard let cg = await Offload.run(.render, qos: .utility, { () -> CGImage? in
+                let extent = displayBox.image.extent
+                let bitmaps = inputs.masks.mapValues { Self.scaleMask($0, to: extent) }
+                let rendered = Renderer.render(displayBox.image, with: recipe, maskBitmaps: bitmaps)
+                return Self.sharedContext.createCGImage(rendered, from: rendered.extent)
+            }) else {
                 return
             }
             // Handed to a main-actor METHOD as one boxed value, rather than published from inside
@@ -5191,26 +5276,38 @@ final class AppState: ObservableObject {
         let input = ExportInput(fullRes: fullRes, recipe: recipe, url: url,
                                 metadata: metadata, format: exportFormat,
                                 size: exportSize, colorSpace: exportColorSpace)
-        return await Task.detached(priority: .userInitiated) {
-            do {
-                var bitmaps: [String: CIImage] = [:]
-                var lost: [String] = []
-                if masksNeeded {
-                    bitmaps = LocalMasks.measure(in: input.fullRes).bitmaps
-                    if !references.isEmpty {
-                        let matched = SubjectInstances.reidentify(
-                            SubjectInstances.detect(in: input.fullRes), as: references)
-                        bitmaps.merge(matched.bitmaps) { _, fresh in fresh }
-                        lost = matched.unmatched
-                    }
+        // Two lanes: the Vision passes on theirs, the write on the export lane. Neither is on a
+        // cooperative thread while it works — see `Offload`.
+        let measured = await Offload.run(.vision) { () -> ExportMasks in
+            var bitmaps: [String: CIImage] = [:]
+            var lost: [String] = []
+            if masksNeeded {
+                bitmaps = LocalMasks.measure(in: input.fullRes).bitmaps
+                if !references.isEmpty {
+                    let matched = SubjectInstances.reidentify(
+                        SubjectInstances.detect(in: input.fullRes), as: references)
+                    bitmaps.merge(matched.bitmaps) { _, fresh in fresh }
+                    lost = matched.unmatched
                 }
+            }
+            return ExportMasks(bitmaps: bitmaps, lost: lost)
+        }
+        do {
+            try await Offload.run(.export) {
                 try ImageWriter.write(
-                    Renderer.render(input.fullRes, with: input.recipe, maskBitmaps: bitmaps),
+                    Renderer.render(input.fullRes, with: input.recipe, maskBitmaps: measured.bitmaps),
                     to: input.url, format: input.format, metadata: input.metadata,
                     size: input.size, colorSpace: input.colorSpace)
-                return .success(lost)
-            } catch { return .failure(error) }
-        }.value
+            }
+            return .success(measured.lost)
+        } catch { return .failure(error) }
+    }
+
+    /// The mask stack an export measured, and the subjects it could not find again. Boxed for the
+    /// lane crossing, on the same promise as every other box in this file.
+    private struct ExportMasks: @unchecked Sendable {
+        let bitmaps: [String: CIImage]
+        let lost: [String]
     }
 
     /// Render the current photograph for the share sheet and hand back the file, or nil with the
@@ -5531,7 +5628,7 @@ final class AppState: ObservableObject {
         }
         // Decode and proxy off the main actor. `AppState` is `@MainActor`, and doing this here
         // would block the thread drawing the window for every frame in the shoot.
-        let decoded = try await Task.detached(priority: .userInitiated) { () -> DecodedForExport in
+        let decoded = try await Offload.run(.decode) { () -> DecodedForExport in
             let image = try ImageDecoder.decode(url: url)
             // Materialised, not lazy. A lazy proxy is a filter graph over the FULL frame, so every
             // measurement below would silently re-render all 60 megapixels again — the trap
@@ -5541,9 +5638,9 @@ final class AppState: ObservableObject {
             // paths fall through to the same downsample; for everything else it is the difference
             // between the pixels the canvas measured and a second, subtly different set.
             let proxy = PerceptionProxy.fromFile(url, matching: image.extent)
-                ?? Self.materialiseShared(PerceptionProxy.downsample(image))
+                ?? Self.materialiseDecoded(PerceptionProxy.downsample(image))
             return DecodedForExport(image: image, proxy: proxy)
-        }.value
+        }
         // THE CACHE IS THE WHOLE PERFORMANCE STORY OF THIS FUNCTION. Measured over 25 frames at
         // 24 MP, perception was 6.43s of a 6.72s frame — 96% — and every other stage together was
         // under 0.3s. Served from cache, a frame costs roughly what the pixels cost, and a
@@ -5558,7 +5655,7 @@ final class AppState: ObservableObject {
             PerceptionStore.save(perception, for: url, modelId: modelId)
         }
         let work = DecodedForExport(image: decoded.image, proxy: decoded.proxy)
-        let resolved = try await Task.detached(priority: .userInitiated) { () throws -> Recipe in
+        let resolved = try await Offload.run(.vision) { () throws -> Recipe in
             let stats = try ImageStatistics.compute(work.proxy)
             // Per-photo subject + sky masks — each frame gets its own local decisions, measured on
             // its own proxy rather than inherited from whatever was open when the look was chosen.
@@ -5598,7 +5695,7 @@ final class AppState: ObservableObject {
             return RecipeEngine.candidate(perception: perception, statistics: stats, style: style,
                                           subjectLuma: m.subjectLuma, skyLuma: m.skyLuma,
                                           subjectOrigin: m.subjectOrigin, iso: iso)
-        }.value
+        }
         ResolvedRecipeStore.save(resolved, for: url, styleId: style.id, modelId: modelIdForCache)
         return resolved
     }
@@ -5632,16 +5729,28 @@ final class AppState: ObservableObject {
                                            metadata: ImageWriter.MetadataPolicy,
                                            size: ImageWriter.Size,
                                            colorSpace: ImageWriter.ColorSpace) async -> Bool {
-        guard let image = try? ImageDecoder.decode(url: job.source) else { return false }
-        let bitmaps = job.recipe.masks?.isEmpty == false
-            ? LocalMasks.measure(in: image).bitmaps : [:]
-        let rendered = Renderer.render(image, with: job.recipe, maskBitmaps: bitmaps)
+        // Three lanes in sequence — decode, Vision, write — each awaited. The task-group slot this
+        // runs in bounds how many frames are in flight; the lanes are what keep the work off the
+        // cooperative pool. See `Offload`.
+        guard let decoded = try? await Offload.run(.decode, { () throws -> ImageBox in
+            ImageBox(image: try ImageDecoder.decode(url: job.source))
+        }) else { return false }
+        let needsMasks = job.recipe.masks?.isEmpty == false
+        let bitmaps = needsMasks
+            ? await Offload.run(.vision) { MaskBox(bitmaps: LocalMasks.measure(in: decoded.image).bitmaps) }
+            : MaskBox(bitmaps: [:])
         do {
-            try ImageWriter.write(rendered, to: job.out, format: format, metadata: metadata,
-                                  size: size, colorSpace: colorSpace)
+            try await Offload.run(.export) {
+                let rendered = Renderer.render(decoded.image, with: job.recipe, maskBitmaps: bitmaps.bitmaps)
+                try ImageWriter.write(rendered, to: job.out, format: format, metadata: metadata,
+                                      size: size, colorSpace: colorSpace)
+            }
             return true
         } catch { return false }
     }
+
+    /// Mask bitmaps crossing a lane boundary. Same promise as `ImageBox`.
+    private struct MaskBox: @unchecked Sendable { let bitmaps: [String: CIImage] }
 
     /// Everything a detached export needs, boxed so it can cross the actor boundary. `CIImage` and
     /// `Recipe` are safe to read from another thread here — the box exists to say so explicitly
@@ -5769,6 +5878,60 @@ final class AppState: ObservableObject {
         let focus: FocusMeasure.Reading
         /// Each separable subject in the frame, for the mask list.
         let instances: [SubjectInstances.Instance]
+    }
+
+    /// The photograph most recently asked for, readable from any lane without the main actor.
+    ///
+    /// STALE WORK IS DROPPED AT THE LANE DOOR. Arrowing through a shoot asks for a decode per key
+    /// press, and the one that matters is the last. Every stage after the decode already checks
+    /// `imageURL == url` and bails, but a job that has reached the head of a serial lane has
+    /// already been paid for — measured at a second per RAW decode, so a burst of ten presses put
+    /// the frame you stopped on nine seconds behind frames you had left. A lane job looks here
+    /// first and declines if the request has moved on.
+    nonisolated private static let latestRequest = LatestRequest()
+
+    /// The app's own account of a photograph's life: opened, decoded, perceived, candidates — with
+    /// times. `log show --predicate 'subsystem == "app.usekelvin.kelvin"'` used to return four
+    /// hours of Apple's noise and nothing from Kelvin, which made "it did something odd" a question
+    /// with no evidence. Four lines per photograph is the whole cost.
+    nonisolated private static let lifecycle = Logger(subsystem: Branding.bundleIdentifier, category: "Lifecycle")
+    private final class LatestRequest: @unchecked Sendable {
+        private let lock = NSLock()
+        private var url: URL?
+        func set(_ u: URL) { lock.withLock { url = u } }
+        func isCurrent(_ u: URL) -> Bool { lock.withLock { url == u } }
+    }
+
+    /// The measurement's two inputs, boxed to cross onto the Offload lanes. Same promise as
+    /// `Inputs` in the candidate build: read-only for the whole of the measurement.
+    private struct MeasureInputs: @unchecked Sendable {
+        let proxy: CIImage
+        let measureOn: CIImage
+    }
+
+    /// Everything the vision lane measures — `MeasuredPhoto` minus the focus reading, which is
+    /// Core Image and runs on its own lane alongside.
+    private struct MeasuredSansFocus: @unchecked Sendable {
+        let stats: ImageStatistics
+        let masks: LocalMasks.Measured
+        let instances: [SubjectInstances.Instance]
+    }
+
+    /// The decode lane's OWN Core Image context. A `CIContext` serialises its renders behind one
+    /// lock, and the read-ahead decode holding that lock while parked inside RawCamera — with the
+    /// foreground's renders queued behind it — is exactly the shape of the 21 August 2026 deadlock.
+    /// Decodes materialise through this context; everything that renders an already-decoded image
+    /// uses `sharedContext`; the two never wait on each other. Same `(unsafe)` reasoning as below.
+    nonisolated(unsafe) static let decodeContext: CIContext = {
+        let opts: [CIContextOption: Any] = [.cacheIntermediates: false, .highQualityDownsample: false]
+        if let device = MTLCreateSystemDefaultDevice() { return CIContext(mtlDevice: device, options: opts) }
+        return CIContext(options: opts)
+    }()
+
+    /// `materialiseShared`, through the decode context. For use inside `Offload.run(.decode)` only.
+    nonisolated static func materialiseDecoded(_ image: CIImage) -> CIImage {
+        guard let cg = decodeContext.createCGImage(image, from: image.extent) else { return image }
+        return CIImage(cgImage: cg)
     }
 
     /// Shared with the background candidate build — a CIContext is thread-safe and expensive to
