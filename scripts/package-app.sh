@@ -198,8 +198,14 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <!-- Sparkle. The feed URL comes from Branding.appcastURL and is FROZEN once any binary
        ships — every installed copy checks it forever.
 
-       UPDATES ARE AUTOMATIC BY DEFAULT, and both switches are in Settings ▸ General for anyone
-       who wants them off. This reverses the original stance, which was to ask first and default
+       CHECKS ARE AUTOMATIC AND HOURLY; INSTALLING ASKS. Sparkle looks for a new version every
+       hour the app is open (3600 s is the shortest interval it allows) and at launch once that
+       long has passed, and when it finds one it PROMPTS — the standard "a new version is
+       available" sheet — rather than installing silently. Silent install was the original
+       default and it meant nobody ever saw an update happen: the download sat waiting for a quit
+       that, on the day this was changed, the app could not perform (21 August 2026). The owner's
+       words: it needs to prompt for updates. Both switches are in Settings ▸ General for anyone
+       who wants silent installs back, or no checks at all. This reverses the original stance, which was to ask first and default
        to nothing: an alpha that only updates the people who happened to say yes to a dialog
        leaves known-bad builds running, and every fix shipped after them is theoretical. The
        privacy cost is bounded and stated plainly in SECURITY.md and the README — the check sends
@@ -255,7 +261,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>SUFeedURL</key><string>$APPCAST_URL</string>
   <key>SUPublicEDKey</key><string>$SPARKLE_PUBKEY</string>
   <key>SUEnableAutomaticChecks</key><true/>
-  <key>SUAutomaticallyUpdate</key><true/>
+  <key>SUScheduledCheckInterval</key><integer>3600</integer>
+  <key>SUAutomaticallyUpdate</key><false/>
 </dict></plist>
 PLIST
 

@@ -80,10 +80,12 @@ Decided before the first tag, so it never has to be re-decided under release pre
 
 The app carries Sparkle; a released copy checks `Branding.appcastURL`
 (`https://usekelvin.app/appcast.xml`) automatically, and that URL is frozen the moment the first
-binary ships. Automatic checking *and* automatic installation are both on by default
-(`SUEnableAutomaticChecks`, `SUAutomaticallyUpdate`), each with a switch in Settings ▸ General.
-Which makes the delta below load-bearing rather than an optimisation: an update that installs
-itself must not be a 1.4 GB download nobody asked for. The plumbing:
+binary ships. Checking is automatic and hourly (`SUEnableAutomaticChecks`,
+`SUScheduledCheckInterval` = 3600); installing asks (`SUAutomaticallyUpdate` is `false`, so
+Sparkle shows its "a new version is available" sheet rather than installing on quit — changed
+21 August 2026 at the owner's request, after silent installs meant nobody ever saw an update).
+Each has a switch in Settings ▸ General. The delta below is still load-bearing: an update
+somebody is asked to take must not be a 1.4 GB download. The plumbing:
 
 - **Key pair**: generated 26 July 2026 with Sparkle's `generate_keys` (it lives in the build
   artifacts: `.build/artifacts/sparkle/Sparkle/bin/`). The private half lives in the login
@@ -183,8 +185,9 @@ Three things need doing before a binary leaves this machine, and none can be don
 - ~~Generate the Sparkle EdDSA key pair~~ — done 26 July 2026 (see Updates above). The private
   half is in the login Keychain and still needs backing up with the release identity.
 - ~~Check what the app says about the network once an update check exists.~~ Done with the
-  Sparkle integration, and revised on 27 July 2026 when updates became automatic by default
-  (`SUEnableAutomaticChecks` and `SUAutomaticallyUpdate` are both written `true`). SECURITY.md
+  Sparkle integration, revised on 27 July 2026 when update checks became automatic by default,
+  and again on 21 August 2026 when installing went back to asking (`SUEnableAutomaticChecks`
+  `true`, hourly; `SUAutomaticallyUpdate` `false`). SECURITY.md
   scopes the appcast check as the one allowed request, the README says it happens on its own and
   why, and Settings ▸ General carries both switches. If that default is ever reversed, those three
   places have to move together — a promise about the network is only worth what the least accurate
