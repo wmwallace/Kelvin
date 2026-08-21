@@ -34,13 +34,13 @@ final class HistogramTests: XCTestCase {
     // MARK: Reading the distribution
 
     func testNoImageReadsNothing() {
-        XCTAssertNil(HistogramView.read(nil))
+        XCTAssertNil(HistogramReader.read(nil))
     }
 
     /// Three channels, sixty-four bins each, and every sampled pixel counted exactly once per
     /// channel — the arithmetic the rest of the view divides by.
     func testEveryPixelIsCountedOncePerChannel() throws {
-        let r = try XCTUnwrap(HistogramView.read(flat(r: 128, g: 128, b: 128)))
+        let r = try XCTUnwrap(HistogramReader.read(flat(r: 128, g: 128, b: 128)))
         XCTAssertEqual(r.channels.count, 3)
         for channel in r.channels {
             XCTAssertEqual(channel.count, 64)
@@ -52,7 +52,7 @@ final class HistogramTests: XCTestCase {
     /// A neutral frame puts all three channels in the same bin — which is what makes the additive
     /// blend read as grey, and therefore what makes any colour on screen mean a cast.
     func testANeutralFramePutsEveryChannelInTheSameBin() throws {
-        let r = try XCTUnwrap(HistogramView.read(flat(r: 128, g: 128, b: 128)))
+        let r = try XCTUnwrap(HistogramReader.read(flat(r: 128, g: 128, b: 128)))
         let peaks = r.channels.map { bins in bins.firstIndex(of: bins.max()!)! }
         XCTAssertEqual(Set(peaks).count, 1, "a grey frame disagreed across channels: \(peaks)")
     }
@@ -60,7 +60,7 @@ final class HistogramTests: XCTestCase {
     /// A cast separates them. If this ever stops holding, the view is drawing three copies of the
     /// same curve and the whole redesign is cosmetic.
     func testAColourCastSeparatesTheChannels() throws {
-        let r = try XCTUnwrap(HistogramView.read(flat(r: 200, g: 120, b: 60)))
+        let r = try XCTUnwrap(HistogramReader.read(flat(r: 200, g: 120, b: 60)))
         let peaks = r.channels.map { bins in bins.firstIndex(of: bins.max()!)! }
         XCTAssertEqual(Set(peaks).count, 3, "a strong cast collapsed into one bin: \(peaks)")
         XCTAssertGreaterThan(peaks[0], peaks[1], "red should sit brighter than green here")
@@ -70,7 +70,7 @@ final class HistogramTests: XCTestCase {
     /// ONE peak shared by all three channels. Normalising each channel to its own maximum would
     /// draw every frame as three equal-height curves and flatten out exactly the casts above.
     func testThePeakIsSharedAcrossChannels() throws {
-        let r = try XCTUnwrap(HistogramView.read(flat(r: 200, g: 120, b: 60)))
+        let r = try XCTUnwrap(HistogramReader.read(flat(r: 200, g: 120, b: 60)))
         let tallest = r.channels.flatMap { $0 }.max()!
         XCTAssertEqual(r.peak, tallest, accuracy: 0.001)
     }
@@ -78,13 +78,13 @@ final class HistogramTests: XCTestCase {
     // MARK: Clipping — the part that has to be trustworthy
 
     func testPureBlackReportsEveryChannelCrushed() throws {
-        let r = try XCTUnwrap(HistogramView.read(flat(r: 0, g: 0, b: 0)))
+        let r = try XCTUnwrap(HistogramReader.read(flat(r: 0, g: 0, b: 0)))
         XCTAssertEqual(r.shadowClipped, ["R", "G", "B"])
         XCTAssertTrue(r.highlightClipped.isEmpty)
     }
 
     func testPureWhiteReportsEveryChannelBlown() throws {
-        let r = try XCTUnwrap(HistogramView.read(flat(r: 255, g: 255, b: 255)))
+        let r = try XCTUnwrap(HistogramReader.read(flat(r: 255, g: 255, b: 255)))
         XCTAssertEqual(r.highlightClipped, ["R", "G", "B"])
         XCTAssertTrue(r.shadowClipped.isEmpty)
     }
@@ -92,7 +92,7 @@ final class HistogramTests: XCTestCase {
     /// One channel can clip while the frame's brightness looks perfectly healthy. This is the case
     /// the old luma silhouette could not show at all, and the reason the channels are drawn apart.
     func testASingleChannelCanClipOnItsOwn() throws {
-        let r = try XCTUnwrap(HistogramView.read(flat(r: 255, g: 90, b: 90)))
+        let r = try XCTUnwrap(HistogramReader.read(flat(r: 255, g: 90, b: 90)))
         XCTAssertEqual(r.highlightClipped, ["R"])
     }
 
@@ -104,7 +104,7 @@ final class HistogramTests: XCTestCase {
         // 252 lands in bin 63 — the very last of the sixty-four, the one the old check keyed on —
         // and still holds three levels of detail below pure white. That is precisely the frame the
         // old rule cried wolf on, so it is the one worth pinning.
-        let r = try XCTUnwrap(HistogramView.read(flat(r: 252, g: 252, b: 252)))
+        let r = try XCTUnwrap(HistogramReader.read(flat(r: 252, g: 252, b: 252)))
         XCTAssertEqual(r.channels[0].firstIndex(of: r.channels[0].max()!), 63,
                        "the fixture should sit in the topmost bin or it proves nothing")
         XCTAssertTrue(r.highlightClipped.isEmpty,
@@ -113,7 +113,7 @@ final class HistogramTests: XCTestCase {
 
     /// Same at the bottom: nearly black is not crushed.
     func testNearlyBlackIsNotReportedAsCrushed() throws {
-        let r = try XCTUnwrap(HistogramView.read(flat(r: 6, g: 6, b: 6)))
+        let r = try XCTUnwrap(HistogramReader.read(flat(r: 6, g: 6, b: 6)))
         XCTAssertTrue(r.shadowClipped.isEmpty)
     }
 
@@ -140,7 +140,7 @@ final class HistogramTests: XCTestCase {
         let ctx = CGContext(data: &px, width: size, height: size, bitsPerComponent: 8,
                             bytesPerRow: bpr, space: cs,
                             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        let r = try XCTUnwrap(HistogramView.read(CIImage(cgImage: ctx.makeImage()!)))
+        let r = try XCTUnwrap(HistogramReader.read(CIImage(cgImage: ctx.makeImage()!)))
 
         let occupied = r.signature.enumerated().filter { $0.element.weight > 0 }
         let dark = try XCTUnwrap(occupied.first)
@@ -152,7 +152,7 @@ final class HistogramTests: XCTestCase {
     /// A tone the photograph does not contain contributes nothing. A strip that invented a colour
     /// for an empty bin would be drawing something the frame never had.
     func testEmptyTonesStayTransparent() throws {
-        let r = try XCTUnwrap(HistogramView.read(flat(r: 128, g: 128, b: 128)))
+        let r = try XCTUnwrap(HistogramReader.read(flat(r: 128, g: 128, b: 128)))
         let occupied = r.signature.filter { $0.weight > 0 }
         XCTAssertEqual(occupied.count, 1, "a single flat tone should occupy exactly one bin")
         let clearStops = r.signatureStops.filter { $0.color == .clear }
@@ -163,7 +163,7 @@ final class HistogramTests: XCTestCase {
     /// while leaving the hue relationship alone, or the strip is showing a colour the frame has not
     /// got.
     func testTheLiftBrightensShadowsWithoutChangingTheirHue() throws {
-        let r = try XCTUnwrap(HistogramView.read(flat(r: 12, g: 18, b: 38)))
+        let r = try XCTUnwrap(HistogramReader.read(flat(r: 12, g: 18, b: 38)))
         let raw = try XCTUnwrap(r.signature.first { $0.weight > 0 })
         XCTAssertLessThan(raw.b, 0.2, "the fixture really is very dark")
         // Blue stays the dominant channel after the lift, and the result is actually visible.
@@ -181,7 +181,7 @@ final class HistogramTests: XCTestCase {
     /// seventy-eight-fold gain applied to 8-bit rounding noise — so the strip stated a colour the
     /// frame did not have, at the exact end of the range people check for crushed blacks.
     func testAnAlmostBlackToneIsNotAmplifiedIntoAColour() throws {
-        let r = try XCTUnwrap(HistogramView.read(flat(r: 2, g: 2, b: 3)))
+        let r = try XCTUnwrap(HistogramReader.read(flat(r: 2, g: 2, b: 3)))
         let stop = try XCTUnwrap(r.signatureStops.first { $0.color != .clear })
         let c = NSColor(stop.color).usingColorSpace(.sRGB)!
         XCTAssertLessThan(c.brightnessComponent, 0.25,
@@ -192,7 +192,7 @@ final class HistogramTests: XCTestCase {
     /// rather than every tone being normalised to the same brightness.
     func testDarkTonesStayDarkerThanBrightOnes() throws {
         func brightness(_ v: UInt8) throws -> CGFloat {
-            let r = try XCTUnwrap(HistogramView.read(flat(r: v, g: v, b: v)))
+            let r = try XCTUnwrap(HistogramReader.read(flat(r: v, g: v, b: v)))
             let stop = try XCTUnwrap(r.signatureStops.first { $0.color != .clear })
             return NSColor(stop.color).usingColorSpace(.sRGB)!.brightnessComponent
         }
@@ -204,12 +204,12 @@ final class HistogramTests: XCTestCase {
     /// Colour and corner say it first; the caption has to say it too, or the message rests on
     /// colour alone.
     func testTheCaptionNamesTheChannelsAndTheEnd() throws {
-        let blown = try XCTUnwrap(HistogramView.read(flat(r: 255, g: 255, b: 255)))
+        let blown = try XCTUnwrap(HistogramReader.read(flat(r: 255, g: 255, b: 255)))
         XCTAssertTrue(blown.clippingSummary.contains("RGB"))
         XCTAssertTrue(blown.clippingSummary.contains("▲"))
         XCTAssertTrue(blown.tooltip.contains("pure white"))
 
-        let clean = try XCTUnwrap(HistogramView.read(flat(r: 128, g: 128, b: 128)))
+        let clean = try XCTUnwrap(HistogramReader.read(flat(r: 128, g: 128, b: 128)))
         XCTAssertTrue(clean.clippingSummary.isEmpty, "a clean frame should say nothing at all")
         XCTAssertFalse(clean.tooltip.isEmpty, "the tooltip should still explain what is drawn")
     }

@@ -86,33 +86,33 @@ final class AccessibilityTests: XCTestCase {
     /// Where the tones sit, which is the first thing anyone reads a histogram for.
     func testTheHistogramSaysWhereTheTonesSit() throws {
         // A dark frame: the mass belongs in the shadows.
-        let dark = try XCTUnwrap(HistogramView.read(flat(12)))
+        let dark = try XCTUnwrap(HistogramReader.read(flat(12)))
         XCTAssertTrue(HistogramView.spoken(dark).contains("shadows"),
                       "got: \(HistogramView.spoken(dark))")
 
-        let bright = try XCTUnwrap(HistogramView.read(flat(238)))
+        let bright = try XCTUnwrap(HistogramReader.read(flat(238)))
         XCTAssertTrue(HistogramView.spoken(bright).contains("highlights"),
                       "got: \(HistogramView.spoken(bright))")
     }
 
     /// Clipping is the thing a photographer most needs told, and it is named per channel.
     func testTheHistogramSpeaksClipping() throws {
-        let blown = try XCTUnwrap(HistogramView.read(flat(255)))
+        let blown = try XCTUnwrap(HistogramReader.read(flat(255)))
         let spoken = HistogramView.spoken(blown)
         XCTAssertTrue(spoken.contains("blown to white"), "got: \(spoken)")
 
-        let clean = try XCTUnwrap(HistogramView.read(flat(128)))
+        let clean = try XCTUnwrap(HistogramReader.read(flat(128)))
         XCTAssertTrue(HistogramView.spoken(clean).contains("nothing clipped"),
                       "got: \(HistogramView.spoken(clean))")
     }
 
     /// A cast is what the colour in the curves means, so it is what the words have to carry.
     func testACastIsSpokenAsChannelsDisagreeing() throws {
-        let warm = try XCTUnwrap(HistogramView.read(flat(r: 220, g: 130, b: 60)))
+        let warm = try XCTUnwrap(HistogramReader.read(flat(r: 220, g: 130, b: 60)))
         let spoken = HistogramView.spoken(warm)
         XCTAssertTrue(spoken.contains("R running brighter than B"), "got: \(spoken)")
 
-        let neutral = try XCTUnwrap(HistogramView.read(flat(128)))
+        let neutral = try XCTUnwrap(HistogramReader.read(flat(128)))
         XCTAssertTrue(HistogramView.spoken(neutral).contains("channels balanced"),
                       "got: \(HistogramView.spoken(neutral))")
     }
