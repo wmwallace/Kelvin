@@ -3265,6 +3265,20 @@ final class AppState {
         // the list would offer the last photo's people while this one decoded.
         subjectInstances = []; highlightedInstanceId = nil
         zoom = 1; pan = .zero
+        // FIRST PAINT FROM THE CAMERA'S OWN PREVIEW, while Apple's decode runs. A 60 MP RAW is a
+        // second or more to decode and the canvas used to show nothing for all of it; the JPEG the
+        // camera embedded is tens of milliseconds away and is the same photograph, if not the same
+        // rendering of it. It goes into `original` — what the canvas shows until the first live
+        // render lands — and the real decode replaces it the moment it arrives. Nothing downstream
+        // measures or keeps it: `measurementProxy` documents why the camera's colour is not ours.
+        Task { [weak self] in
+            let quick = await Offload.run(.render, qos: .userInteractive) { () -> CGImage? in
+                guard let ci = PerceptionProxy.measurementProxy(url, maxEdge: 1200) else { return nil }
+                return Self.sharedContext.createCGImage(ci, from: ci.extent)
+            }
+            guard let self, let quick, self.imageURL == url, self.original == nil else { return }
+            self.original = TaggedPreview(url: url, image: NSImage(cgImage: quick, size: .zero))
+        }
         do {
             // DECODE OFF THE MAIN THREAD. Decoding a 60 MP RAW, materialising the proxy and
             // SHA-256-ing a 60 MB file together take many seconds; run on the main thread they

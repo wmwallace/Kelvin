@@ -215,6 +215,12 @@ enum StressDrag {
                     "  main thread burned %.2fs of CPU over %.2fs wall = %.0f%% busy\n",
             applyMs / Double(steps), sleepMs / Double(steps),
             cpu, wall, cpu / wall * 100).utf8))
+        // Leave the photograph as it was found. The drag wrote real edits through the real
+        // pipeline — that is the point — and the last of them would otherwise persist as "your
+        // edit from 16:46" on a frame nobody touched. Back to the baseline, then long enough for
+        // the coalesced commit to land and clear the record.
+        apply(0)
+        try? await Task.sleep(nanoseconds: 700_000_000)
         HitchMonitor.shared.report("drag of \(steps) steps")
         MainWork.report()
         FileHandle.standardError.write(Data("  root body evaluations during the run: \(Diagnostics.rootBodyEvaluations)\n".utf8))

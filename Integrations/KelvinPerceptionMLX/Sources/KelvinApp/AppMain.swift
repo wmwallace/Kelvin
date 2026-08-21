@@ -164,6 +164,8 @@ struct KelvinApp: App {
                     NSApplication.shared.activate(ignoringOtherApps: true)
                     // The canary for an exhausted cooperative pool. Always on; see Offload.swift.
                     PoolWatchdog.start()
+                    // If the last run ended in a crash, say so — see CrashNotice.
+                    Task { if let notice = await CrashNotice.check() { appState.statusMessage = notice } }
                     Logger(subsystem: Branding.bundleIdentifier, category: "Lifecycle")
                         .notice("window up — \(BuildIdentity.isDevelopmentBuild ? "development" : "installed", privacy: .public) build")
                     // Off unless KELVIN_TRACE_HITCHES is set. See Diagnostics.swift.
