@@ -217,6 +217,7 @@ enum StressDrag {
             cpu, wall, cpu / wall * 100).utf8))
         HitchMonitor.shared.report("drag of \(steps) steps")
         MainWork.report()
+        FileHandle.standardError.write(Data("  root body evaluations during the run: \(Diagnostics.rootBodyEvaluations)\n".utf8))
         // Through the app's own quit path, never a bare `exit(0)`: the read-ahead is usually
         // generating when the drag finishes, and `exit()` under a live MLX generation aborts in
         // Metal (`addCompletedHandler` after commit) — a crash report for a successful run.
@@ -227,4 +228,19 @@ enum StressDrag {
             RunLoop.main.perform { MainActor.assumeIsolated { NSApplication.shared.terminate(nil) } }
         }
     }
+}
+
+/// Switches for the diagnostics that do not have a type of their own.
+@MainActor
+enum Diagnostics {
+    /// How many times the root view's body has been evaluated. The drag harness prints it beside
+    /// the hitch report: the number to compare against the step count. Every evaluation of the
+    /// root is the expensive kind — it reconstructs the window — so a drag of N steps that
+    /// evaluates the root N times has a dependency it should not have.
+    private(set) static var rootBodyEvaluations = 0
+    static func noteRootBodyEvaluation() { rootBodyEvaluations += 1 }
+    /// `KELVIN_PRINT_CHANGES=1`: the root view also prints what invalidated it, via SwiftUI's
+    /// `_printChanges`. Its output is stdout and is lost on an `_exit`, so the counter above is the
+    /// reliable instrument; this is the explanation when the counter says something is wrong.
+    static let printChangesEnabled = ProcessInfo.processInfo.environment["KELVIN_PRINT_CHANGES"] != nil
 }

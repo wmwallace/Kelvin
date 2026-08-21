@@ -955,7 +955,7 @@ struct FilmstripView: View {
 /// A checkbox rather than a dialog: the choice is a property of how someone works, so it is asked
 /// once, in the place they are already making the decision, and remembered.
 struct OpenOptions: View {
-    @ObservedObject var appState: AppState
+    @Bindable var appState: AppState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {

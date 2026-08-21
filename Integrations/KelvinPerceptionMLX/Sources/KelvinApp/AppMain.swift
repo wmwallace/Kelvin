@@ -118,7 +118,7 @@ final class DocumentOpenDelegate: NSObject, NSApplicationDelegate {
 @main
 struct KelvinApp: App {
     /// Held at App level so both the window and the File menu act on one state.
-    @StateObject private var appState = AppState()
+    @State private var appState = AppState()
 
     @NSApplicationDelegateAdaptor(DocumentOpenDelegate.self) private var openDelegate
 

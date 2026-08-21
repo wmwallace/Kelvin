@@ -74,6 +74,13 @@ struct ShootLook: Codable, Equatable {
     /// and applying to a folder that has not been listed yet would set a shoot-wide style.
     static func covers(_ scope: [URL], _ allPhotos: [URL]) -> Bool {
         guard !allPhotos.isEmpty else { return false }
+        // FAST PATHS FIRST. This is read by the footer's button label on every body evaluation —
+        // which, during a slider drag, is every tick — and standardising 874 URLs to answer "is
+        // the whole shoot in scope" was 22% of main-thread time in a profile of that drag. The
+        // scope is almost always the folder listing itself, or a strict subset of it: both are
+        // answered without touching a single path.
+        if scope.count < allPhotos.count { return false }
+        if scope == allPhotos { return true }
         let covered = Set(scope.map(\.standardizedFileURL))
         return allPhotos.allSatisfy { covered.contains($0.standardizedFileURL) }
     }

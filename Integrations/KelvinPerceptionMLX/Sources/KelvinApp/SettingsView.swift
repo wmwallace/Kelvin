@@ -16,7 +16,7 @@ import Sparkle
 /// the app is, what it runs on, where your edits are kept, and what it is licensed under. An AGPL
 /// application should be able to answer "where is the source" from inside itself.
 struct SettingsView: View {
-    @ObservedObject var appState: AppState
+    @Bindable var appState: AppState
     /// Nil in a build from source, which has no feed URL and therefore no updater. See UpdateSettings.
     var updater: SPUUpdater?
 
@@ -38,7 +38,7 @@ struct SettingsView: View {
 // MARK: - General
 
 private struct GeneralSettings: View {
-    @ObservedObject var appState: AppState
+    @Bindable var appState: AppState
     var updater: SPUUpdater?
 
     var body: some View {
