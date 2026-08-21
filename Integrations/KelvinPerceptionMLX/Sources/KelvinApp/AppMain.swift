@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import KelvinCore
 import Sparkle
+import os
 
 /// Photographs handed to Kelvin by the system — "Open With", a double-click once Kelvin is the
 /// default, or a drop on the Dock icon.
@@ -17,6 +18,9 @@ final class OpenRequests {
     static let shared = OpenRequests()
     private var pending: [URL] = []
     private weak var state: AppState?
+
+    /// The state the window is showing, for the one other delegate callback that needs it: quit.
+    var attachedState: AppState? { state }
 
     /// Called once the window exists. Drains anything that arrived before it did.
     func attach(_ state: AppState) {
@@ -40,12 +44,64 @@ final class OpenRequests {
     }
 }
 
-/// The only reason this exists. SwiftUI's `onOpenURL` is for custom schemes; a file handed over by
-/// Launch Services arrives through the `NSApplicationDelegate`.
+/// Two jobs. Files: SwiftUI's `onOpenURL` is for custom schemes, and a file handed over by Launch
+/// Services arrives through the `NSApplicationDelegate`. And quitting, which turned out to need
+/// more care than "let AppKit do it" — see `applicationShouldTerminate`.
 @MainActor
 final class DocumentOpenDelegate: NSObject, NSApplicationDelegate {
+    private static let log = Logger(subsystem: Branding.bundleIdentifier, category: "Lifecycle")
+    private var quitting = false
+
     func application(_ sender: NSApplication, open urls: [URL]) {
         OpenRequests.shared.receive(urls)
+    }
+
+    /// Kelvin is one window. Closing it is how people quit, and an app that stays in the Dock
+    /// with nothing to show was read as "it says it's running but it isn't" — which, on the day
+    /// that was investigated, it also literally was (see `Offload`). With the window gone there
+    /// is nothing left to keep the process for.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    /// Quit in order, rather than on the spot.
+    ///
+    /// `NSApplication.terminate` calls `exit()`, and `exit()` runs every C++ static destructor in
+    /// the process — MLX's among them — while the other threads are still running. A ⌘Q during a
+    /// scene read therefore crashed, reliably: the generation thread dereferenced an MLX global
+    /// that the main thread had just destroyed (crash report of 21 August 2026, `CustomKernel::
+    /// eval_gpu` under `__cxa_finalize_ranges`). The fix is to take the model back first, wait for
+    /// it to let go, and only then let AppKit exit.
+    ///
+    /// Bounded, twice over. `prepareToQuit` waits two seconds at most; and if the model has not
+    /// stopped by then — or if the reply never comes because the thing that would deliver it is
+    /// itself wedged — the process leaves through `_exit`, which skips the destructors that would
+    /// have crashed it. Either way ⌘Q ends the process, without a crash report.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !quitting, let state = OpenRequests.shared.attachedState else { return .terminateNow }
+        quitting = true
+        Self.log.notice("quit requested")
+        // The escape hatch runs on GCD, deliberately: it must fire even when Swift's cooperative
+        // pool — the thing the fix in `Offload` exists to protect — has been exhausted after all.
+        let hatch = DispatchWorkItem {
+            Self.log.fault("quit did not complete in time — leaving through _exit")
+            _exit(0)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: hatch)
+        Task { @MainActor in
+            let clean = await state.prepareToQuit()
+            hatch.cancel()
+            if clean {
+                Self.log.notice("quit: model idle, terminating")
+                sender.reply(toApplicationShouldTerminate: true)
+            } else {
+                Self.log.fault("quit: the model was still busy after the grace period — leaving through _exit")
+                _exit(0)
+            }
+        }
+        return .terminateLater
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        Self.log.notice("terminating")
     }
 }
 
@@ -96,6 +152,10 @@ struct KelvinApp: App {
                     // Finder is already waiting, and it should open ahead of the model warming.
                     OpenRequests.shared.attach(appState)
                     NSApplication.shared.activate(ignoringOtherApps: true)
+                    // The canary for an exhausted cooperative pool. Always on; see Offload.swift.
+                    PoolWatchdog.start()
+                    Logger(subsystem: Branding.bundleIdentifier, category: "Lifecycle")
+                        .notice("window up — \(BuildIdentity.isDevelopmentBuild ? "development" : "installed", privacy: .public) build")
                     // Off unless KELVIN_TRACE_HITCHES is set. See Diagnostics.swift.
                     HitchMonitor.shared.start()
                     // Load the model while the window sits on the empty state, rather than charging

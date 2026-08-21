@@ -74,6 +74,29 @@ public actor MLXPerceptionProvider: @preconcurrency PerceptionProvider {
     private let maxTokens: Int
     private var container: ModelContainer?
 
+    /// Whether the model is loading or generating RIGHT NOW, readable without awaiting the actor.
+    ///
+    /// For quitting. `exit()` runs MLX's static destructors under whatever thread is still inside
+    /// MLX, and a generation caught that way crashes the process on its way out (the 21 August 2026
+    /// crash report). The app cancels its reads and then waits on this before letting AppKit exit.
+    /// `nonisolated` because the whole point is to ask without queueing behind the generation.
+    public nonisolated var isBusy: Bool { activity.count > 0 || loading.count > 0 }
+    /// Generating, specifically — the half that a cancelled task ends within a token or two. A
+    /// model LOAD cannot be interrupted, so a quit that finds one in progress has nothing to wait
+    /// for and leaves at once.
+    public nonisolated var isGenerating: Bool { activity.count > 0 }
+    private nonisolated let activity = ActivityCount()
+    private nonisolated let loading = ActivityCount()
+
+    private final class ActivityCount: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = 0
+        var count: Int { lock.withLock { n } }
+        func enter() { lock.withLock { n += 1 } }
+        func leave() { lock.withLock { n -= 1 } }
+    }
+
+
     /// - Parameters:
     ///   - modelID: Hugging Face repo id of an MLX VLM.
     ///   - maxTokens: generation cap; a perception object is short, so this bounds a runaway.
@@ -184,6 +207,8 @@ public actor MLXPerceptionProvider: @preconcurrency PerceptionProvider {
         var timing = Timing()
         let loadStart = Date()
         let container = try await loadedContainer()
+        activity.enter()
+        defer { activity.leave() }
         timing.modelLoad = Date().timeIntervalSince(loadStart)
         // The model load can take fifteen seconds on first call — long enough for the user to
         // have moved on. Check again before paying for a generation.
@@ -205,10 +230,14 @@ public actor MLXPerceptionProvider: @preconcurrency PerceptionProvider {
         // crash but a stall.
         defer { MLX.Memory.clearCache() }
         let generateStart = Date()
-        let raw = try await session.respond(
-            to: PerceptionPrompt.instruction(),
-            image: .ciImage(proxy)
-        )
+        // The token loop runs on ONE cooperative-pool thread, and that is known and accepted.
+        // mlx-swift-lm drives its `TokenIterator` from an unstructured `Task` of its own, which
+        // inherits neither a task-executor preference nor anything else this actor could set — it
+        // was tried (a `withTaskExecutorPreference` around this call; the executor never ran a job).
+        // The actor already bounds this to one generation at a time, and with everything else
+        // that blocks moved off the pool (see `Offload` in the app) one busy thread of ten is a
+        // cost, not a hazard. `PoolWatchdog` is there if that ever stops being true.
+        let raw = try await session.respond(to: PerceptionPrompt.instruction(), image: .ciImage(proxy))
         // A cancelled generation does NOT throw out of `respond` — the stream's producer observes
         // the cancellation, finishes the stream NORMALLY, and `respond` returns whatever partial
         // text had been generated. Without this check the partial output flows into the parser,
@@ -253,6 +282,8 @@ public actor MLXPerceptionProvider: @preconcurrency PerceptionProvider {
 
     private func loadedContainer() async throws -> ModelContainer {
         if let container { return container }
+        loading.enter()
+        defer { loading.leave() }
         Self.boundMemory()
         let configuration: ModelConfiguration
         if let directory = Self.overrideModelDirectory {
@@ -287,3 +318,4 @@ public actor MLXPerceptionProvider: @preconcurrency PerceptionProvider {
             || (modelID == Self.defaultModelID && Self.bundledModelDirectory != nil)
     }
 }
+

@@ -167,6 +167,13 @@ is worthless. Find that out in week three, not month nine.
 
 ## Conventions
 
+- **Blocking work never runs on Swift's cooperative thread pool.** Core Image renders, RAW
+  decodes, Vision, export writes, file hashing, directory listings — anything that parks a
+  thread — goes through a lane in `Offload.swift` and is awaited. The pool is one thread per
+  core and does not grow; fill it with blocked threads and no `Task {}` in the process ever runs
+  again, which is how the installed app once sat in the Dock for three hours unable to quit (D21).
+  `Task.detached { blockingCall() }` is the pattern to refuse in review, however reasonable the
+  one case looks.
 - **Display name lives in exactly one constant.** Never hardcode the product name in a
   view, a string literal, or a filename. The project is getting renamed; make it a
   one-line change. See "Naming" below.
