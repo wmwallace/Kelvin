@@ -5196,16 +5196,20 @@ final class AppState {
             // rare rather than absent, and "rare" is what a stutter is.
             let measured = MeasuredFrame(image: r, condition: self.perception?.lighting.condition)
             Task.detached(priority: .userInitiated) {
-                guard let stats = try? ImageStatistics.compute(measured.image) else {
+                // On the vision lane — a render and a Vision request — not on this pool thread.
+                let reading = await Offload.run(.vision) { () -> CraftFix.Reading? in
+                    guard let stats = try? ImageStatistics.compute(measured.image) else { return nil }
+                    return CraftFix.Reading(stats: stats,
+                                            face: FaceSkin.read(in: measured.image),
+                                            condition: measured.condition)
+                }
+                guard let reading else {
                     await MainActor.run {
                         guard self.craftToken == token else { return }
                         self.lastCraftReading = nil; self.activeCraftIssues = []
                     }
                     return
                 }
-                let reading = CraftFix.Reading(stats: stats,
-                                               face: FaceSkin.read(in: measured.image),
-                                               condition: measured.condition)
                 let issues = reading.issues
                 await MainActor.run {
                     // The token is checked AGAIN on the way back: an edit made while this was
