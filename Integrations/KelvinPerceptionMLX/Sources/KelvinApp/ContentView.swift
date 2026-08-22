@@ -4773,14 +4773,18 @@ final class AppState {
     @ObservationIgnored private var wandCache: [UUID: (seed: RegionSeed, image: CIImage)] = [:]
 
     /// Pre-grown regions for the user's wand masks, to hand the renderer.
-    private func wandBitmaps(extent: CGRect, source: CIImage) -> [String: CIImage] {
+    /// The wand masks, grown. Pure for the same reason as `bakeBrush`.
+    nonisolated static func bakeWand(masks: [UserMaskVM], cache: [UUID: (seed: RegionSeed, image: CIImage)],
+                                     extent: CGRect, source: CIImage)
+        -> (out: [String: CIImage], cache: [UUID: (seed: RegionSeed, image: CIImage)]) {
+        var cache = cache
         var out: [String: CIImage] = [:]
         var live = Set<UUID>()
-        for m in userMasks where m.kind == .wand {
+        for m in masks where m.kind == .wand {
             live.insert(m.id)
             let seed = RegionSeed(x: m.cx, y: m.cy, tolerance: m.wandTolerance,
                                   softness: m.wandSoftness)
-            if let hit = wandCache[m.id], hit.seed == seed {
+            if let hit = cache[m.id], hit.seed == seed {
                 out[m.id.uuidString] = hit.image
                 continue
             }
@@ -4794,19 +4798,30 @@ final class AppState {
             let placed = grown.transformed(by: CGAffineTransform(
                 scaleX: extent.width / grown.extent.width,
                 y: extent.height / grown.extent.height))
-            wandCache[m.id] = (seed, placed)
+            cache[m.id] = (seed, placed)
             out[m.id.uuidString] = placed
         }
-        wandCache = wandCache.filter { live.contains($0.key) }
-        return out
+        cache = cache.filter { live.contains($0.key) }
+        return (out, cache)
     }
 
-    private func brushBitmaps(extent: CGRect) -> [String: CIImage] {
+    private func wandBitmaps(extent: CGRect, source: CIImage) -> [String: CIImage] {
+        let grown = Self.bakeWand(masks: userMasks, cache: wandCache, extent: extent, source: source)
+        wandCache = grown.cache
+        return grown.out
+    }
+
+    /// The brush masks, baked. Pure: the caller's cache in, the updated cache out, so this can
+    /// run on the render lane (see `updateActiveRecipe`) as well as on the actor.
+    nonisolated static func bakeBrush(masks: [UserMaskVM], cache: [UUID: (count: Int, image: CIImage)],
+                                      extent: CGRect, context: CIContext)
+        -> (out: [String: CIImage], cache: [UUID: (count: Int, image: CIImage)]) {
+        var cache = cache
         var out: [String: CIImage] = [:]
         var live = Set<UUID>()
-        for m in userMasks where m.kind == .brush && !m.stamps.isEmpty {
+        for m in masks where m.kind == .brush && !m.stamps.isEmpty {
             live.insert(m.id)
-            if let hit = brushCache[m.id], hit.count == m.stamps.count {
+            if let hit = cache[m.id], hit.count == m.stamps.count {
                 out[m.id.uuidString] = hit.image
                 continue
             }
@@ -4825,18 +4840,24 @@ final class AppState {
             // a dark patch in a lighten blend and vanish without trace — the stroke would look
             // right while painting and wrong on the next render, which is the worst way for it to
             // be wrong.
-            let baked = brushCache[m.id]
+            let baked = cache[m.id]
             let grew = baked.map { m.stamps.count > $0.count } ?? false
             let fresh = grew ? Array(m.stamps.suffix(m.stamps.count - (baked?.count ?? 0))) : m.stamps
             guard let composited = Renderer.brushMask(fresh, extent: extent,
                                                       over: grew ? baked?.image : nil) else { continue }
             guard let cg = context.createCGImage(composited, from: extent) else { continue }
             let flat = CIImage(cgImage: cg)          // concrete — breaks the O(N) filter chain
-            brushCache[m.id] = (m.stamps.count, flat)
+            cache[m.id] = (m.stamps.count, flat)
             out[m.id.uuidString] = flat
         }
-        brushCache = brushCache.filter { live.contains($0.key) }   // drop deleted/cleared masks
-        return out
+        cache = cache.filter { live.contains($0.key) }   // drop deleted/cleared masks
+        return (out, cache)
+    }
+
+    private func brushBitmaps(extent: CGRect) -> [String: CIImage] {
+        let baked = Self.bakeBrush(masks: userMasks, cache: brushCache, extent: extent, context: context)
+        brushCache = baked.cache
+        return baked.out
     }
 
     /// The craft check's inputs, crossing to a background task. Same reasoning as `RenderInput`:
@@ -4858,6 +4879,17 @@ final class AppState {
         /// the preview render and the model were already using. Sampled during an automated drag:
         /// 68% of main-thread time was that wait. The view now draws numbers it is handed.
         let histogram: HistogramView.Reading?
+        /// The brush and wand caches as the bake left them — see `MaskBakeInput`.
+        let brushCache: [UUID: (count: Int, image: CIImage)]
+        let wandCache: [UUID: (seed: RegionSeed, image: CIImage)]
+    }
+    /// What the render job needs to bake the hand-made masks itself: the masks, the two caches
+    /// as they stand, and the segmentation bitmaps to merge them over. Boxed like `RenderInput`.
+    private struct MaskBakeInput: @unchecked Sendable {
+        let masks: [UserMaskVM]
+        let brushCache: [UUID: (count: Int, image: CIImage)]
+        let wandCache: [UUID: (seed: RegionSeed, image: CIImage)]
+        let base: [String: CIImage]
     }
     /// The two things the detached render captures that the SDK cannot always vouch for: a
     /// CIContext, and the overlay bitmap. Both are Sendable on the macOS 27 SDK and neither is
@@ -4896,11 +4928,13 @@ final class AppState {
 
         if renderInFlight { renderDirty = true; return }
         renderInFlight = true
-        // Segmentation bitmaps + any pre-baked brush strokes (so a long stroke stays O(1)/frame).
-        let bitmaps = proxyMaskBitmaps
-                .merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked }
-                .merging(wandBitmaps(extent: proxy.extent, source: proxy)) { _, grown in grown }
-        let input = RenderInput(recipe: finalRecipe, proxy: proxy, bitmaps: bitmaps)
+        // The brush and wand masks are baked INSIDE the render job below, not here. A wand drag
+        // re-grows its region on every tick and a brush stroke composites on every dab, and both
+        // ran on the main thread in front of the render. They need the masks and their caches,
+        // which cross in a box like everything else in the job and come back updated with it.
+        let bake = MaskBakeInput(masks: userMasks, brushCache: brushCache, wandCache: wandCache,
+                                 base: proxyMaskBitmaps)
+        let input = RenderInput(recipe: finalRecipe, proxy: proxy, bitmaps: [:])
         // Which photo these pixels are of. A render started before a photo switch can still land
         // after it; tagged, that frame is ignored instead of being shown under the new photo's name.
         let renderedURL = loadedURL
@@ -4920,13 +4954,22 @@ final class AppState {
             // The render itself is on the render lane at interactive QoS — a slider is being
             // dragged — and this task only waits for it. See `Offload`.
             let out = await Offload.run(.render, qos: .userInteractive) { () -> RenderOutput in
-                var rendered = Renderer.render(input.proxy, with: input.recipe, maskBitmaps: input.bitmaps)
+                let extent = input.proxy.extent
+                let brush = AppState.bakeBrush(masks: bake.masks, cache: bake.brushCache,
+                                               extent: extent, context: side.ctx)
+                let wand = AppState.bakeWand(masks: bake.masks, cache: bake.wandCache,
+                                             extent: extent, source: input.proxy)
+                let bitmaps = bake.base
+                    .merging(brush.out) { _, baked in baked }
+                    .merging(wand.out) { _, grown in grown }
+                var rendered = Renderer.render(input.proxy, with: input.recipe, maskBitmaps: bitmaps)
                 if let ov = side.overlay {
                     rendered = Renderer.renderMaskOverlay(rendered, maskBitmap: ov.bitmap, invert: ov.invert, feather: ov.feather, tightness: ov.tightness, opacity: 0.6)
                 }
                 let cg = side.ctx.createCGImage(rendered, from: rendered.extent)
                 let concrete = cg.map { CIImage(cgImage: $0) } ?? rendered
-                return RenderOutput(ci: concrete, cg: cg, histogram: HistogramReader.read(concrete))
+                return RenderOutput(ci: concrete, cg: cg, histogram: HistogramReader.read(concrete),
+                                    brushCache: brush.cache, wandCache: wand.cache)
             }
             // PUBLISH THE PIXELS, NOT THE RECIPE FOR THEM. `rendered` is a lazy CIImage — a filter
             // graph — and handing that to the UI means everything that later reads it re-runs the
@@ -4946,6 +4989,10 @@ final class AppState {
             let renderMs = Date().timeIntervalSince(renderStart) * 1000
             await MainActor.run {
                 MainWork.record("render (detached)", ms: renderMs)
+                // The caches the bake updated, back on the actor. Keyed by mask id, so an entry
+                // for a mask that has since gone is dropped by the next bake's `live` filter.
+                self.brushCache = out.brushCache
+                self.wandCache = out.wandCache
                 self.preview.lastRenderedCI = out.ci
                 self.preview.histogram = out.histogram
                 if let cg = out.cg, let renderedURL {
@@ -5442,7 +5489,29 @@ final class AppState {
     ///
     /// Masks are re-measured per photograph, exactly as batch does: a subject mask is measured on
     /// the proxy and must be re-found at full resolution, and the frames differ.
+    /// The running batch export, so it can be stopped. One at a time; the button that starts
+    /// one is replaced by the one that stops it while it runs.
+    @ObservationIgnored private var exportTask: Task<Void, Never>?
+    /// True for the life of a batch export. The footer swaps Export for Stop on it.
+    private(set) var isExporting = false
+
+    /// Start a batch export and remember it, so `cancelExport` has something to cancel.
+    func startExport(to directory: URL) {
+        exportTask?.cancel()
+        exportTask = Task { await exportEdited(to: directory) }
+    }
+
+    /// Stop after the frame being written. A four-hundred-frame export is an hour, and until
+    /// this there was no way out of one short of quitting — which, with files being written, is
+    /// how half an image ends up under a real name. Files already written stay; the status line
+    /// says how many.
+    func cancelExport() {
+        exportTask?.cancel()
+    }
+
     func exportEdited(to directory: URL) async {
+        isExporting = true
+        defer { isExporting = false }
         // The batch's first perceive must not queue behind a background read-ahead generation —
         // the loop only yields BETWEEN frames, so without this the person watching the export
         // waits up to a whole generation before frame one starts. Same preemption `loadPhoto`
@@ -5493,6 +5562,7 @@ final class AppState {
         var jobs: [RenderJob] = []
         var allocated = Set<URL>()
         for (index, url) in targets.enumerated() {
+            if Task.isCancelled { break }
             let saved = EditStore.load(for: url)
             // WHICH RECIPE THIS FRAME GETS, and the order is the whole contract:
             //
@@ -5595,17 +5665,25 @@ final class AppState {
             while let result = await group.next() {
                 completed += 1
                 eta.recordCompletion()
-                statusMessage = "Exporting \(completed) of \(jobs.count)…"
-                    + (eta.phrase(itemsLeft: jobs.count - completed).map { " \($0)" } ?? "")
                 if result.ok {
                     written += 1
                     if result.adapted { adaptedWritten += 1 }
                 } else { failed += 1 }
+                // Stopped: the frame that was being written has finished (its file is whole —
+                // ImageWriter renames into place), and no further one starts.
+                if Task.isCancelled { group.cancelAll(); break }
+                statusMessage = "Exporting \(completed) of \(jobs.count)…"
+                    + (eta.phrase(itemsLeft: jobs.count - completed).map { " \($0)" } ?? "")
                 addJob()
             }
         }
 
         isProcessing = false
+        if Task.isCancelled {
+            statusMessage = "Export stopped — \(written) of \(jobs.count) written to \(directory.lastPathComponent)"
+                + (written == 0 ? "" : " (those files are complete)")
+            return
+        }
         // When nothing was written, the REASON is the message — "Exported 0" with the explanation
         // trailing after a folder name is how a working feature gets reported as a broken one.
         if written == 0 {
@@ -7265,7 +7343,13 @@ struct ContentView: View {
                     .help("Close this photo — your edit is saved")
                 // Only when there is something to export. A button that reports "nothing edited yet"
                 // is a button that exists to disappoint.
-                if !appState.exportScope().isEmpty {
+                if appState.isExporting {
+                    Button(action: appState.cancelExport) {
+                        toolbarLabel("Stop export", filled: false)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Stop after the frame being written. Files already written stay.")
+                } else if !appState.exportScope().isEmpty {
                     Button(action: openExportEditedPanel) {
                         toolbarLabel(appState.exportButtonLabel, filled: false)
                     }
@@ -8169,7 +8253,7 @@ struct ContentView: View {
         }
         panel.accessoryView = PanelAccessories.exportOptions(appState, showScope: true)
         guard panel.runModal() == .OK, let target = panel.url else { return }
-        Task { await appState.exportEdited(to: target) }
+        appState.startExport(to: target)
     }
 }
 
