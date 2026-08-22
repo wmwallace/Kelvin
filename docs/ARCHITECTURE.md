@@ -111,7 +111,7 @@ Fixed early so regressions are visible.
 
 | Operation | Target | Notes |
 |---|---|---|
-| Slider drag → visible update | < 16 ms | one frame; this is the whole feel of the app |
+| Slider drag → visible update | < 16 ms | one frame; this is the whole feel of the app. Measured 21 Aug 2026 (`make trace`, 60 MP): median main-thread stall per tick 57 ms, was 261 — D23 says where the rest is |
 | Recipe swap (candidate → candidate) | < 50 ms | resident texture, parameter change only |
 | Cold RAW decode, 45 MP | < 1.5 s | Core Image, cached after |
 | Perception pass | < 2 s | 768px proxy, 4-bit model. Currently missed: D-model-3 measured ~4.5–6 s |
@@ -121,6 +121,30 @@ Fixed early so regressions are visible.
 | Export 100 look-carried frames, never read | ~12 min | measured 7.07 s/frame — perception is 96% of it |
 
 The first row is the one users feel. Protect it above all others.
+
+## Threads, in the app
+
+Two rules, both learned the hard way (D21, D23), both enforced:
+
+- **Blocking work never runs on Swift's cooperative pool.** The pool is one thread per core and does
+  not grow; in 0.8.1 it filled with `Task.detached` closures blocked on one `CIContext` lock and the
+  app sat in the Dock unable to quit. Every Core Image render, RAW decode, Vision request, export write
+  and file pass goes through a width-limited GCD lane in `Offload.swift` and is *awaited*: decode 1
+  (RawCamera's provider queue is serial; the decode lane has its own `CIContext`), render 2, vision 1
+  (Vision crashes when its requests race), export 1, io 4, thumbnails 4, scan bounded. `make test`
+  runs `scripts/check-detached.sh`, a ratchet on the count of `Task.detached` in the app.
+  `PoolWatchdog` logs a fault if the pool ever starves again.
+- **A view that reads per-tick state is small, and never the root.** `AppState` is `@Observable`, so a
+  view re-evaluates only when something it *read* changes — but `ContentView.body` composes the
+  window, and anything inline there that reads `edit` rebuilds the window on every slider tick
+  (measured: 261 ms median stall per tick, the "edit panel stutter" of three release notes). The
+  slider sections, the temperature readout and the histogram are their own views; the preview is a
+  `Canvas` so a new frame costs a draw and no layout. The drag harness (`make trace`) prints root
+  body evaluations per run — compare it with the step count.
+
+Quit follows from the first rule: `applicationShouldTerminate` cancels everything, waits at most two
+seconds for a generation or a render to let go, and leaves through `_exit` if anything is still inside
+MLX or Metal — `exit()` under a live generation thread crashed, every time.
 
 ## What is deliberately not here
 
