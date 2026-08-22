@@ -71,6 +71,23 @@ final class ShootLookTests: XCTestCase {
         XCTAssertNil(s.effectiveStyle(for: b), "a frame nobody chose for should not inherit a look")
     }
 
+    // MARK: Whether a scope covers the shoot
+
+    /// `ShootLook.covers` is read by the footer's button label on every body evaluation, so its
+    /// common answers must come without standardising every path (D23). The listing itself, and a
+    /// strict subset of it, are answered by count and equality; a differently spelled path still
+    /// gets the standardised comparison.
+    func testCoversAnswersTheCommonCasesByShapeAndTheRestByPath() {
+        let a = url("a.ARW"), b = url("b.ARW"), c = url("c.ARW")
+        XCTAssertTrue(ShootLook.covers([a, b, c], [a, b, c]), "the listing covers itself")
+        XCTAssertFalse(ShootLook.covers([a, b], [a, b, c]), "fewer frames cannot cover more")
+        XCTAssertTrue(ShootLook.covers([c, b, a], [a, b, c]), "order does not matter")
+        let spelled = URL(fileURLWithPath: "/shoot/./a.ARW")
+        XCTAssertTrue(ShootLook.covers([spelled, b, c], [a, b, c]),
+                      "a different spelling of the same path is still the same frame")
+        XCTAssertFalse(ShootLook.covers([], []), "an empty shoot is covered by nothing")
+    }
+
     // MARK: What an apply covers
 
     /// No selection means the whole shoot — the default, and the one people will use most.
