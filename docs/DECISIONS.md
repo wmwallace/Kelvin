@@ -1135,8 +1135,10 @@ After the change, the same 60-key arrow burst over 60 MP RAWs: **0** cooperative
 Core Image in any sample, and the app reached the last frame. Lanes: decode 1 (Apple's RawCamera
 provider queue is serial, and two RAW renders in flight through one context was the deadlock's
 shape), render 2 (a context serialises its own renders; more is threads waiting), vision 1 (Vision
-crashes when requests race — already documented at the candidate build), export 1, io 6, scan
-bounded as before. The decode lane has its own `CIContext` so a decode can never hold a lock the
+crashes when requests race — already documented at the candidate build), export 1, io 4 for the quick
+metadata reads an open waits on, thumbnails 4 and the scan (with hashing) bounded as before — the
+thumbnails and the hashing were split off after a soak run found them queueing in front of the EXIF
+read `loadPhoto` awaits. The decode lane has its own `CIContext` so a decode can never hold a lock the
 preview is waiting on. Stale work is declined at the lane door (`latestRequest`): a burst of arrow
 presses used to queue a second of decode per frame you had already left.
 
