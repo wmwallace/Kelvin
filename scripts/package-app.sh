@@ -414,6 +414,14 @@ if [ "${KELVIN_DMG:-1}" = "1" ] && command -v hdiutil >/dev/null; then
       # the app cannot cover the image that did not exist yet when it was issued. Apple's guidance is
       # to notarise the image as well.
       echo "▸ Notarising the disk image…"
+      # MAKE SURE NOTHING STILL HAS THE IMAGE ATTACHED. On 21 August 2026 a diskimages-helper left
+      # over from `hdiutil create` kept the new image attached, and notarytool's preflight — which
+      # opens the image exclusively to decide what kind of file it is — blocked inside open() for
+      # forty minutes with no network activity and nothing in the submission history. The symptom
+      # is "notarising" that never uploads; the cure is to detach whatever holds the file.
+      while read -r dev; do
+        [ -n "$dev" ] && { echo "  detaching $dev, which still held the image"; hdiutil detach "$dev" -quiet || hdiutil detach "$dev" -force -quiet || true; }
+      done < <(hdiutil info 2>/dev/null | awk -v p="$DMG" '$0 ~ "image-path" && index($0, p) {f=1; next} f && /^\/dev\/disk[0-9]+[[:space:]]/ {print $1; f=0}')
       if ! xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait; then
         echo "package-app.sh: the disk image failed notarisation. For the reason:" >&2
         echo "  xcrun notarytool log <submission-id> --keychain-profile $NOTARY_PROFILE" >&2

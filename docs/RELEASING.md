@@ -64,6 +64,17 @@ Measured on a release with the weights inside:
 Two notarisation submissions is unavoidable: the app's ticket can't cover an image that didn't exist
 when it was issued.
 
+**If "Notarising the disk image…" sits for more than ten minutes with nothing uploading**, check
+whether something still has the image attached: `hdiutil info | grep -A3 Kelvin-<version>.dmg` or
+`lsof dist/Kelvin-<version>.dmg`. A `diskimages-helper` left behind by `hdiutil create` did exactly
+that on 21 August 2026, and notarytool's preflight — which opens the image exclusively to decide
+what kind of file it is — blocked inside `open()` for forty minutes: no network traffic, no entry
+in `notarytool history`, `sample` showing the main thread in `__open`. `hdiutil detach` on the
+device frees it and the submission proceeds at full speed. The packaging script now detaches
+anything holding the image before it submits; if you are submitting by hand after a failure, do
+the same first. Watch the upload with `netstat -ib` on `en0` — a healthy submission moves at the
+link's upload speed from the first seconds.
+
 ## Version scheme
 
 Decided before the first tag, so it never has to be re-decided under release pressure:

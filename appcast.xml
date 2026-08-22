@@ -15,6 +15,172 @@
     <link>https://usekelvin.app</link>
     <description>Updates for Kelvin, the local-AI photo editor for macOS.</description>
     <item>
+      <title>Kelvin 0.8.2 &#8212; it quits, it keeps up, and it asks before it updates</title>
+      <pubDate>Fri, 21 Aug 2026 22:03:56 -0700</pubDate>
+      <sparkle:version>334</sparkle:version>
+      <sparkle:shortVersionString>0.8.2</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <link>https://github.com/wmwallace/Kelvin/releases/tag/v0.8.2</link>
+      <description><![CDATA[
+        <style>
+          /* Kelvin update notes. Self-contained: no external fonts, images or scripts — Sparkle
+             renders this offline, mid-install, in a narrow pane. */
+          :root {
+            color-scheme: light dark;
+            --ink: #1c1a17;
+            --dim: #6b6660;
+            --faint: #928c84;
+            --bg: #faf8f5;
+            --rule: rgba(0,0,0,0.10);
+            --glow: #b4661a;
+          }
+          @media (prefers-color-scheme: dark) {
+            :root {
+              --ink: #e8e3dc;
+              --dim: #9a938a;
+              --faint: #6f6862;
+              --bg: #131211;
+              --rule: rgba(255,255,255,0.11);
+              --glow: #e9a44c;
+            }
+          }
+          body {
+            margin: 0;
+            padding: 18px 20px 26px;
+            background: var(--bg);
+            color: var(--ink);
+            font: 13px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+            -webkit-font-smoothing: antialiased;
+          }
+          /* The blackbody rail: amber through daylight to blue, which is what the app is named after
+             and the one piece of decoration here that means something. It separates sections the way
+             the temperature rail runs under the canvas in the app itself. */
+          .rail {
+            height: 2px;
+            border: 0;
+            margin: 20px 0 16px;
+            background: linear-gradient(90deg, #e9a44c 0%, #f2ead9 42%, #cfd8e6 68%, #7fa2cc 100%);
+            opacity: 0.85;
+          }
+          .lede {
+            margin: 0;
+            font-size: 15px;
+            line-height: 1.45;
+            letter-spacing: -0.005em;
+          }
+          .version {
+            font: 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--faint);
+            margin: 0 0 9px;
+          }
+          /* Mono, tracked, uppercase — the same label treatment the app uses over its own panel
+             sections, so the notes read in the app's voice rather than a changelog's. */
+          h2 {
+            font: 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+            color: var(--glow);
+            margin: 22px 0 7px;
+          }
+          h2:first-of-type { margin-top: 0; }
+          p { margin: 0 0 9px; }
+          p.note { color: var(--dim); }
+          ul { margin: 0 0 9px; padding-left: 17px; }
+          li { margin-bottom: 4px; }
+          strong { font-weight: 600; }
+          .limit {
+            border-left: 2px solid var(--rule);
+            padding-left: 11px;
+            margin: 12px 0 0;
+            color: var(--dim);
+          }
+          .closing {
+            margin-top: 22px;
+            padding-top: 14px;
+            border-top: 1px solid var(--rule);
+            color: var(--faint);
+            font-size: 12px;
+          }
+        </style>
+        <p class="version">Kelvin 0.8.2</p>
+        <p class="lede">A reliability release. It quits, the edit panel keeps up with you, a RAW
+        appears the moment you arrive at it, and Kelvin now asks before it updates itself.</p>
+
+        <hr class="rail">
+
+        <h2>Quit now quits</h2>
+        <p>0.8.1 could end up in the Dock with no windows &mdash; unable to quit, and unable to show a
+        window when you clicked its icon. The cause was underneath everything: every blocking job in
+        the app (RAW decodes, renders, the scene read, exports, file reads) ran on Swift&rsquo;s small
+        shared thread pool, and under ordinary fast browsing that pool filled with waiting threads
+        until nothing else &mdash; including the code that quits or opens a window &mdash; could run.
+        All of that work now runs on lanes of its own, and a watchdog logs a fault if the pool ever
+        starves again.</p>
+        <p>Quitting while the model was reading a frame crashed on the way out; you saw it as a
+        &ldquo;quit unexpectedly&rdquo; report. Quit now waits for the model to let go. Closing the
+        window quits &mdash; Kelvin is one window, and there is nothing to keep the process for.</p>
+
+        <h2>The edit panel keeps up</h2>
+        <p>Dragging a slider rebuilt the entire window on every tick, and the histogram was being
+        rendered on the thread that draws the window. Measured on a 60&nbsp;MP frame: the median stall
+        per tick went from 261&nbsp;ms to about 57&nbsp;ms, and the worst from 2.8&nbsp;s to
+        0.2&nbsp;s.</p>
+
+        <h2>A RAW appears at once</h2>
+        <p>Opening a RAW showed an empty canvas for the second Apple&rsquo;s decode takes. The
+        camera&rsquo;s own embedded preview is on screen within a third of a second now, and the real
+        decode replaces it when it lands. Nothing is measured or kept from the preview &mdash; the
+        camera&rsquo;s colour is not Kelvin&rsquo;s.</p>
+
+        <h2>Updates ask first</h2>
+        <p>Kelvin used to download and install updates silently on quit &mdash; which, given the bug
+        above, meant nobody ever saw one. It now checks every hour and shows the standard
+        &ldquo;a new version is available&rdquo; sheet. Both switches are in Settings&nbsp;&#9656;
+        General.</p>
+
+        <h2>Also</h2>
+        <p>A batch export can be stopped: the Export button becomes &ldquo;Stop export&rdquo; while
+        one runs, the frame being written finishes, and the status line says how many were written.
+        Exported files are written whole or not at all &mdash; a quit or crash mid-export no longer
+        leaves a truncated image under the real name, and quitting during an export stops it cleanly.
+        With &ldquo;Describe the photo&rdquo; on, a batch export now names each file as the panel
+        previewed it, with the frame&rsquo;s own scene read. Dragging a brush or wand mask no longer
+        re-grows the region in front of every render. If the previous run crashed, Kelvin says so in
+        the status line at launch, and where to send the report.</p>
+
+        <p class="note">This is the update that fixes updating. If 0.8.1 is stuck in the Dock, quit it
+        from the Dock menu (Option-click for Force Quit) and launch it again to take this one.</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/wmwallace/Kelvin/releases/download/v0.8.2/Kelvin-0.8.2.dmg"
+        sparkle:edSignature="SwNrjAAofYrpOyYdh/cptVm8/7TpDyeqNFEIXhLaOA42Vh6CXFJSDTOUDvKaffZ15I3Qp+WMyY7P5To2IfWNDA=="
+        length="1516260996"
+        type="application/octet-stream"/>
+      <!-- One delta per shipped predecessor, keyed on CFBundleVersion. -->
+      <sparkle:deltas>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.8.2/Kelvin-0.8.2-from-317.delta"
+          sparkle:deltaFrom="317"
+          sparkle:edSignature="4Gd4AoSC1B549ddz+K6B+LtO6jS7z/flZuY+yilDTysvamvL5T0agqlmbJ6mK4eiMQOC3SyZOJDSAjBJ37ANAQ=="
+          length="2211870"
+          type="application/octet-stream"/>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.8.2/Kelvin-0.8.2-from-314.delta"
+          sparkle:deltaFrom="314"
+          sparkle:edSignature="EbNHsy7uWu41UrLbozgJ/emToW9Tg2hyrzoRi2Sh/K1pY5AGVp6eIZpSEZDzBFnHg+yqPgT7SSXd20AA6yYdDw=="
+          length="2250562"
+          type="application/octet-stream"/>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.8.2/Kelvin-0.8.2-from-308.delta"
+          sparkle:deltaFrom="308"
+          sparkle:edSignature="w1vL9iMDMgNKOkR/S46COgPTME6aRh3m+jLcT+jH2B173p9fg1lvf7JPs6vMJQVDLi8990cJsqezgAJqULuODA=="
+          length="2320090"
+          type="application/octet-stream"/>
+      </sparkle:deltas>
+    </item>
+    <item>
       <title>Kelvin 0.8.1 &#8212; a face is where the engine knows least</title>
       <pubDate>Fri, 07 Aug 2026 21:05:00 -0700</pubDate>
       <sparkle:version>317</sparkle:version>
