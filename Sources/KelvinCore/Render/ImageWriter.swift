@@ -187,6 +187,47 @@ public enum ImageWriter {
 
     public static let outputColorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
 
+    /// The hidden sibling a write encodes into before the rename. One helper, so the name the
+    /// writer makes and the name the sweeper below recognises cannot drift apart.
+    static func partialURL(for url: URL) -> URL {
+        url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).partial-\(UUID().uuidString)")
+    }
+
+    /// Is this the leftover of a write that never finished — `.<name>.partial-<UUID>`?
+    static func isPartial(_ url: URL) -> Bool {
+        let name = url.lastPathComponent
+        guard name.hasPrefix("."), let range = name.range(of: ".partial-", options: .backwards) else {
+            return false
+        }
+        return UUID(uuidString: String(name[range.upperBound...])) != nil
+    }
+
+    /// Remove partials left in `directory` by a write that was cut off before its rename — a quit
+    /// through `_exit`, a crash, a power cut. The rename keeps the REAL name whole; this keeps the
+    /// folder clean. Only files this writer could have made (the pattern above, including a
+    /// well-formed UUID), and only ones untouched for `olderThan` seconds, so an export still
+    /// running beside this one — another window, another copy of the app — is left alone. Call it
+    /// where the next export into the folder begins; it is a directory listing, so not per frame.
+    /// Returns how many it removed.
+    @discardableResult
+    public static func removeStalePartials(in directory: URL, olderThan age: TimeInterval = 60,
+                                           now: Date = Date()) -> Int {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: directory.path) else { return 0 }
+        var removed = 0
+        for name in names {
+            let url = directory.appendingPathComponent(name)
+            guard isPartial(url),
+                  let attrs = try? fm.attributesOfItem(atPath: url.path),
+                  let modified = attrs[.modificationDate] as? Date,
+                  now.timeIntervalSince(modified) >= age,
+                  (try? fm.removeItem(at: url)) != nil else { continue }
+            removed += 1
+        }
+        return removed
+    }
+
     public static func write(_ image: CIImage, to url: URL, format: Format? = nil,
                             metadata: MetadataPolicy = .asShot,
                             size: Size = .fullResolution,
@@ -212,8 +253,7 @@ public enum ImageWriter {
         // sibling and renaming is atomic on every filesystem macOS mounts, and a file under the
         // real name is therefore always a whole one. The temp is a sibling rather than in the
         // system temp directory so the final step is a rename, never a cross-volume copy.
-        let partial = url.deletingLastPathComponent()
-            .appendingPathComponent(".\(url.lastPathComponent).partial-\(UUID().uuidString)")
+        let partial = partialURL(for: url)
         defer { try? FileManager.default.removeItem(at: partial) }
         do {
             switch fmt {
