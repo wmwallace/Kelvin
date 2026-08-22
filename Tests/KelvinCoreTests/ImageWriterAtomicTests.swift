@@ -55,4 +55,39 @@ final class ImageWriterAtomicTests: XCTestCase {
         }
         XCTAssertEqual(try listing(), ["a.png", "b.tif", "c.heic"])
     }
+
+    /// What a write cut off before its rename leaves behind is a hidden `.name.partial-UUID`, and
+    /// the next export into the folder sweeps those up — but ONLY those: the pattern must be
+    /// exact (a UUID, not any suffix), the file must be old enough that it cannot be a write in
+    /// progress beside us, and nothing else in the folder is touched.
+    func testStalePartialsAreSweptAndNothingElseIs() throws {
+        let fm = FileManager.default
+        func touch(_ name: String, age: TimeInterval) throws -> URL {
+            let url = directory.appendingPathComponent(name)
+            try Data([1, 2, 3]).write(to: url)
+            try fm.setAttributes([.modificationDate: Date().addingTimeInterval(-age)], ofItemAtPath: url.path)
+            return url
+        }
+        let stale = try touch(".photo.jpg.partial-\(UUID().uuidString)", age: 600)
+        let fresh = try touch(".photo.jpg.partial-\(UUID().uuidString)", age: 5)
+        let realName = try touch("photo.jpg", age: 600)
+        let lookalike = try touch(".photo.jpg.partial-not-a-uuid", age: 600)
+        let visible = try touch("photo.jpg.partial-\(UUID().uuidString)", age: 600)
+
+        let removed = ImageWriter.removeStalePartials(in: directory, olderThan: 60)
+
+        XCTAssertEqual(removed, 1)
+        XCTAssertFalse(fm.fileExists(atPath: stale.path), "the old partial is the one thing swept")
+        XCTAssertTrue(fm.fileExists(atPath: fresh.path), "a partial young enough to be in progress stays")
+        XCTAssertTrue(fm.fileExists(atPath: realName.path))
+        XCTAssertTrue(fm.fileExists(atPath: lookalike.path), "a malformed suffix is not ours")
+        XCTAssertTrue(fm.fileExists(atPath: visible.path), "a visible file is never ours")
+    }
+
+    /// The writer's own temp name round-trips through the recogniser, so the two cannot drift.
+    func testTheWriterRecognisesItsOwnPartialName() {
+        let partial = ImageWriter.partialURL(for: directory.appendingPathComponent("_DSC0458_soft.jpg"))
+        XCTAssertTrue(ImageWriter.isPartial(partial))
+        XCTAssertFalse(ImageWriter.isPartial(directory.appendingPathComponent("_DSC0458_soft.jpg")))
+    }
 }

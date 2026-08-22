@@ -96,8 +96,9 @@ enum Offload {
         }
     }
 
-    /// The same, for work that cannot fail. Cancellation before start still applies, but a caller
-    /// that does not care to handle it gets the work done anyway rather than an error to ignore.
+    /// The same, for work that cannot fail. Cancellation is NOT consulted here — there is no error
+    /// to return in its place — so a job queued by a since-cancelled task still runs. Use the
+    /// throwing overload for anything expensive enough that skipping it matters.
     static func run<T: Sendable>(_ lane: Lane,
                                  qos: QualityOfService = .userInitiated,
                                  priority: Operation.QueuePriority = .normal,
@@ -180,24 +181,33 @@ enum PoolWatchdog {
         return t
     }()
 
-    static func start() { timer.resume() }
+    /// Idempotent: a `DispatchSourceTimer` resumed twice is an over-resume, which libdispatch
+    /// treats as a crash, and `onAppear` is not promised to fire exactly once.
+    static func start() {
+        let first = lock.withLock { () -> Bool in
+            defer { started = true }
+            return !started
+        }
+        if first { timer.resume() }
+    }
+    nonisolated(unsafe) private static var started = false
 
     private static func tick() {
         let now = Date()
-        let stuck: TimeInterval? = lock.withLock {
+        // Read the stall and claim the report under ONE lock: read them separately, and the
+        // probe could run in between, see `reported == false`, and the next probe would log a
+        // "recovered after 0 s" for a fault that was never printed.
+        let report: TimeInterval? = lock.withLock {
             guard let sent = outstanding else { return nil }
-            return now.timeIntervalSince(sent)
+            let stuck = now.timeIntervalSince(sent)
+            guard stuck > 5, !reported else { return nil }
+            reported = true
+            return stuck
         }
-        if let stuck {
-            if stuck > 5 {
-                let first = lock.withLock { () -> Bool in
-                    defer { reported = true }
-                    return !reported
-                }
-                if first {
-                    log.fault("cooperative thread pool starved: a probe task has not run for \(stuck, format: .fixed(precision: 0)) s — every Task in the process is stalled")
-                }
-            }
+        if let report {
+            log.fault("cooperative thread pool starved: a probe task has not run for \(report, format: .fixed(precision: 0)) s — every Task in the process is stalled")
+        }
+        if lock.withLock({ outstanding != nil }) {
             return     // one probe at a time; it will clear the flag when it finally runs
         }
         lock.withLock { outstanding = now }

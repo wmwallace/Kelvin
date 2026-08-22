@@ -76,7 +76,11 @@ final class DocumentOpenDelegate: NSObject, NSApplicationDelegate {
     /// itself wedged — the process leaves through `_exit`, which skips the destructors that would
     /// have crashed it. Either way ⌘Q ends the process, without a crash report.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard !quitting, let state = OpenRequests.shared.attachedState else { return .terminateNow }
+        // A second ⌘Q while the first is still being honoured must NOT answer `.terminateNow`:
+        // that makes AppKit call `exit()` on the spot, skipping the wait and the `_exit` hatch
+        // this method exists for. Cancelling the second request leaves the first in charge.
+        if quitting { return .terminateCancel }
+        guard let state = OpenRequests.shared.attachedState else { return .terminateNow }
         quitting = true
         Self.log.notice("quit requested")
         // Cancel SYNCHRONOUSLY, here, on the main thread — not inside the Task below. AppKit

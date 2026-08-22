@@ -1158,6 +1158,12 @@ final class AppState {
         scanTask?.cancel()
         captureIndexTask?.cancel()
         hashTask?.cancel()
+        // The batch export too. Its loop checks for cancellation between frames, and a frame
+        // mid-write finishes through `ImageWriter`'s rename-into-place, so nothing half-written
+        // ever sits under a real name. Without this the export kept decoding and perceiving
+        // through the grace period, and a quit that sampled the lanes between two of its frames
+        // could read as clean and `exit()` under the next generation.
+        exportTask?.cancel()
     }
 
     /// Wait — briefly — for the model and the GPU lanes to let go. Returns whether they did; the
@@ -1178,10 +1184,16 @@ final class AppState {
         // way to see that inner task from here, so: busy at the moment of asking means the process
         // leaves through `_exit`, which skips the destructors. Nothing is lost — edits are on
         // disk as they are made — and the wait still lets a render or an export finish its file.
+        // EVERY lane, not only the three that obviously render: the vision lane measures masks
+        // through Core Image, the scan lane decodes RAWs for the focus check, and thumbnails are
+        // renders too. Any of them mid-command-buffer at `exit()` is the same Metal abort.
         func gpuBusy() -> Bool {
-            Offload.depth(of: .decode) + Offload.depth(of: .render) + Offload.depth(of: .export) > 0
+            Offload.Lane.allCases.reduce(0) { $0 + Offload.depth(of: $1) } > 0
         }
-        let wasBusy = perceptionProvider.isBusy || gpuBusy()
+        // An export in flight counts as busy even if the lanes happen to be empty at this
+        // instant — it is between frames, and its next one starts a generation or a render a
+        // moment later. `_exit` is the deliberate route; the files already written are whole.
+        let wasBusy = perceptionProvider.isBusy || gpuBusy() || isExporting
         let deadline = Date().addingTimeInterval(2)
         while gpuBusy() || perceptionProvider.isGenerating, Date() < deadline {
             try? await Task.sleep(nanoseconds: 50_000_000)
@@ -3352,7 +3364,12 @@ final class AppState {
             self.imageId = ""
             self.hashTask?.cancel()
             self.hashTask = Task { [weak self] in
-                let id = await Offload.run(.scan, qos: .utility) { MediaCache.shared.imageId(for: url) }
+                // On the scan lane so a burst of hashes never queues in front of an open's EXIF
+                // read (see `Offload.Lane.io`) — but at the front of that lane, because a save
+                // waits on this and a focus scan can hold the lane for seconds.
+                let id = await Offload.run(.scan, qos: .utility, priority: .veryHigh) {
+                    MediaCache.shared.imageId(for: url)
+                }
                 guard let self, let id, self.imageURL == url else { return }
                 self.imageId = id
             }
@@ -4993,8 +5010,14 @@ final class AppState {
                 // for a mask that has since gone is dropped by the next bake's `live` filter.
                 self.brushCache = out.brushCache
                 self.wandCache = out.wandCache
-                self.preview.lastRenderedCI = out.ci
-                self.preview.histogram = out.histogram
+                // Only for the photograph still open. `preview.active` is tagged with its URL and
+                // the view ignores a stale one; these two are not, and a render that landed after
+                // a photo switch used to put the old frame's histogram under the new frame's name
+                // until its own first render arrived.
+                if renderedURL == self.loadedURL {
+                    self.preview.lastRenderedCI = out.ci
+                    self.preview.histogram = out.histogram
+                }
                 if let cg = out.cg, let renderedURL {
                     self.preview.active = TaggedPreview(url: renderedURL,
                                                 image: NSImage(cgImage: cg, size: .zero))
@@ -5501,7 +5524,10 @@ final class AppState {
 
     /// Start a batch export and remember it, so `cancelExport` has something to cancel.
     func startExport(to directory: URL) {
-        exportTask?.cancel()
+        // One at a time, genuinely: cancelling the old task and starting a new one left the old
+        // one's `defer { isExporting = false }` to run seconds later, under the new export, and
+        // the footer flipped back to "Export" while files were still being written.
+        guard !isExporting else { return }
         exportTask = Task { await exportEdited(to: directory) }
     }
 
@@ -5612,9 +5638,16 @@ final class AppState {
             }
             guard let recipe else { failed += 1; continue }
 
+            // THE FRAME'S OWN READ, for the "Describe the photo" scheme. This passed nil, so
+            // the panel promised `_DSC0458_interior_overcast_person_soft.jpg` and the batch wrote
+            // `_DSC0458_soft.jpg` — the preview and the files disagreed. The read is on disk by
+            // now for every adapted frame (`adaptedRecipe` saves it) and for every frame that was
+            // ever opened; a frame without one falls back to stem + look, which is the rule:
+            // describe only what was actually judged.
+            let named = PerceptionStore.load(for: url, modelId: perceptionProvider.activeModelID)
             let out = ExportNaming.uniqueURL(
                 in: directory,
-                stem: ExportNaming.stem(for: url, perception: nil, look: lookName,
+                stem: ExportNaming.stem(for: url, perception: named, look: lookName,
                                         scheme: scheme, label: label,
                                         prefix: prefix, suffix: suffix),
                 ext: exportFormat.fileExtension,
@@ -5622,6 +5655,11 @@ final class AppState {
             allocated.insert(out)
             jobs.append(RenderJob(recipe: recipe, source: url, out: out, wasAdapted: wasAdapted))
         }
+
+        // Leftovers of a write cut off before its rename — a quit through `_exit` mid-frame, a
+        // crash — are swept before anything new is written. Ours only, and old only; see the
+        // function. A directory listing, so once per export, not per frame.
+        await Offload.run(.io, qos: .utility) { ImageWriter.removeStalePartials(in: directory) }
 
         // PHASE TWO — decode, render and write. Concurrent, and this is where the time is.
         //
