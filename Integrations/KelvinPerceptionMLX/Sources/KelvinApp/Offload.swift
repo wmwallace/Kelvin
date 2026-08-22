@@ -36,16 +36,23 @@ enum Offload {
         case vision
         /// Full-resolution writes. Its own lane so an export never takes a preview's slot.
         case export
-        /// File-system work: `stat`, EXIF headers, hashing, directory listings.
+        /// Quick file-system work: `stat`, EXIF headers, directory listings, the edit store. Things
+        /// a photograph's open waits on. NOT thumbnails and NOT hashing — see the next two — because
+        /// a burst of either used to queue in front of the EXIF read `loadPhoto` needs, and the open
+        /// waited five seconds for a directory of thumbnails nobody had asked to see yet.
         case io
-        /// The folder scan — bounded wide, because its cost is the decode and one leaves cores idle.
+        /// Filmstrip thumbnails: many, small, and never on anyone's critical path.
+        case thumbnail
+        /// The folder scan and content hashing — bounded wide, because the cost is the decode or the
+        /// read of a 60 MB file, and one leaves cores idle.
         case scan
 
         var width: Int {
             switch self {
             case .decode, .vision, .export: return 1
             case .render: return 2
-            case .io: return 6
+            case .io: return 4
+            case .thumbnail: return 4
             case .scan: return min(8, max(2, ProcessInfo.processInfo.activeProcessorCount - 2))
             }
         }

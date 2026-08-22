@@ -2517,7 +2517,7 @@ final class AppState {
             // the macOS 27 SDK and is unavailable on the one CI builds against, so handing one out
             // of a detached task compiles here and fails there. CGImage is Sendable on both, and
             // the NSImage is wanted on the main actor anyway.
-            let cg = await Offload.run(.io, qos: .utility) {
+            let cg = await Offload.run(.thumbnail, qos: .utility) {
                 PhotoBrowser.thumbnailCG(for: url)
             }
             let image = cg.map { NSImage(cgImage: $0, size: .zero) }
@@ -3245,7 +3245,7 @@ final class AppState {
         // An EXIF header read, off the main actor and through the cache. It is one file open, which
         // is nothing locally and a round trip on a share — and it sat on the main thread in front of
         // the decode, so the window could not even paint the new filename until it came back.
-        let opened = await Offload.run(.io) {
+        let opened = await Offload.run(.io, priority: .veryHigh) {
             // Both answers come out of the same trip to the filesystem, and neither belongs on the
             // main thread. `isNetwork` is one `statfs` and cached per volume after the first frame.
             (capture: MediaCache.shared.captureInfo(for: url), onNetwork: StorageVolume.isNetwork(url))
@@ -3352,7 +3352,7 @@ final class AppState {
             self.imageId = ""
             self.hashTask?.cancel()
             self.hashTask = Task { [weak self] in
-                let id = await Offload.run(.io, qos: .utility) { MediaCache.shared.imageId(for: url) }
+                let id = await Offload.run(.scan, qos: .utility) { MediaCache.shared.imageId(for: url) }
                 guard let self, let id, self.imageURL == url else { return }
                 self.imageId = id
             }
