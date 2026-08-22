@@ -177,7 +177,7 @@ struct KelvinApp: App {
                     // Keep the thumbnail/header cache inside its budget. At launch and nowhere else:
                     // it walks a directory listing, so putting it on the path that READS an entry
                     // would make a large cache slow down the thing it exists to speed up.
-                    Task.detached(priority: .background) { MediaCache.shared.trim() }
+                    Task { await Offload.run(.io, qos: .background) { MediaCache.shared.trim() } }
                 }
         }
         // Hidden title bar so the darkroom UI runs edge to edge — the window is the instrument.

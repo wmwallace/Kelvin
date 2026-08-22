@@ -7,7 +7,7 @@
 # raise BASELINE in the same commit and say why in its message.
 set -eu
 cd "$(dirname "$0")/.."
-BASELINE=12
+BASELINE=11
 count=$(grep -rc "Task.detached" Integrations/KelvinPerceptionMLX/Sources/KelvinApp --include='*.swift' | awk -F: '{s+=$2} END {print s+0}')
 if [ "$count" -gt "$BASELINE" ]; then
   echo "check-detached: $count occurrences of Task.detached in KelvinApp, baseline is $BASELINE." >&2
