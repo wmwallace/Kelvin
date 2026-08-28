@@ -668,6 +668,13 @@ out per "Calibrating a constant" above; a corpus spanning more than two shoots i
 prerequisite for shipping a default-on value. The floors are in `RecipeEngine.tuningSignature`
 (constant "off" while disabled), so a sweep cannot be served another arm's cached resolutions.
 
+**Calibrated 28 August 2026; it stays off.** The paired corpus says yes at every floor (defaults
+7.48 → 7.44, 6 frames fired, worst +1.6); the degradation hold-out says no at every floor (8.09 →
+8.18, 7 fired, worst +3.0 on a `dull` degradation). One photographer's signal, not a rule — see
+D24's calibration table. `opener-probe` was corrected before these numbers were taken: it now
+honours curation's veto (`curatedStyles` from the report) and measures shadow structure on the
+perception proxy, the way the rule does.
+
 ## Highlights are computed open-loop
 
 `highlightRecovery` sizes itself from **`s.highlightClip` on the source** — `min(66, clip * 400)` —
