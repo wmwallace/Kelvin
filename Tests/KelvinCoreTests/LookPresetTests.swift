@@ -46,10 +46,13 @@ final class LookPresetTests: XCTestCase {
         XCTAssertEqual(once, twice)
     }
 
-    func testTemperatureShiftOnlyAppliesWhenThereIsATemperature() {
+    func testTemperatureShiftMovesFromAsShotAndFromAHandSetTemperature() {
         var asShot = GlobalAdjustments.neutral            // temperatureK == nil
         LookPreset.named("golden")!.apply(to: &asShot)
-        XCTAssertNil(asShot.temperatureK, "as-shot must stay as-shot")
+        // As-shot is the renderer's 6500 K; the look warms from there (decided 28 Aug 2026 —
+        // gated on a temperature being present, this limb never fired on most frames).
+        XCTAssertEqual(asShot.temperatureK ?? 0, 6500 - LookPreset.named("golden")!.temperatureShift,
+                       accuracy: 0.001, "as-shot warms from 6500 K")
 
         var warmed = GlobalAdjustments.neutral
         warmed.temperatureK = 5500
@@ -75,6 +78,29 @@ final class LookPresetTests: XCTestCase {
                                      "\(look.id) has a negative (cooling) shift and must raise Kelvin")
             }
         }
+    }
+
+    /// A look's warmth must land on the ordinary photograph — the one whose recipe carries no
+    /// temperature at all, which is most of them once the curator has dropped Warm and Cool.
+    /// Gated on `temperatureK != nil`, five looks' warmth limb was silently inert; it now shifts
+    /// from as-shot, the renderer's own neutral. Every look in the library, both directions.
+    func testWarmthAppliesFromAsShotWhenTheRecipeHasNoTemperature() {
+        for look in LookPreset.library where look.temperatureShift != 0 {
+            var g = GlobalAdjustments.neutral
+            XCTAssertNil(g.temperatureK)
+            look.apply(to: &g)
+            let t = try? XCTUnwrap(g.temperatureK, "\(look.id) must set a temperature from as-shot")
+            guard let t else { continue }
+            if look.temperatureShift > 0 {
+                XCTAssertLessThan(t, 6500, "\(look.id) warms, so it must land below as-shot")
+            } else {
+                XCTAssertGreaterThan(t, 6500, "\(look.id) cools, so it must land above as-shot")
+            }
+        }
+        // And a look with no shift leaves the temperature alone — as-shot stays as-shot.
+        var g = GlobalAdjustments.neutral
+        LookPreset.named("ektar")!.apply(to: &g)
+        XCTAssertNil(g.temperatureK, "a look without a shift must not invent a temperature")
     }
 
     /// A cooling look near the schema's cold end must be allowed to reach it. `apply` once
@@ -131,12 +157,12 @@ final class LookPresetTests: XCTestCase {
         }
     }
 
-    /// Unlike temperature, tint applies even when the recipe is as-shot: its neutral is 0, not
-    /// nil, and the renderer runs the white-balance filter for a tint alone.
+    /// Tint and temperature both land on an as-shot recipe: tint's neutral is 0, and temperature
+    /// shifts from the renderer's 6500 K when the recipe has none.
     func testTintShiftAppliesWithoutATemperature() {
         var g = GlobalAdjustments.neutral                 // temperatureK == nil, tint == 0
         LookPreset.named("tungsten")!.apply(to: &g)
-        XCTAssertNil(g.temperatureK, "as-shot must stay as-shot")
+        XCTAssertGreaterThan(g.temperatureK ?? 0, 6500, "tungsten cools from as-shot")
         XCTAssertNotEqual(g.tint, 0, "the tint shift must land even with no temperature")
     }
 

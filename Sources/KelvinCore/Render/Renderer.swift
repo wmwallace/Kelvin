@@ -5,8 +5,10 @@ import CoreImage
 ///
 /// Applies, in this order: heal → white balance → exposure → highlight/shadow → whites/blacks →
 /// contrast/saturation → dehaze → clarity → vibrance → luma curve → per-channel RGB curves
-/// (colour grade) → per-colour HSL → masked local adjustments → detail (NR + sharpen) →
-/// geometry (straighten + crop). Every schema field is now rendered.
+/// (colour grade) → per-colour HSL → black & white → masked local adjustments → detail (NR +
+/// sharpen) → geometry (straighten + crop). Every schema field is now rendered. One exception,
+/// deliberate: on a recipe with a black-and-white conversion, the per-channel curves run AFTER
+/// the conversion, where they tone the print instead of re-weighting it.
 ///
 /// Load-bearing property: a field at its neutral value contributes NO filter to the chain, so
 /// a fully-neutral recipe returns the input image unchanged — "neutral is a byte-identical
@@ -239,7 +241,15 @@ public enum Renderer {
         // shadows. Omitted, the table applies directly to the values as they are, which is what
         // this block exists to make true. (The HSL and mono cubes below are outside the sRGB
         // block, on genuinely linear values, which is why they DO name the space.)
-        if let curve = recipe.curve, let cdata = channelCurvesData(curve) {
+        //
+        // ON A MONO RECIPE THESE RUN AFTER THE CONVERSION, not here. Before the B&W cube a
+        // per-channel curve can only re-weight which grey each colour becomes; it cannot tint
+        // the print, because the cube throws the tint away. After it, the same curve is a
+        // darkroom toner — selenium's cool silver, sepia's brown — which is what a per-channel
+        // curve on a black-and-white recipe means. Colour recipes are untouched by this branch
+        // and render byte-identically. Decided 28 August 2026 from side-by-side renders.
+        let toneAfterMono = recipe.blackAndWhite != nil
+        if !toneAfterMono, let curve = recipe.curve, let cdata = channelCurvesData(curve) {
             img = img.applyingFilter("CIColorCurves", parameters: [
                 "inputCurvesData": cdata,
                 "inputCurvesDomain": CIVector(x: 0, y: 1)
@@ -280,6 +290,18 @@ public enum Renderer {
                 "inputCubeData": cube,
                 "inputColorSpace": ImageWriter.outputColorSpace
             ])
+        }
+
+        // Toning: the per-channel curves a mono recipe carries, applied to the grey print (see
+        // the colour-grade block above for why they are deferred). Same display-referred round
+        // trip, same no-`inputColorSpace` rule, for the same measured reasons.
+        if toneAfterMono, let curve = recipe.curve, let cdata = channelCurvesData(curve) {
+            img = img.applyingFilter("CILinearToSRGBToneCurve")
+            img = img.applyingFilter("CIColorCurves", parameters: [
+                "inputCurvesData": cdata,
+                "inputCurvesDomain": CIVector(x: 0, y: 1)
+            ])
+            img = img.applyingFilter("CISRGBToneCurveToLinear")
         }
 
         // Masked local adjustments (schema order: … HSL → masks). Applied only when the caller
