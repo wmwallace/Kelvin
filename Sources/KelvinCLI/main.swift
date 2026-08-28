@@ -261,6 +261,12 @@ case "engine":
             generatedAt: ISO8601DateFormatter().string(from: Date())
         )
         try RecipeIO.save(recipe, to: URL(fileURLWithPath: outPath))
+        // The measurements the recipe was computed from — the first thing to read when a lever
+        // did or did not fire, because every engine decision is a function of these numbers.
+        print(String(format: "measured: luma median %.3f · black %.3f · white %.3f · range %.3f · "
+                     + "shadowRegion %.3f · shadowMass %.3f · clip hi %.3f lo %.3f",
+                     stats.medianLuma, stats.blackPoint, stats.whitePoint, stats.dynamicRange,
+                     stats.shadowRegion, stats.shadowMass, stats.highlightClip, stats.shadowClip))
         print("Wrote \(outPath) [\(recipe.label ?? "recipe")]")
     } catch {
         fail("\(error)")

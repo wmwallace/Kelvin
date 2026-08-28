@@ -117,7 +117,9 @@ Fully numeric. Renderer-agnostic. Serializes with the saved edit.
     "clarity": 6,
     "texture": 0,
     "dehaze": 0,
-    "fusion": 55
+    "fusion": 55,
+    "range_low": 0.06,
+    "range_high": 0.93
   },
   "curve": {
     "luma": [[0, 0], [64, 58], [192, 200], [255, 255]],
@@ -177,8 +179,8 @@ These are tests, not suggestions.
    order. As implemented in `Renderer.render`:
 
    heal → white balance → exposure → highlight/shadow → whites/blacks →
-   contrast/saturation → dehaze → clarity → vibrance → luma curve → RGB curves →
-   HSL → black & white → masks → detail → **geometry**.
+   range stretch (`range_low`/`range_high`) → contrast/saturation → dehaze → clarity →
+   vibrance → luma curve → RGB curves → HSL → black & white → masks → detail → **geometry**.
 
    One deliberate exception: when the recipe carries `black_and_white`, the RGB curves run
    *after* the conversion, where they tone the grey print (selenium, sepia) instead of
@@ -225,6 +227,7 @@ silently: a heal spot written with `feather: 50` clamps to `1.0` and comes back 
 | `contrast`, `highlights`, `shadows`, `whites`, `blacks` | −100 … +100 | 0 |
 | `vibrance`, `saturation`, `clarity`, `texture`, `dehaze` | −100 … +100 | 0 |
 | `temperature_k` | 2000 … 12000 | as-shot |
+| `range_low`, `range_high` | 0 … 0.5, 0.5 … 1 | absent (0 and 1) — D26's levels stretch; absent applies nothing |
 | `tint` | −150 … +150 | 0 |
 | `hsl.*.h` | −100 … +100 | 0 |
 | `sharpen`, `nr_luma`, `nr_color` | 0 … 100 | 0 |
