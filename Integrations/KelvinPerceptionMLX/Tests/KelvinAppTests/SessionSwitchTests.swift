@@ -40,6 +40,7 @@ final class SessionSwitchTests: XCTestCase {
         PhotoSession(
             url: photo, imageId: "id", fullResCI: image, proxyCI: image,
             originalPreviewImage: nil, perception: nil, candidates: [],
+            openedInByRule: nil,
             proxyMaskBitmaps: [:], subjectInstances: [], subjectLuma: nil,
             subjectOrigin: nil, skyLuma: nil, healSpots: [],
             capture: CaptureInfo(), activeLookId: nil,

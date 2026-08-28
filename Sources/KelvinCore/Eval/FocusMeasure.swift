@@ -74,6 +74,30 @@ public enum FocusMeasure {
     static let softThreshold = 2.0
     static let unusableThreshold = 1.1
 
+    /// Whether the engine's soft-focus clarity damping is on. **Off by default**, because the
+    /// per-frame cost of the reading has never been priced (D19 said so when the capability left
+    /// with the model's `soft-focus` claim, and it is still true). `KELVIN_CLARITY_FOCUS=1` turns
+    /// it on everywhere at once — every path that generates candidates measures through
+    /// `engineReading(for:)`, so the canvas, the export and the harness cannot disagree about
+    /// whether a frame was damped. In `RecipeEngine.tuningSignature`, so a sweep cannot be served
+    /// the other arm's cached recipes. `kelvin-perceive bench-load` already times `read` on the
+    /// proxy, which is where the pricing comes from.
+    public static var engineDampingEnabled: Bool {
+        let raw = ProcessInfo.processInfo.environment["KELVIN_CLARITY_FOCUS"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return raw == "1" || raw == "on"
+    }
+
+    /// The reading the engine's clarity damping consumes, or nil while the switch above is off —
+    /// nil costs nothing, which is what makes the default free. **Pass the 768 px perception
+    /// proxy**, the image the frame's statistics were measured on: the grid resamples internally,
+    /// but resampling twice from different sizes perturbs pixels, and a reading that straddled
+    /// `softThreshold` between the canvas's proxy and the export's would resolve one photograph
+    /// two ways — the exact bug measuring at two sizes has already caused once.
+    public static func engineReading(for image: CIImage) -> Reading? {
+        engineDampingEnabled ? read(image) : nil
+    }
+
     /// Measure the frame. Pass the proxy, not the full-resolution original — consistency between
     /// frames matters far more than absolute scale, and every frame goes through the same proxy.
     public static func read(_ image: CIImage) -> Reading {

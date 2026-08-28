@@ -30,14 +30,15 @@ public extension RecipeEngine {
         engineVersion: String = version,
         perceptionHash: String? = nil,
         generatedAt: String? = nil,
-        subjectLumaIsSkin: Bool = false
+        subjectLumaIsSkin: Bool = false,
+        focus: FocusMeasure.Reading? = nil
     ) -> [Recipe] {
         CandidateStyle.all.map { style in
             candidate(
                 perception: p, statistics: s, style: style,
                 subjectLuma: subjectLuma, skyLuma: skyLuma, subjectOrigin: subjectOrigin, iso: iso,
                 engineVersion: engineVersion, perceptionHash: perceptionHash,
-                generatedAt: generatedAt, subjectLumaIsSkin: subjectLumaIsSkin
+                generatedAt: generatedAt, subjectLumaIsSkin: subjectLumaIsSkin, focus: focus
             )
         }
     }
@@ -54,7 +55,8 @@ public extension RecipeEngine {
         engineVersion: String = version,
         perceptionHash: String? = nil,
         generatedAt: String? = nil,
-        subjectLumaIsSkin: Bool = false
+        subjectLumaIsSkin: Bool = false,
+        focus: FocusMeasure.Reading? = nil
     ) -> Recipe {
         var g = GlobalAdjustments.neutral
 
@@ -90,7 +92,7 @@ public extension RecipeEngine {
         g.vibrance = styledVibrance(p, s, style)
         g.saturation = styledSaturation(p, style)
         // Local contrast follows the style's contrast character — Soft stays smooth, Dramatic bites.
-        let local = localContrast(p, s, iso: iso)
+        let local = localContrast(p, s, iso: iso, focus: focus)
         g.clarity = roundedClamp(local.clarity * style.curveScale, to: 0...30, step: 1)
         g.texture = roundedClamp(local.texture * style.curveScale, to: 0...20, step: 1)
 

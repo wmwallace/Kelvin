@@ -640,6 +640,34 @@ Consequences worth stating plainly before designing anything that assumes otherw
   expanding the roster. Ranked by measurement, a per-frame opener beats every roster change,
   every new style and every constant sweep on the table.
 
+### The opener rule exists now, and ships inert
+
+`OpeningRule` is the per-frame opener the numbers above argue for, built to D18's ruling: a
+photograph may open in something other than Natural only above a margin, and only with the app
+saying on screen that it chose. It reads the two properties `pick-probe` found and nothing else —
+`shadowRegion` and `shadowMass`, both floors required — and it is consulted only when nothing
+outranks the engine's own ranking (a hand edit, an override and the shoot's look all win, per D13).
+A suggestion the curator drops for a frame falls back to Natural silently.
+
+**It is disabled by default** (`KELVIN_OPENER` unset), because the margin has not been calibrated —
+the evidence is 63 usable frames from one photographer, which this document already calls enough to
+know the signal exists and not enough to calibrate on. Calibrating it is two steps:
+
+```
+kelvin-cli eval --corpus ./corpus-pairs --out report.json
+kelvin-cli opener-probe --report report.json --corpus ./corpus-pairs        # price the floors
+KELVIN_OPENER=soft KELVIN_OPENER_REGION=<r> KELVIN_OPENER_MASS=<m> \
+    kelvin-cli eval --corpus ./corpus-pairs                                 # confirm end to end
+```
+
+`opener-probe` re-reads an existing report (no re-render) and prices every floor pair: the
+resulting `engine-default` mean, fire count, helped/hurt, and the worst single frame — read the
+worst frame before the mean, for D19's reason. The confirmation run goes through the shipped path,
+where curation keeps its veto, and its `opened in:` line shows the rule firing. Hold the floors
+out per "Calibrating a constant" above; a corpus spanning more than two shoots is the honest
+prerequisite for shipping a default-on value. The floors are in `RecipeEngine.tuningSignature`
+(constant "off" while disabled), so a sweep cannot be served another arm's cached resolutions.
+
 ## Highlights are computed open-loop
 
 `highlightRecovery` sizes itself from **`s.highlightClip` on the source** — `min(66, clip * 400)` —

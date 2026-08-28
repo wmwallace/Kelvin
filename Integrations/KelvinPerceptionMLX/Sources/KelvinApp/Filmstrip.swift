@@ -108,6 +108,10 @@ struct PhotoSession {
     let originalPreviewImage: NSImage?
     let perception: Perception?
     let candidates: [CandidateViewModel]
+    /// The disclosure that `OpeningRule` chose this frame's opener, cached with the candidates it
+    /// describes: `restore` puts a photo back without re-resolving, and the sentence "Kelvin chose"
+    /// must come back with the choice — or vanish with it, when the user's own pick superseded it.
+    let openedInByRule: String?
     let proxyMaskBitmaps: [String: CIImage]
     /// The separable subjects found in this frame. Cached with everything else because the mask
     /// list is per-photo: without it, switching away and back leaves the previous photograph's

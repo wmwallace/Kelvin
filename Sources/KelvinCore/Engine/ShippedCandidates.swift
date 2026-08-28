@@ -70,6 +70,13 @@ public enum ShippedCandidates {
         public let chosen: CandidateCurator.Scored?
         /// Whether a requested style survived curation. False means `chosen` is the fallback.
         public let honouredRequest: Bool
+        /// True when nothing had a prior claim on the opener and `OpeningRule` chose it from the
+        /// frame's measured shadow structure. **The caller owes the user a sentence when this is
+        /// set** — D18's ruling is that the app may open off Natural only if it says on screen
+        /// that it chose. False whenever a requested style decided the opener, or the rule is
+        /// disabled, or the rule's suggestion did not survive curation (the frame then opens in
+        /// Natural exactly as before the rule existed).
+        public let openedByMeasurement: Bool
         /// The masks that fed generation and rendering, at measurement resolution.
         public let masks: LocalMasks.Measured
         /// The histogram that fed generation. Exposed so a caller building a further recipe from
@@ -118,6 +125,10 @@ public enum ShippedCandidates {
     ///   - perceptionHash/generatedAt: provenance, for a caller that serialises these recipes. The
     ///     app leaves both nil — it never writes a candidate to disk until the photographer picks
     ///     one — but anything that does write them should stamp them.
+    ///   - opening: the per-frame opener rule's tunables. Nil — the default, and what every
+    ///     production caller passes — reads the environment (`OpeningRule.configuration`, disabled
+    ///     unless `KELVIN_OPENER` is set). Explicit values exist so tests and in-process sweeps
+    ///     can exercise the rule without mutating process state.
     public static func compose(
         for image: CIImage,
         perception: Perception,
@@ -125,7 +136,8 @@ public enum ShippedCandidates {
         requestedStyleID: String? = nil,
         count: Int = 4,
         perceptionHash: String? = nil,
-        generatedAt: String? = nil
+        generatedAt: String? = nil,
+        opening: OpeningRule.Configuration? = nil
     ) throws -> Composition {
         let measureOn = PerceptionProxy.downsample(image)
         let stats = try ImageStatistics.compute(measureOn)
@@ -140,7 +152,10 @@ public enum ShippedCandidates {
             iso: iso,
             perceptionHash: perceptionHash,
             generatedAt: generatedAt,
-            subjectLumaIsSkin: masks.subjectLumaIsSkin
+            subjectLumaIsSkin: masks.subjectLumaIsSkin,
+            // Nil unless KELVIN_CLARITY_FOCUS is on; measured on the same proxy as `stats`, like
+            // every other path that generates candidates — see `FocusMeasure.engineReading`.
+            focus: FocusMeasure.engineReading(for: measureOn)
         )
 
         // ONE face detection for the whole set, not one per candidate — the app's optimisation and
@@ -168,9 +183,19 @@ public enum ShippedCandidates {
             all.append(Candidate(recipe: recipe, preview: preview, score: score))
         }
 
+        // THE FRAME MAY CHOOSE ITS OWN OPENER — but only when nothing outranks it. A requested
+        // style (a shoot look, or an override) is a decision somebody already made, so the rule
+        // stays out of its way; D13's precedence puts the engine's own ranking last, and this rule
+        // is a refinement of that last step only. Routing the suggestion through `resolve` as a
+        // request is the point rather than a shortcut: if curation dropped the suggested style for
+        // this frame, `honouredRequest` comes back false and the photograph opens in Natural,
+        // exactly as it would have before the rule existed.
+        let suggested = requestedStyleID == nil
+            ? OpeningRule.suggestion(for: stats, given: opening ?? OpeningRule.configuration)
+            : nil
         let resolution = CandidateCurator.resolve(
             from: all.map { CandidateCurator.Scored(recipe: $0.recipe, score: $0.score) },
-            requested: requestedStyleID,
+            requested: requestedStyleID ?? suggested,
             count: count
         )
 
@@ -178,7 +203,8 @@ public enum ShippedCandidates {
             all: all,
             curated: resolution.curated,
             chosen: resolution.chosen,
-            honouredRequest: resolution.honouredRequest,
+            honouredRequest: requestedStyleID != nil && resolution.honouredRequest,
+            openedByMeasurement: suggested != nil && resolution.honouredRequest,
             masks: masks,
             statistics: stats,
             measuredOn: measureOn
