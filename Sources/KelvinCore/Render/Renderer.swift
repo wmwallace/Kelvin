@@ -119,9 +119,32 @@ public enum Renderer {
         // texture and vibrance stay in linear, where they were calibrated: they were not part of
         // this bug, and moving them changed their strength enough to cost 5 ΔE on the engine
         // benchmark's flat case. Fix the thing that is broken, not everything nearby.
+        let stretchLow = g.rangeLow ?? 0, stretchHigh = g.rangeHigh ?? 1
+        let stretchPass = (stretchLow != 0 || stretchHigh != 1) && stretchHigh > stretchLow
         let tonePass = g.whites != 0 || g.blacks != 0 || g.contrast != 0 || g.saturation != 0
-            || g.dehaze != 0 || g.highlights > 0
+            || g.dehaze != 0 || g.highlights > 0 || stretchPass
         if tonePass { img = img.applyingFilter("CILinearToSRGBToneCurve") }
+
+        // D26 — the levels-style range stretch, FIRST in the display stage so the contrast pivot
+        // and the endpoint curves see the restored range rather than the compressed one. A pure
+        // affine remap per channel, (x − low) / (high − low), then clamped: `CIColorPolynomial`
+        // is exact where the `CIToneCurve` endpoint attempt D-tone-1 records was not (moving the
+        // spline's outer points made the flat gap far worse, 29.9 ΔE, and was reverted). Absent
+        // fields are 0 and 1 and skip the filter entirely, so old recipes render byte-identically.
+        if stretchPass {
+            let a1 = 1 / (stretchHigh - stretchLow)
+            let a0 = -stretchLow * a1
+            let coefficients = CIVector(x: a0, y: a1, z: 0, w: 0)
+            img = img.applyingFilter("CIColorPolynomial", parameters: [
+                "inputRedCoefficients": coefficients,
+                "inputGreenCoefficients": coefficients,
+                "inputBlueCoefficients": coefficients,
+                "inputAlphaCoefficients": CIVector(x: 0, y: 1, z: 0, w: 0)
+            ]).applyingFilter("CIColorClamp", parameters: [
+                "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
+                "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)
+            ])
+        }
 
         // The POSITIVE half of `highlights` (see the recovery filter above, which can only darken).
         // Shaped like `whites` — anchored at both ends so nothing clips — but weighted higher up

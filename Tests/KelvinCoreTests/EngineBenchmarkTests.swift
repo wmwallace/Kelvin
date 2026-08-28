@@ -104,6 +104,10 @@ final class EngineBenchmarkTests: XCTestCase {
                 // docs/EVALUATION.md's "honest test of whether this project has a reason to exist".
                 XCTAssertLessThan(deEngine, deNaive,
                                   "flat: engine must at least beat naive-auto")
+                // D26 closed the gap: the range stretch maps the compressed range back out, so
+                // the floor every other case has held all along applies here too now.
+                XCTAssertLessThan(deEngine, deNeutral + 0.5,
+                                  "flat: with the D26 stretch the engine must not be worse than doing nothing")
             } else {
                 // The floor: the engine must not make a defect it claims to fix worse than
                 // leaving it alone. A small tolerance absorbs sampling/quantisation noise.

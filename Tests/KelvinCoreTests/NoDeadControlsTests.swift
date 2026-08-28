@@ -66,7 +66,8 @@ final class NoDeadControlsTests: XCTestCase {
             ("clarity",     { $0.clarity = 70 }),
             ("texture",     { $0.texture = 70 }),
             ("dehaze",      { $0.dehaze = 60 }),
-            ("fusion",      { $0.fusion = 80 })
+            ("fusion",      { $0.fusion = 80 }),
+            ("range",       { $0.rangeLow = 0.12; $0.rangeHigh = 0.85 })
         ]
         for (name, mutate) in cases {
             XCTAssertNotEqual(try rendered(mutate), baseline,
