@@ -1319,6 +1319,13 @@ passes nil while the switch is on would reintroduce exactly the canvas/export di
 Flipping the default on needs: the bench price, and a corpus check that the damping helps —
 which needs soft frames in a corpus, i.e. a blur degradation arm, which does not exist yet.
 
+**Priced 28 August 2026:** `kelvin-cli bench-load` on a 60 MP ARW (`_DSC6516`, idle machine)
+puts `FocusMeasure.read` at **41.7 ms** on the 768 px proxy — against 347 ms for the subject and
+sky masks and 790 ms to build the proxy itself, inside a load path that already costs ~1.6 s.
+Cost is not the gate; it is a rounding error. What still gates the default is the second half of
+the sentence above: nothing in either corpus is soft, so "does the damping help" cannot be
+measured until a blur degradation exists. The switch stays off for that reason alone.
+
 ## D26 — A levels-style range stretch for flat frames · **Decided 28 August 2026** (schema addition; the owner approved the day's decisions in bulk)
 
 **The gap this closes is already measured and recorded** (D-tone-1, "a real gap, recorded not
