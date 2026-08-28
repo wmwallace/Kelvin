@@ -1272,6 +1272,28 @@ The floors failing to replicate on a third shoot, or the confirmation run showin
 veto is doing all the work (fires mostly on frames where Soft was culled anyway). Either outcome
 gets recorded here and the rule stays off; the machinery costs nothing while disabled.
 
+### Calibrated 28 August 2026 — and it stays off
+
+Both corpora rebuilt (77 pairs, 54 degradations from nine edits the paired corpus excluded),
+`opener-probe` fixed first so it prices the rule that ships (curation's veto honoured; shadow
+statistics read off the same 768 px proxy the app reads), then every floor pair priced and the
+defaults confirmed end to end through `eval`.
+
+| corpus | engine-default today | with `KELVIN_OPENER=soft` at 0.30 / 0.06 | fired | helped / hurt | worst frame |
+|---|---|---|---|---|---|
+| paired (77 real edits) | 7.48 | **7.44** | 6 | 4 / 2 | +1.60 (`_DSC6714`) |
+| degradation hold-out (54) | 8.09 | **8.18** | 7 | 2 / 5 | +3.01 (`_DSC6550-3__dull`) |
+
+On the photographer's own edits the swap helps at **every** floor pair in the grid (net −1.9 to
+−20 ΔE across the corpus; loosest floors help most). On the hold-out it hurts at every floor
+pair but one (0.30 / 0.02, −1.9), and the worst single frame is +3 ΔE — D19's failure shape, a
+mean that hides a ruined photograph. That is the first kill condition above, met on the first
+attempt: the signal is real on one photographer's shoots and does not survive a corpus built
+differently. The owner's direction was to decide rather than leave it open, so the decision is
+**the rule ships inert, as built**: `KELVIN_OPENER` stays unset, the machinery and the instrument
+stay, and the next evidence that could reopen this is a paired corpus from a third shoot —
+not another sweep of these two.
+
 ## D25 — Soft-focus clarity damping returns as a measurement, switched off until priced · **Built 28 August 2026**
 
 D19 named this the one capability genuinely lost when the model's `problems[]` readers were
