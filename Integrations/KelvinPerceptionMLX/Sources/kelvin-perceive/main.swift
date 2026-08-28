@@ -194,7 +194,8 @@ if first == "bench-export" {
                     RecipeEngine.candidates(perception: perception, statistics: stats,
                                             subjectLuma: measured.subjectLuma,
                                             skyLuma: measured.skyLuma,
-                                            subjectOrigin: measured.subjectOrigin, iso: iso)
+                                            subjectOrigin: measured.subjectOrigin, iso: iso,
+                                            focus: FocusMeasure.engineReading(for: proxy))
                 }
                 recipe = clock(&t.curate) { () -> Recipe in
                     var scored: [CandidateCurator.Scored] = []
@@ -344,7 +345,8 @@ if first == "bench-export" {
         let masks = LocalMasks.measure(in: proxy)
         let generated = RecipeEngine.candidates(perception: perception, statistics: stats,
                                                 subjectLuma: masks.subjectLuma,
-                                                skyLuma: masks.skyLuma, iso: iso)
+                                                skyLuma: masks.skyLuma, iso: iso,
+                                                focus: FocusMeasure.engineReading(for: proxy))
         var scored: [CandidateCurator.Scored] = []
         for candidate in generated {
             let preview = Renderer.render(proxy, with: candidate, maskBitmaps: masks.bitmaps)
@@ -587,7 +589,8 @@ if first == "bench-export" {
             perception: perception, statistics: stats,
             subjectLuma: measured.subjectLuma, skyLuma: measured.skyLuma, iso: iso,
             perceptionHash: PerceptionIO.hash(perception),
-            generatedAt: ISO8601DateFormatter().string(from: Date())
+            generatedAt: ISO8601DateFormatter().string(from: Date()),
+            focus: FocusMeasure.engineReading(for: image)
         )
 
         print("\n── candidates (engine output — deterministic numbers, aesthetic score) ──")

@@ -105,7 +105,13 @@ public enum RecipeEngine {
             "clipCeiling:\(clipCeiling)",
             "headroomGain:\(headroomGain)/\(headroomCap)",
             "subjectDeficit:\(subjectDeficitFloor)",
-            "faceCap:\(faceLiftCapEV)"
+            "faceCap:\(faceLiftCapEV)",
+            // The opener does not change what the engine emits — it changes which candidate a
+            // photograph RESOLVES to, which is exactly what `ResolvedRecipeStore` caches against
+            // this signature. Constant while disabled, so floor sweeps with the rule off cannot
+            // thrash the cache.
+            "opener:\(OpeningRule.signature())",
+            "clarityFocus:\(FocusMeasure.engineDampingEnabled ? "on" : "off")"
         ].joined(separator: ";")
     }
 
@@ -236,7 +242,8 @@ public enum RecipeEngine {
         iso: Double? = nil,
         engineVersion: String = version,
         perceptionHash: String? = nil,
-        generatedAt: String? = nil
+        generatedAt: String? = nil,
+        focus: FocusMeasure.Reading? = nil
     ) -> Recipe {
         let confident = p.confidence >= confidenceFloor
 
@@ -259,7 +266,7 @@ public enum RecipeEngine {
             g.blacks = blacks
             g.vibrance = vibrance(p, s)
             g.saturation = saturation(p)
-            let local = localContrast(p, s, iso: iso)
+            let local = localContrast(p, s, iso: iso, focus: focus)
             g.clarity = local.clarity
             g.texture = local.texture
             // The S-curve carries the punch (anchored midtones); it's the "rebuild" after the
@@ -602,7 +609,8 @@ public enum RecipeEngine {
     ///     is the over-processed portrait look. Portraits get none.
     ///   • Noise is fine-scale, so amplifying fine-scale detail amplifies noise; high-ISO and night
     ///     frames are held back.
-    static func localContrast(_ p: Perception, _ s: ImageStatistics, iso: Double?)
+    static func localContrast(_ p: Perception, _ s: ImageStatistics, iso: Double?,
+                              focus: FocusMeasure.Reading? = nil)
         -> (clarity: Double, texture: Double) {
         guard p.intent != .archival, p.intent != .productAccurate else { return (0, 0) }
 
@@ -631,8 +639,12 @@ public enum RecipeEngine {
         let noisy = (iso ?? 0) > 3200
         if noisy { clarity *= 0.5; texture = 0 }
         // The `flat`/`low-contrast` boost and the `soft-focus` damping both left with the flags
-        // that drove them. Soft-focus is the one capability genuinely lost: `FocusMeasure` could
-        // restore it as a measurement, at a per-frame cost nobody has priced.
+        // that drove them (D19). The damping is back as a MEASUREMENT: `FocusMeasure`'s acuity
+        // reading, at the model claim's old strength — clarity on a soft frame won't rescue
+        // focus, it just adds grit. `isSoft` is false for an unmeasurable frame on purpose
+        // (unmeasurable is not blurred), and the reading arrives nil unless
+        // `FocusMeasure.engineDampingEnabled` — off until the per-frame cost is priced.
+        if focus?.isSoft == true { clarity *= 0.6 }
 
         return (roundedClamp(clarity, to: 0...30, step: 1),
                 roundedClamp(texture, to: 0...20, step: 1))

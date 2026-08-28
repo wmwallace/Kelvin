@@ -197,6 +197,11 @@ final class AppState {
     var perception: Perception?
     var candidates: [CandidateViewModel] = []
     var selectedCandidateId: String?
+    /// The label of the candidate `OpeningRule` opened this frame in, when the measurement chose.
+    /// Nil whenever the opener was the default, a shoot look, or a restored edit. D18's ruling is
+    /// that a photograph may open off Natural only if the app says on screen that it chose — the
+    /// line under the candidate list reads this, so setting it IS the disclosure.
+    var openedInByRule: String?
     /// NOT `@Published`, deliberately. It is rebuilt on every tick of every drag, and publishing it
     /// woke the whole panel a second time per tick for something no view reads: the export and the
     /// craft-fix paths take it directly, and the only view that ever wanted anything out of it was
@@ -2791,7 +2796,8 @@ final class AppState {
             url: url, imageId: imageId, fullResCI: full, proxyCI: proxy,
             originalPreviewImage: original.flatMap { $0.url == url ? $0.image : nil },
             perception: perception,
-            candidates: candidates, proxyMaskBitmaps: proxyMaskBitmaps,
+            candidates: candidates, openedInByRule: openedInByRule,
+            proxyMaskBitmaps: proxyMaskBitmaps,
             subjectInstances: subjectInstances,
             subjectLuma: subjectLuma, subjectOrigin: subjectOrigin, skyLuma: skyLuma,
             healSpots: healSpots,
@@ -2818,7 +2824,7 @@ final class AppState {
     /// put until the new photo actually loads, so a failed load can still be retried.
     func clearPerPhotoState() {
         activeRecipe = nil; preview.active = nil; original = nil; preview.lastRenderedCI = nil; preview.histogram = nil
-        candidates = []; selectedCandidateId = nil; perception = nil
+        candidates = []; selectedCandidateId = nil; perception = nil; openedInByRule = nil
         activeCraftIssues = []; lastCraftReading = nil; exhaustedFixes = []
         userMasks = []; paintingMaskId = nil; selectedMask = nil; pickingInstance = false
         subjectInstances = []; highlightedInstanceId = nil
@@ -2852,6 +2858,7 @@ final class AppState {
         fullResCI = s.fullResCI; proxyCI = s.proxyCI
         original = s.originalPreviewImage.map { TaggedPreview(url: s.url, image: $0) }
         perception = s.perception; candidates = s.candidates
+        openedInByRule = s.openedInByRule
         proxyMaskBitmaps = s.proxyMaskBitmaps
         subjectInstances = s.subjectInstances
         highlightedInstanceId = nil
@@ -2886,7 +2893,7 @@ final class AppState {
         // state showing a spinner that never stopped.
         isProcessing = false
         fullResCI = nil; proxyCI = nil
-        candidates = []; selectedCandidateId = nil
+        candidates = []; selectedCandidateId = nil; openedInByRule = nil
         activeRecipe = nil; preview.active = nil; original = nil
         preview.lastRenderedCI = nil; preview.histogram = nil; activeCraftIssues = []; lastCraftReading = nil; exhaustedFixes = []
         userMasks = []; paintingMaskId = nil; selectedMask = nil; pickingInstance = false
@@ -3492,10 +3499,15 @@ final class AppState {
                     // Serial, deliberately. Do not turn these into `async let`.
                     let masks = LocalMasks.measure(in: measureInputs.measureOn)
                     let instances = SubjectInstances.detect(in: measureInputs.proxy)
-                    return MeasuredSansFocus(stats: stats, masks: masks, instances: instances)
+                    // Free while the switch is off (nil, no render); on the lane when it is on,
+                    // because `read` renders — D21's rule.
+                    let engineFocus = FocusMeasure.engineReading(for: measureInputs.measureOn)
+                    return MeasuredSansFocus(stats: stats, masks: masks, instances: instances,
+                                             engineFocus: engineFocus)
                 }
                 return await MeasuredPhoto(stats: rest.stats, masks: rest.masks,
-                                           focus: focus, instances: rest.instances)
+                                           focus: focus, instances: rest.instances,
+                                           engineFocus: rest.engineFocus)
             }.value
 
             guard imageURL == url else { return }
@@ -3529,7 +3541,8 @@ final class AppState {
             let recipes = RecipeEngine.candidates(perception: perceptionRead, statistics: stats,
                                                   subjectLuma: self.subjectLuma, skyLuma: self.skyLuma,
                                                   subjectOrigin: self.subjectOrigin,
-                                                  iso: ExifReader.iso(url: url))
+                                                  iso: ExifReader.iso(url: url),
+                                                  focus: measurement.engineFocus)
 
             // Render every style, score each on the craft floors, then CURATE. The engine offers
             // eight looks and several will be wrong for any given photo — Dramatic silhouettes a
@@ -3665,7 +3678,15 @@ final class AppState {
             // `CandidateCurator.resolve` so the export path resolves it the same way. It used to
             // live here as a comment, and the export path did not honour it.
             let wanted = effectiveStyle(for: url)
-            let resolution = CandidateCurator.resolve(from: scored, requested: wanted, count: 4)
+            // THE FRAME MAY CHOOSE ITS OWN OPENER — `OpeningRule`, D18's measured replacement for
+            // the deleted learner, consulted only when no shoot look has a claim (a hand edit is
+            // applied below and outranks both). Routed through `resolve` as a request so a
+            // suggestion the curator dropped falls back to Natural exactly as before the rule
+            // existed. Same seam as `ShippedCandidates.compose`, so the eval harness measures
+            // exactly what this path shows. Inert unless KELVIN_OPENER is set — see the rule.
+            let suggested = wanted == nil ? OpeningRule.suggestion(for: stats) : nil
+            let resolution = CandidateCurator.resolve(from: scored,
+                                                      requested: wanted ?? suggested, count: 4)
             let curated = resolution.curated
             self.candidates = curated.compactMap { item in
                 let key = item.recipe.id ?? ""
@@ -3682,10 +3703,15 @@ final class AppState {
             // its own masks — which is exactly what `candidates` already are, one per style, built
             // from THIS photograph. So honouring the shoot look is choosing among them, not
             // replaying somebody else's numbers.
-            let shootStyle = resolution.honouredRequest
-                ? models.first { $0.id == resolution.chosen?.recipe.id }
-                : nil
+            let resolved = models.first { $0.id == resolution.chosen?.recipe.id }
+            let shootStyle = (wanted != nil && resolution.honouredRequest) ? resolved : nil
+            // The measurement's choice, only when it was actually taken: nothing else had a claim,
+            // the rule fired, and its style survived curation. Kept apart from `shootStyle`
+            // because the two owe the user different sentences.
+            let ruleStyle = (wanted == nil && suggested != nil && resolution.honouredRequest)
+                ? resolved : nil
             if let shootStyle { selectCandidate(id: shootStyle.id) }
+            else if let ruleStyle { selectCandidate(id: ruleStyle.id) }
             else if let first = models.first { selectCandidate(id: first.id) }
 
             // If this photo was edited in an earlier session, put that work back rather than
@@ -3703,6 +3729,13 @@ final class AppState {
                 // Say so rather than quietly showing a different look than the strip implies.
                 statusMessage = "Ready · the shoot is in \(style.label), but that look is wrong for "
                     + "this frame — showing \(models.first?.label ?? "the best fit") instead\(statusNote)"
+            } else if let ruleStyle {
+                // D18: a photograph may open off Natural ONLY if the app says on screen that it
+                // chose. The panel line under the candidates is the durable half of that sentence;
+                // this is the immediate half.
+                openedInByRule = ruleStyle.label
+                statusMessage = "Ready · opened in \(ruleStyle.label) — Kelvin chose it from this "
+                    + "frame's shadow structure\(statusNote)"
             } else {
                 statusMessage = "Ready · pick a look, then apply it to the shoot\(statusNote)"
             }
@@ -5841,7 +5874,8 @@ final class AppState {
             let recipes = RecipeEngine.candidates(perception: perception, statistics: stats,
                                                   subjectLuma: m.subjectLuma, skyLuma: m.skyLuma,
                                                   subjectOrigin: m.subjectOrigin,
-                                                  iso: iso)
+                                                  iso: iso,
+                                                  focus: FocusMeasure.engineReading(for: work.proxy))
             // The whole set has to be built and scored, not just the one that was asked for.
             // Curation is not a per-candidate verdict: a style is dropped by the quality floor, OR
             // by being too close to one already chosen, OR by the four-slot cap — and the last two
@@ -6055,6 +6089,12 @@ final class AppState {
         let focus: FocusMeasure.Reading
         /// Each separable subject in the frame, for the mask list.
         let instances: [SubjectInstances.Instance]
+        /// The ENGINE's focus reading — nil unless `KELVIN_CLARITY_FOCUS` is on. Distinct from
+        /// `focus` above, which is the strip's triage reading off the 1200 px edit proxy: this one
+        /// is taken on the 768 px perception proxy, the image the statistics come from, because a
+        /// reading that feeds a recipe must be measured where every other recipe input is — the
+        /// canvas and the export resolving one photograph two ways is the bug that rule exists for.
+        let engineFocus: FocusMeasure.Reading?
     }
 
     /// The photograph most recently asked for, readable from any lane without the main actor.
@@ -6092,6 +6132,9 @@ final class AppState {
         let stats: ImageStatistics
         let masks: LocalMasks.Measured
         let instances: [SubjectInstances.Instance]
+        /// See `MeasuredPhoto.engineFocus`. "SansFocus" still holds: this is not the triage
+        /// reading, and it is nil whenever the damping switch is off, which is the default.
+        let engineFocus: FocusMeasure.Reading?
     }
 
     /// The decode lane's OWN Core Image context. A `CIContext` serialises its renders behind one
@@ -7824,6 +7867,17 @@ struct ContentView: View {
                     // What stays here is what earns its place here: these are the tokens the engine
                     // actually branched on, so they explain why THESE four candidates and not others.
                     Text(seen.headline)
+                        .font(Theme.mono(10)).foregroundColor(Theme.inkDim)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.bottom, 4)
+                }
+                // WHEN KELVIN CHOSE THE OPENER, IT SAYS SO — the condition D18 attached to ever
+                // opening a photograph off Natural. The sentence names the mechanism (measured
+                // shadow structure, not the model, not a preference) so a wrong choice is
+                // legible the way a wrong scene read is in the line above.
+                if let chosen = appState.openedInByRule {
+                    Text("Opened in \(chosen) — Kelvin chose it from this frame's measured shadow structure")
                         .font(Theme.mono(10)).foregroundColor(Theme.inkDim)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)

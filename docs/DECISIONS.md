@@ -1210,3 +1210,138 @@ count; if they match, something inline is reading the edit.
 **Tried and not kept:** a `CALayer` with the render's `CGImage` as `contents` instead of the `Canvas`
 — same numbers, more code. `EquatableView` around the slider row — declined by SwiftUI for views
 holding dynamic properties (the comment on `ToneSlider` already recorded this).
+
+## D24 — The per-frame opener is built, margin-gated, and ships inert until calibrated · **Built 28 August 2026, awaiting the owner's calibration**
+
+**This implements the ruling D18 already recorded**, not a new decision: a photograph may open in
+something other than Natural, but only above a margin calibrated on the harness, and only if the
+app says on screen that it chose. What was missing was the machinery and the instrument; both now
+exist. What is still missing is the calibration, which needs the owner's corpus — so the rule
+ships **disabled**, and every photograph opens exactly where it opened yesterday until
+`KELVIN_OPENER` is set.
+
+### Why this is the thing to have built
+
+The harness's own numbers, all previously recorded in `docs/EVALUATION.md`: picking the right
+candidate is worth **0.61 ΔE** (`engine-best` 7.027 vs `engine-default` 7.670) against 0.10 for
+any roster change, and the opener was structural — `engine-default` *was* `engine-natural` on
+100% of frames. `pick-probe` found exactly one measurable thing that separates Soft-wins from
+Natural-wins and replicates on both corpora: shadow structure (`shadowRegion` AUC 0.714/0.657,
+`shadowMass` 0.669/0.680). That is a property of the frame, not the user, so it belongs in the
+engine — which is D18's "what replaces it" paragraph, built.
+
+### The shape
+
+- **`OpeningRule`** (Engine): may suggest one style (`KELVIN_OPENER`, e.g. `soft`) when the
+  frame's source statistics clear BOTH floors — `KELVIN_OPENER_REGION` (default 0.30) and
+  `KELVIN_OPENER_MASS` (default 0.06). The two-floor AND is the margin; the defaults sit above
+  the measured Soft-group means (0.255 / 0.050), so an enabled-but-untuned rule commits least
+  where the evidence is thinnest — the same posture as D20's cap. They are starting points for
+  calibration, not calibrated values.
+- **Precedence unchanged** (D13): a hand edit, a per-frame override and the shoot's look all
+  outrank it. The rule refines only step 4, the engine's own ranking, and it is routed through
+  `CandidateCurator.resolve` as a request — so a suggestion the curator culls for a frame falls
+  back to Natural exactly as before the rule existed. It chooses among the curated set; it never
+  changes the set.
+- **The app says it chose.** `ShippedCandidates.Composition.openedByMeasurement` carries the
+  fact; the app shows a line under the candidates ("Opened in Soft — Kelvin chose it from this
+  frame's measured shadow structure") and says the same in the status line. No disclosure, no
+  off-Natural open — that was the condition, and it is wired as one flag so it cannot drift.
+- **Sweepable without a rebuild**, in `RecipeEngine.tuningSignature` (constant `off` while
+  disabled, so floor sweeps with the rule off cannot thrash the resolved-recipe cache).
+- **`kelvin-cli opener-probe`** prices any floor grid against an existing eval report without a
+  re-render: resulting `engine-default` mean, fire count, helped/hurt, worst single frame. Read
+  the worst frame before the mean — D19's lesson is that a zero-mean perturbation can still ruin
+  photographs.
+
+### What flipping it on requires, deliberately left to the owner
+
+1. `opener-probe` over the paired corpus to choose candidate floors, held out per
+   `docs/EVALUATION.md` "Calibrating a constant".
+2. A `KELVIN_OPENER=soft … kelvin-cli eval` confirmation on both corpora — a change that improves
+   one at the other's expense is a taste call, not a defect fix.
+3. Honestly: a corpus spanning more than two shoots. The signal replicated across both existing
+   corpora, but 63 usable frames from one photographer is the same evidence base this project has
+   declined to calibrate on twice before (D19's statistics-derived flags, the halo discriminator).
+4. Then defaults changed in code, with the evidence cited — not an env var left set on one
+   machine.
+
+### What would kill it
+
+The floors failing to replicate on a third shoot, or the confirmation run showing the curator's
+veto is doing all the work (fires mostly on frames where Soft was culled anyway). Either outcome
+gets recorded here and the rule stays off; the machinery costs nothing while disabled.
+
+## D25 — Soft-focus clarity damping returns as a measurement, switched off until priced · **Built 28 August 2026**
+
+D19 named this the one capability genuinely lost when the model's `problems[]` readers were
+deleted, and said `FocusMeasure` could restore it at a per-frame cost nobody had priced. It is
+restored exactly that way: `localContrast` damps clarity by the old 0.6 when a
+`FocusMeasure.Reading` says the frame is soft — texture and every other lever untouched, and an
+*unmeasurable* frame is not damped, because unmeasurable is not blurred (`FocusMeasure`'s own
+rule, honoured rather than re-derived).
+
+**`KELVIN_CLARITY_FOCUS=1` turns it on; the default is off**, because the cost question D19 left
+open is still open — the reading renders the proxy to a 384-grid and walks it, and that price
+belongs to a measurement on the owner's machine (`kelvin-perceive bench-load` already times
+`FocusMeasure.read` on the proxy, so the instrument exists). The switch is in `tuningSignature`.
+
+The one rule the wiring enforces, because it is the one that can rot silently: **every path that
+generates candidates measures the reading the same way** — `FocusMeasure.engineReading(for:)`, on
+the same proxy the frame's statistics were computed on. All eight production call sites (compose,
+the app's open and export paths, the CLI's, kelvin-perceive's) go through it, so the canvas, the
+export and the harness cannot disagree about whether a frame was damped. A ninth call site that
+passes nil while the switch is on would reintroduce exactly the canvas/export divergence
+`ShippedCandidates` exists to prevent; go through the helper.
+
+Flipping the default on needs: the bench price, and a corpus check that the damping helps —
+which needs soft frames in a corpus, i.e. a blur degradation arm, which does not exist yet.
+
+## D26 — A levels-style range stretch for flat frames · **Proposed** (schema change — needs owner sign-off)
+
+**The gap this closes is already measured and recorded** (D-tone-1, "a real gap, recorded not
+tuned away"): with the tone controls behaving truthfully, the engine is measurably *worse than
+doing nothing* at recovering a genuinely flat frame — 11.8 ΔE vs 8.9 on the synthetic benchmark,
+12.3 vs 9.6 on a real photograph — and `EngineBenchmarkTests` asserts that floor with the gap
+cited. The cause is structural, not a constant: `whites`/`blacks` bend the QUARTER tones of a
+curve pinned at 0 and 1, so nothing in the recipe can map a compressed 0.235…0.764 range back out
+to 0…1. A flat frame gets its midtones redistributed instead of its range restored.
+
+This is a schema change, which CLAUDE.md says never happens without a conversation. This entry is
+that conversation's written half.
+
+### Proposal: a new optional field, not a reinterpretation
+
+Two optional numbers on `GlobalAdjustments` — working names `rangeLow` / `rangeHigh`, normalised
+input black/white points, absent meaning 0 and 1 — rendered as a linear remap
+`(x − low) / (high − low)`, clamped, in the display-referred tone stage **before** contrast, so
+the contrast pivot sees the restored range rather than the compressed one.
+
+- **Absent = no-op, by construction.** Old recipes decode unchanged and render byte-identically;
+  the all-neutral no-op invariant gains one more case in `NeutralNoOpTests` rather than an
+  exception. No stored edit changes meaning, which is what rules out the alternative below.
+- **The renderer is trivial and testable** — an affine per-channel remap (`CIColorPolynomial`
+  suffices), unlike the `CIToneCurve` endpoint attempt D-tone-1 records: moving the luma curve's
+  outer control points made the gap far *worse* (29.9 ΔE) because the spline does not behave as a
+  levels stretch, and it was reverted. That dead end is why this needs a first-class field.
+- **The engine fires it from measurement only**: when `dynamicRange` is below a flat threshold,
+  stretch toward the measured `blackPoint`/`whitePoint` with a recovery fraction and caps, all
+  env-sweepable and in `tuningSignature`. It must damp `pointPlacement` the way `curveDamping`
+  stops the S-curve double-counting the endpoints — two mechanisms both restoring range is how a
+  flat frame becomes a crunched one.
+
+### Rejected alternative: reinterpreting the existing endpoints
+
+No new field, `whites`/`blacks` become a true range stretch. Rejected because it silently
+re-renders every stored edit — the same recipes produce different pixels under the new engine,
+which breaks the promise that a recipe on disk is a description of a look. A schema *addition*
+with a neutral default is the version of this change that leaves existing work alone.
+
+### What decides it worked
+
+The benchmark's flat case dropping below the naive-auto floor it currently cites (the assertion
+flips from documenting the gap to pinning the fix), no regression on the paired corpus (a stretch
+helps against untouched originals by construction, so the degradation corpus alone cannot
+validate it — D-tone-1's own lesson), and `ablate` showing the new lever earning rather than
+costing on real pairs. Not proposed: touching clarity/texture/vibrance spaces, which D-tone-1
+already scoped out at ~5 ΔE of measured cost.

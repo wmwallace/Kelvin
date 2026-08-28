@@ -43,6 +43,8 @@ func printUsage() {
       \(tool) instances --in <image>
       \(tool) grow --in <image> --at <x,y> [--tolerance <t>] [--softness <s>] [--out-dir <dir>]
       \(tool) pick-probe --report <report.json> --corpus <dir> [--pair a,b] [--min-margin <dE>]
+      \(tool) opener-probe --report <report.json> --corpus <dir> [--style <id>]
+                     [--regions <r,r,…>] [--masses <m,m,…>]
 
     wb-probe options (docs/EVALUATION.md, "Which illuminant estimate is right"):
       --in / --in-dir  One photograph, or a folder of them. Required.
@@ -1043,7 +1045,8 @@ case "bench-load":
                                               contrastRange: .normal),
                 problems: [], intent: .natural, confidence: 0.3)
             return RecipeEngine.candidates(perception: perception, statistics: stats,
-                                    subjectLuma: nil, skyLuma: nil, iso: ExifReader.iso(url: url))
+                                    subjectLuma: nil, skyLuma: nil, iso: ExifReader.iso(url: url),
+                                    focus: FocusMeasure.engineReading(for: proxy))
         }
         print("    (\(recipes.count) candidates)")
         // Serial, as this stage used to be — kept so the arrangement below has something to be
@@ -2322,7 +2325,8 @@ case "sky-metrics":
             subjectOrigin: measured.subjectOrigin,
             iso: ExifReader.iso(url: file),
             perceptionHash: PerceptionIO.hash(perception),
-            generatedAt: ISO8601DateFormatter().string(from: Date()))
+            generatedAt: ISO8601DateFormatter().string(from: Date()),
+            focus: FocusMeasure.engineReading(for: image))
 
         var rendered: [(id: String, image: CIImage)] = []
         for recipe in recipes {
@@ -2646,6 +2650,144 @@ case "pick-probe":
             print("photographer, and this property was chosen from \(rows.count) candidates — which")
             print("is \(rows.count) chances for noise to look like signal. Hold it out before building on it.")
         }
+    } catch {
+        fail("\(error)")
+    }
+
+case "opener-probe":
+    // WHAT WOULD THE PER-FRAME OPENER HAVE BOUGHT ON THIS CORPUS, AND AT WHAT FLOORS?
+    //
+    // `OpeningRule` may open a photograph in something other than Natural when the frame's
+    // measured shadow structure clears two floors — but it ships DISABLED, because the floors
+    // are uncalibrated (D18: "only above a margin calibrated on the harness"). This is the
+    // calibration instrument. Like `pick-probe` it re-reads a report the harness has already
+    // written — every `engine-<style>` row carries a per-frame `minDeltaE`, so swapping the
+    // opener is arithmetic, not a re-render — and measures the corpus SOURCES, because the rule
+    // only ever sees the unedited frame.
+    //
+    // For every floor pair it prices the swap the rule would have made: the resulting
+    // engine-default mean, how many frames it fired on, how many of those it helped and hurt,
+    // and the single worst frame it hurt. The worst frame matters more than the mean — D19's
+    // lesson is that a zero-mean perturbation can still ruin photographs, and a corpus mean
+    // will never show it.
+    //
+    // A floor pair chosen here is a HYPOTHESIS, not a result. Confirm it end to end, where the
+    // curator can still drop the style on frames it is wrong for:
+    //
+    //     KELVIN_OPENER=soft KELVIN_OPENER_REGION=<r> KELVIN_OPENER_MASS=<m> \
+    //         kelvin-cli eval --corpus <dir>
+    //
+    // and read `engine-default` and `opened in:` off that report. And hold the floors out: a
+    // pair swept to its best value on the corpus that chose it is the same trap as choosing a
+    // constant on corpus ΔE (docs/EVALUATION.md, "Calibrating a constant").
+    do {
+        let rest = Array(arguments.dropFirst())
+        guard let reportPath = value(for: "--report", in: rest) else {
+            fail("opener-probe needs --report <report.json> (written by `eval --out`)")
+        }
+        guard let corpusPath = value(for: "--corpus", in: rest) else {
+            fail("opener-probe needs --corpus <dir> — the floors are measured on its sources")
+        }
+        let style = value(for: "--style", in: rest) ?? "soft"
+        guard style != CandidateCurator.faithfulStyleID else {
+            fail("--style \(style) is the opener already; probe a style it could switch TO")
+        }
+        func floors(_ flag: String, default def: [Double]) -> [Double] {
+            guard let raw = value(for: flag, in: rest) else { return def }
+            let parsed = raw.split(separator: ",").compactMap { Double($0) }
+            guard !parsed.isEmpty else { fail("\(flag) takes comma-separated numbers") }
+            return parsed
+        }
+        let regions = floors("--regions", default: [0.20, 0.225, 0.25, 0.275, 0.30, 0.325, 0.35])
+        let masses = floors("--masses", default: [0.02, 0.03, 0.04, 0.05, 0.06, 0.08])
+
+        let reportData = try Data(contentsOf: URL(fileURLWithPath: reportPath))
+        guard let root = try JSONSerialization.jsonObject(with: reportData) as? [String: Any],
+              let images = root["images"] as? [[String: Any]] else {
+            fail("\(reportPath) does not look like an eval report (no `images` array)")
+        }
+
+        let corpus = try Corpus.load(root: URL(fileURLWithPath: corpusPath, isDirectory: true))
+        var sourceById: [String: URL] = [:]
+        for entry in corpus.manifest.entries where sourceById[entry.id] == nil {
+            sourceById[entry.id] = corpus.sourceURL(for: entry)
+        }
+
+        /// One frame as the probe needs it: what Natural costs, what the candidate style costs,
+        /// and the shadow structure the rule would have read off the unedited source.
+        struct Frame {
+            let id: String
+            let naturalDE: Double
+            let styleDE: Double
+            let shadowRegion: Double
+            let shadowMass: Double
+        }
+        var frames: [Frame] = []
+        var missing = 0
+        for image in images {
+            guard let id = image["id"] as? String,
+                  let methods = image["methods"] as? [[String: Any]] else { continue }
+            var byStyle: [String: Double] = [:]
+            for m in methods {
+                guard let name = m["method"] as? String, name.hasPrefix("engine-"),
+                      let dE = m["minDeltaE"] as? Double else { continue }
+                byStyle[String(name.dropFirst("engine-".count))] = dE
+            }
+            guard let n = byStyle[CandidateCurator.faithfulStyleID],
+                  let s = byStyle[style] else { missing += 1; continue }
+            guard let url = sourceById[id],
+                  let source = try? ImageDecoder.decode(url: url),
+                  let stats = try? ImageStatistics.compute(source) else { missing += 1; continue }
+            frames.append(Frame(id: id, naturalDE: n, styleDE: s,
+                                shadowRegion: stats.shadowRegion, shadowMass: stats.shadowMass))
+        }
+        if missing > 0 {
+            print("‡ \(missing) frame(s) skipped — no engine-\(style) / engine-natural row, or no "
+                  + "readable source")
+        }
+        guard frames.count >= 5 else {
+            fail("only \(frames.count) usable frame(s); a floor chosen on that is a guess")
+        }
+
+        let alwaysNatural = frames.map(\.naturalDE).reduce(0, +) / Double(frames.count)
+        let oracle = frames.map { min($0.naturalDE, $0.styleDE) }.reduce(0, +)
+            / Double(frames.count)
+        print("")
+        print("\(frames.count) frames · always-natural \(String(format: "%.4f", alwaysNatural))"
+              + " · perfect natural-vs-\(style) chooser \(String(format: "%.4f", oracle))"
+              + " — the floor and the ceiling every arm below sits between")
+        print("")
+        print(String(format: "%8@ %8@ %8@ %8@ %6@ %6@ %8@   %@",
+                     "region" as NSString, "mass" as NSString, "mean" as NSString,
+                     "net" as NSString, "fires" as NSString, "+/-" as NSString,
+                     "worst" as NSString, "worst frame" as NSString))
+        print(String(repeating: "-", count: 78))
+        for region in regions {
+            for mass in masses {
+                let fired = frames.filter {
+                    $0.shadowRegion >= region && $0.shadowMass >= mass
+                }
+                let mean = frames.map {
+                    $0.shadowRegion >= region && $0.shadowMass >= mass ? $0.styleDE : $0.naturalDE
+                }.reduce(0, +) / Double(frames.count)
+                // Negative net is ΔE saved across the corpus by the swaps this arm makes.
+                let net = fired.map { $0.styleDE - $0.naturalDE }.reduce(0, +)
+                let helped = fired.filter { $0.styleDE < $0.naturalDE }.count
+                let hurt = fired.filter { $0.styleDE > $0.naturalDE }.count
+                let worst = fired.max { ($0.styleDE - $0.naturalDE) < ($1.styleDE - $1.naturalDE) }
+                let worstDelta = worst.map { $0.styleDE - $0.naturalDE } ?? 0
+                print(String(format: "%8.3f %8.3f %8.4f %+8.3f %6d %6@ %+8.3f   %@",
+                             region, mass, mean, net, fired.count,
+                             "\(helped)/\(hurt)" as NSString,
+                             worstDelta,
+                             (worstDelta > 0 ? worst?.id ?? "" : "—") as NSString))
+            }
+        }
+        print("")
+        print("Read `worst` before `mean`: an arm that saves 0.3 on average while ruining one")
+        print("frame by 3 is not a calibration, it is D19 again. Then confirm the chosen floors")
+        print("end to end with KELVIN_OPENER=\(style) through `eval`, where curation still gets")
+        print("its veto, and hold them out per docs/EVALUATION.md before shipping them.")
     } catch {
         fail("\(error)")
     }
