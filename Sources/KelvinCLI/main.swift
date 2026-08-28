@@ -2721,6 +2721,11 @@ case "opener-probe":
             let styleDE: Double
             let shadowRegion: Double
             let shadowMass: Double
+            /// Whether curation kept the candidate style on this frame. The shipped rule resolves
+            /// only within the curated set (`ShippedCandidates.resolve`), so a swap onto a culled
+            /// style is one the app can never make — pricing it would price a rule that does not
+            /// exist. Reports written before `curatedStyles` existed count as "kept".
+            let styleCurated: Bool
         }
         var frames: [Frame] = []
         var missing = 0
@@ -2735,15 +2740,27 @@ case "opener-probe":
             }
             guard let n = byStyle[CandidateCurator.faithfulStyleID],
                   let s = byStyle[style] else { missing += 1; continue }
+            // Measured on the SAME proxy the rule reads in `ShippedCandidates.compose` and the
+            // app's open path — the 768 px perception proxy — not on a resample of the full frame.
+            // Two resamples give two slightly different statistics, and a floor is a hard `>=`:
+            // calibrated on numbers the rule never sees, it would fire on different frames.
             guard let url = sourceById[id],
                   let source = try? ImageDecoder.decode(url: url),
-                  let stats = try? ImageStatistics.compute(source) else { missing += 1; continue }
+                  let stats = try? ImageStatistics.compute(PerceptionProxy.downsample(source))
+            else { missing += 1; continue }
+            let curated = (image["curatedStyles"] as? [String]).map { $0.contains(style) } ?? true
             frames.append(Frame(id: id, naturalDE: n, styleDE: s,
-                                shadowRegion: stats.shadowRegion, shadowMass: stats.shadowMass))
+                                shadowRegion: stats.shadowRegion, shadowMass: stats.shadowMass,
+                                styleCurated: curated))
         }
         if missing > 0 {
             print("‡ \(missing) frame(s) skipped — no engine-\(style) / engine-natural row, or no "
                   + "readable source")
+        }
+        let culled = frames.filter { !$0.styleCurated }.count
+        if culled > 0 {
+            print("‡ \(culled) frame(s) had \(style) culled by curation — the floors cannot fire "
+                  + "there and they are priced as Natural")
         }
         guard frames.count >= 5 else {
             fail("only \(frames.count) usable frame(s); a floor chosen on that is a guess")
@@ -2764,12 +2781,14 @@ case "opener-probe":
         print(String(repeating: "-", count: 78))
         for region in regions {
             for mass in masses {
-                let fired = frames.filter {
-                    $0.shadowRegion >= region && $0.shadowMass >= mass
+                // Curation keeps its veto here exactly as it does in the app: the floors may
+                // clear and the frame still opens in Natural if the style was culled for it.
+                func fires(_ f: Frame) -> Bool {
+                    f.styleCurated && f.shadowRegion >= region && f.shadowMass >= mass
                 }
-                let mean = frames.map {
-                    $0.shadowRegion >= region && $0.shadowMass >= mass ? $0.styleDE : $0.naturalDE
-                }.reduce(0, +) / Double(frames.count)
+                let fired = frames.filter(fires)
+                let mean = frames.map { fires($0) ? $0.styleDE : $0.naturalDE }
+                    .reduce(0, +) / Double(frames.count)
                 // Negative net is ΔE saved across the corpus by the swaps this arm makes.
                 let net = fired.map { $0.styleDE - $0.naturalDE }.reduce(0, +)
                 let helped = fired.filter { $0.styleDE < $0.naturalDE }.count

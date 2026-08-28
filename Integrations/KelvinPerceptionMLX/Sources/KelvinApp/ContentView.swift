@@ -3777,6 +3777,10 @@ final class AppState {
         guard let candidate = candidates.first(where: { $0.id == id }) else { return }
         selectedCandidateId = id
         showingOriginal = false          // never leave the before/after compare stuck on
+        // A pick is the user's, so the rule's disclosure ends here: "Kelvin chose it" must not
+        // stand under a candidate the user chose. The open path sets `openedInByRule` AFTER its
+        // own `selectCandidate`, so clearing it here cannot erase the disclosure it is about to make.
+        openedInByRule = nil
         straighten = 0; hsl = [:]; activeLookId = nil
         // Load the candidate's actual values into the editable set — the user edits from here.
         edit = candidate.baseRecipe.global
