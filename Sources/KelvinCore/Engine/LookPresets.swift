@@ -38,7 +38,7 @@ public struct LookPreset: Sendable, Equatable, Identifiable {
     public var highlightsBias: Double = 0
     public var shadowsBias: Double = 0
     /// Warmth shift — **positive warms, negative cools**, the direction every photographer's
-    /// temperature slider moves. Applied only if the recipe has a temperature.
+    /// temperature slider moves. Applied from as-shot (6500 K) when the recipe has none.
     ///
     /// `apply` SUBTRACTS this from `temperatureK`, because the renderer's value is a *target*
     /// where a lower Kelvin warms the image (verified by `WhiteBalanceDirectionTests`; the same
@@ -69,10 +69,9 @@ public struct LookPreset: Sendable, Equatable, Identifiable {
     /// This is the split-tone/matte lever — per-channel red/green/blue control-point lists in
     /// 0…255 (see `Curve` and `Renderer.channelCurvesData`).
     ///
-    /// Renderer order caveat, measured and deliberate to note here: curves apply BEFORE the
-    /// black-and-white cube, so on a mono look a per-channel curve re-weights *which grey each
-    /// colour becomes* — it cannot tint the grey print itself. A colour-toned mono (true
-    /// selenium/sepia) needs a pipeline-order decision that is the owner's to make.
+    /// Renderer order, decided 28 August 2026: on a look that carries `mono`, per-channel curves
+    /// apply AFTER the black-and-white cube, so they *tone the print* — the darkroom sense of a
+    /// curve on a mono image. On a colour look they apply before HSL as always, as a grade.
     public var curve: Curve? = nil
 
     /// Apply this look's deltas to a candidate's global adjustments.
@@ -91,11 +90,19 @@ public struct LookPreset: Sendable, Equatable, Identifiable {
             // Same inversion as temperature below: positive shift = magenta = LOWER renderer tint.
             g.tint = c(g.tint - tintShift, Ranges.tint)
         }
-        if temperatureShift != 0, let t = g.temperatureK {
+        if temperatureShift != 0 {
+            // From AS-SHOT when the recipe carries no temperature. `nil` is what the renderer
+            // treats as 6500 K (its `inputNeutral`), so shifting from 6500 is shifting from the
+            // frame as delivered — which is what "Golden hour warms" has to mean on the ordinary
+            // photograph, where only the Warm/Cool candidates ever carry a temperature and the
+            // curator drops both on most frames. Gated on the recipe's own temperature, this
+            // limb was inert on five of the library's looks in practice (audited 28 Aug 2026,
+            // decided from side-by-side renders). A hand-set temperature is still the base.
+            //
             // Subtraction is the fix, not a quirk: positive shift = warmer = LOWER Kelvin target.
             // Clamped to Ranges.temperatureK — a hardcoded 11000 here once disagreed with the
             // schema's 12000, silently capping cooling looks a stop short of the slider.
-            g.temperatureK = c(t - temperatureShift, Ranges.temperatureK)
+            g.temperatureK = c((g.temperatureK ?? 6500) - temperatureShift, Ranges.temperatureK)
         }
     }
 
@@ -147,13 +154,11 @@ public extension LookPreset {
                    contrast: 26, clarity: 14, whites: 10, blacks: -18,
                    mono: BlackAndWhiteMix(bands: ["blue": -30, "orange": 10])),
 
-        // The first mono with a curve. NOTE the `curve` caveat above: applied before the B&W
-        // cube, the blue lift re-weights the conversion (cool subjects render lighter through
-        // the mids) rather than tinting the print — a true colour-toned selenium needs a
-        // renderer-order decision. Named for the darkroom bath it leans toward, honestly short
-        // of it.
+        // The first mono with a curve. The blue lift is applied AFTER the conversion (see the
+        // `curve` note above), so it tones the print the way the bath does: cool, silvery
+        // midtones over a neutral black and white.
         LookPreset(id: "selenium", name: "Selenium", group: .blackAndWhite,
-                   blurb: "A near-plain conversion with a cool, silvery midtone response.",
+                   blurb: "A near-plain conversion, toned cool and silvery through the midtones.",
                    contrast: 6,
                    mono: BlackAndWhiteMix(bands: ["orange": 8, "blue": -20]),
                    curve: Curve(luma: nil,

@@ -178,7 +178,11 @@ These are tests, not suggestions.
 
    heal → white balance → exposure → highlight/shadow → whites/blacks →
    contrast/saturation → dehaze → clarity → vibrance → luma curve → RGB curves →
-   HSL → masks → detail → **geometry**.
+   HSL → black & white → masks → detail → **geometry**.
+
+   One deliberate exception: when the recipe carries `black_and_white`, the RGB curves run
+   *after* the conversion, where they tone the grey print (selenium, sepia) instead of
+   re-weighting which grey each colour becomes. Colour recipes are unaffected.
 
    Note geometry runs *last*, not first as an earlier draft of this doc said. Framing is
    layered on top of the edit, which buys a useful property: **mask coordinates are in
