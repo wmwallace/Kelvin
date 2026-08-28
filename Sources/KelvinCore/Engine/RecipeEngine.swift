@@ -110,6 +110,7 @@ public enum RecipeEngine {
             // photograph RESOLVES to, which is exactly what `ResolvedRecipeStore` caches against
             // this signature. Constant while disabled, so floor sweeps with the rule off cannot
             // thrash the cache.
+            "stretch:\(RangeStretch.recovery)/\(RangeStretch.flatThreshold)",
             "opener:\(OpeningRule.signature())",
             "clarityFocus:\(FocusMeasure.engineDampingEnabled ? "on" : "off")"
         ].joined(separator: ";")
@@ -258,10 +259,20 @@ public enum RecipeEngine {
         g.temperatureK = wb.temperatureK
         g.tint = wb.tint
 
+        // D26 — a flat frame gets its RANGE restored before anything redistributes its midtones.
+        // Measured, not asserted: fires only from `dynamicRange`, and the endpoint placement below
+        // yields by the same fraction, because two mechanisms both restoring range is how a flat
+        // frame becomes a crunched one (the same double-count `curveDamping` guards against).
+        let stretch = RangeStretch.placement(p, s, exposureEV: g.exposureEV)
+        g.rangeLow = stretch.low
+        g.rangeHigh = stretch.high
+
         var curve: Curve? = nil
         if confident {
             g.contrast = contrast(p, s)
-            let (whites, blacks) = pointPlacement(p, s)
+            var (whites, blacks) = pointPlacement(p, s)
+            whites = (whites * (1 - stretch.load)).rounded() + 0   // + 0: −0 → 0
+            blacks = (blacks * (1 - stretch.load)).rounded() + 0
             g.whites = whites
             g.blacks = blacks
             g.vibrance = vibrance(p, s)
@@ -827,6 +838,73 @@ public enum RecipeEngine {
         case .landscape: return 3
         case .street:    return 2
         default:         return 0
+        }
+    }
+
+    // MARK: - Range stretch (D26; corrective, measured)
+
+    /// The levels-style range stretch for flat frames — docs/DECISIONS.md D26, decided 28 August
+    /// 2026 after D-tone-1 recorded the gap it closes: `whites`/`blacks` bend the quarter tones of
+    /// a curve pinned at 0 and 1, so nothing else in the recipe can map a compressed 0.235…0.764
+    /// range back out to 0…1, and on a genuinely flat frame the engine measured *worse than doing
+    /// nothing* (11.8 ΔE vs 8.9 on the benchmark, 12.3 vs 9.6 on a real photograph).
+    ///
+    /// The property the constants are chosen on, not a corpus ΔE (docs/EVALUATION.md, "Calibrating
+    /// a constant"): at full recovery the measured black point (p0.5 luma) lands on 0.02 — the
+    /// "true black" `pointPlacement` already drives toward — and the measured white point (p99.5)
+    /// lands on `whitePointTarget`, the same target the whites lever aims at. So the stretch and
+    /// the endpoints agree about where a finished photograph's range is; the stretch just gets
+    /// there by the one operation that can. It fades in as `dynamicRange` falls below
+    /// `flatThreshold`, full a 0.15 below it, so there is no cliff at the threshold.
+    public enum RangeStretch {
+        /// How much of the distance to the target range the stretch takes, 0…1. `KELVIN_STRETCH`.
+        public static let recovery: Double = ProcessInfo.processInfo.environment["KELVIN_STRETCH"]
+            .flatMap(Double.init).map { clamp($0, to: 0...1) } ?? 1.0
+        /// The `dynamicRange` below which a frame counts as flat. `KELVIN_STRETCH_DR`. Finished
+        /// photographs measure ~0.75–0.95; the benchmark's flat case measures ~0.53; the S-curve
+        /// already calls < 0.5 flat. 0.65 leaves ordinary frames untouched — measured on the
+        /// paired corpus (see D26), where the stretch fires on a handful of frames.
+        public static let flatThreshold: Double = ProcessInfo.processInfo.environment["KELVIN_STRETCH_DR"]
+            .flatMap(Double.init).map { clamp($0, to: 0...1) } ?? 0.65
+        /// The stretch never pulls the black point in from above this, nor the white point down
+        /// below `1 - highCap`, however flat the frame: past that a "stretch" is an exposure job.
+        static let lowCap = 0.25, highCap = 0.25
+
+        public struct Placement: Equatable {
+            public var low: Double?
+            public var high: Double?
+            /// The fraction of a full stretch applied (0 = idle) — what the endpoints yield by.
+            public var load: Double
+        }
+
+        /// `exposureEV` is the lift the recipe has ALREADY decided on. The stretch runs after
+        /// exposure in the renderer, so it must be sized on the range exposure leaves behind, not
+        /// the range the source had: measured without this, an underexposed frame whose exposure
+        /// lever restored its white point got the same range restored a second time by the
+        /// stretch (`_DSC6550-3__underexposed`: 1.6 → 5.7 ΔE). Both points are scaled by the
+        /// exposure gain — an approximation in display space, but the right direction and size.
+        public static func placement(_ p: Perception, _ s: ImageStatistics,
+                                     exposureEV: Double = 0) -> Placement {
+            guard p.intent != .archival, p.intent != .productAccurate else {
+                return Placement(low: nil, high: nil, load: 0)
+            }
+            let gain = pow(2, exposureEV)
+            let white = min(1, s.whitePoint * gain)
+            let black = min(1, s.blackPoint * gain)
+            let range = max(0, white - black)
+            let ramp = clamp((flatThreshold - range) / 0.15, to: 0...1)
+            let load = ramp * recovery
+            guard load > 0, range > 0.05 else { return Placement(low: nil, high: nil, load: 0) }
+            // The affine map that puts the black point on 0.02 and the white point on the whites
+            // target…
+            let scale = (whitePointTarget - 0.02) / range
+            var low = black - 0.02 / scale
+            var high = low + 1 / scale
+            // …blended toward identity by the load, and capped.
+            low = clamp(low * load, to: 0...lowCap)
+            high = clamp(1 - (1 - high) * load, to: (1 - highCap)...1)
+            let l = (low * 1000).rounded() / 1000, h = (high * 1000).rounded() / 1000
+            return Placement(low: l > 0 ? l : nil, high: h < 1 ? h : nil, load: load)
         }
     }
 

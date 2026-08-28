@@ -10,6 +10,11 @@ public enum Ranges {
     public static let signed100: ClosedRange<Double> = -100 ... 100
     public static let temperatureK: ClosedRange<Double> = 2000 ... 12000
     public static let tint: ClosedRange<Double> = -150 ... 150
+    /// D26: normalised input black / white points for the levels-style range stretch. Absent is
+    /// 0 and 1. A low point above 0.5 or a high point below it would invert the picture, so the
+    /// ranges stop at mid-grey from either side.
+    public static let rangeLow: ClosedRange<Double> = 0 ... 0.5
+    public static let rangeHigh: ClosedRange<Double> = 0.5 ... 1
     /// sharpen, nr_luma, nr_color, feather.
     public static let unsigned100: ClosedRange<Double> = 0 ... 100
     public static let opacity: ClosedRange<Double> = 0 ... 1

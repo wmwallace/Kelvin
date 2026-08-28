@@ -66,6 +66,12 @@ public extension RecipeEngine {
         g.shadows = shadowLift(p, s)
         g.dehaze = dehazeAmount(p, s, skyLuma: skyLuma)
         g.fusion = fusionAmount(p, s, subjectLuma: subjectLuma)
+        // D26 — the range stretch is corrective and measured, so it is part of the shared baseline:
+        // a flat frame is flat in every style. The endpoints below yield by the same fraction,
+        // exactly as in `RecipeEngine.recipe`, so the two never restore the same range twice.
+        let stretch = RangeStretch.placement(p, s, exposureEV: g.exposureEV)
+        g.rangeLow = stretch.low
+        g.rangeHigh = stretch.high
         let wb = whiteBalance(p, s, strengthScale: style.wbStrengthScale)
         g.temperatureK = wb.temperatureK
         g.tint = wb.tint
@@ -96,7 +102,10 @@ public extension RecipeEngine {
         g.clarity = roundedClamp(local.clarity * style.curveScale, to: 0...30, step: 1)
         g.texture = roundedClamp(local.texture * style.curveScale, to: 0...20, step: 1)
 
-        let points = styledPoints(p, s, style)
+        var points = styledPoints(p, s, style)
+        // `+ 0` turns the −0 a fully-damped negative lever rounds to back into a plain 0.
+        points.whites = (points.whites * (1 - stretch.load)).rounded() + 0
+        points.blacks = (points.blacks * (1 - stretch.load)).rounded() + 0
         g.whites = points.whites
         g.blacks = points.blacks
 

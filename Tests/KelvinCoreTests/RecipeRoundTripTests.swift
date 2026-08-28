@@ -11,7 +11,7 @@ final class RecipeRoundTripTests: XCTestCase {
         let g = GlobalAdjustments(
             exposureEV: 0.35, contrast: 12, highlights: -22, shadows: 18, whites: 9, blacks: -7,
             temperatureK: 5200, tint: -4, vibrance: 11, saturation: 6, clarity: 14, texture: 8,
-            dehaze: 21, fusion: 44)
+            dehaze: 21, fusion: 44, rangeLow: 0.07, rangeHigh: 0.91)
         return Recipe(
             schemaVersion: Recipe.currentSchemaVersion, id: "s", label: "L",
             provenance: Provenance(perceptionHash: "h", engineVersion: "v",

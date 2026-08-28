@@ -152,6 +152,15 @@ public struct GlobalAdjustments: Codable, Equatable, Sendable {
     /// Single-image exposure fusion, 0…100. Local tone mapping: opens shadows and holds
     /// highlights without touching midtones — see `ExposureFusion`. Neutral 0.
     public var fusion: Double
+    /// D26 — a levels-style range stretch. The input black point (`range_low`) and white point
+    /// (`range_high`), normalised 0…1, remapped linearly to 0…1 in the display-referred tone stage
+    /// before contrast. **Absent means 0 and 1 and applies nothing**, so every recipe written
+    /// before the field existed decodes and renders byte-identically. This is a schema ADDITION
+    /// with a neutral default, deliberately not a reinterpretation of `whites`/`blacks`, which
+    /// bend the quarter tones of a curve pinned at 0 and 1 and therefore cannot restore a
+    /// compressed range at all (docs/DECISIONS.md D-tone-1, D26).
+    public var rangeLow: Double?
+    public var rangeHigh: Double?
 
     public static let neutral = GlobalAdjustments(
         exposureEV: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0,
@@ -163,7 +172,7 @@ public struct GlobalAdjustments: Codable, Equatable, Sendable {
         exposureEV: Double, contrast: Double, highlights: Double, shadows: Double,
         whites: Double, blacks: Double, temperatureK: Double?, tint: Double,
         vibrance: Double, saturation: Double, clarity: Double, texture: Double,
-        dehaze: Double, fusion: Double = 0
+        dehaze: Double, fusion: Double = 0, rangeLow: Double? = nil, rangeHigh: Double? = nil
     ) {
         self.exposureEV = exposureEV
         self.contrast = contrast
@@ -179,6 +188,8 @@ public struct GlobalAdjustments: Codable, Equatable, Sendable {
         self.texture = texture
         self.dehaze = dehaze
         self.fusion = fusion
+        self.rangeLow = rangeLow
+        self.rangeHigh = rangeHigh
     }
 
     enum CodingKeys: String, CodingKey {
@@ -186,6 +197,8 @@ public struct GlobalAdjustments: Codable, Equatable, Sendable {
         case contrast, highlights, shadows, whites, blacks
         case temperatureK = "temperature_k"
         case tint, vibrance, saturation, clarity, texture, dehaze, fusion
+        case rangeLow = "range_low"
+        case rangeHigh = "range_high"
     }
 
     public init(from decoder: Decoder) throws {
@@ -204,6 +217,8 @@ public struct GlobalAdjustments: Codable, Equatable, Sendable {
         texture = try c.clampedDouble(.texture, default: 0, in: Ranges.signed100)
         dehaze = try c.clampedDouble(.dehaze, default: 0, in: Ranges.signed100)
         fusion = try c.clampedDouble(.fusion, default: 0, in: Ranges.unsigned100)
+        rangeLow = try c.clampedOptionalDouble(.rangeLow, in: Ranges.rangeLow)
+        rangeHigh = try c.clampedOptionalDouble(.rangeHigh, in: Ranges.rangeHigh)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -222,6 +237,8 @@ public struct GlobalAdjustments: Codable, Equatable, Sendable {
         try c.encode(texture, forKey: .texture)
         try c.encode(dehaze, forKey: .dehaze)
         try c.encode(fusion, forKey: .fusion)
+        try c.encodeIfPresent(rangeLow, forKey: .rangeLow)
+        try c.encodeIfPresent(rangeHigh, forKey: .rangeHigh)
     }
 
     /// True when this recipe would leave the image untouched (used by the renderer to

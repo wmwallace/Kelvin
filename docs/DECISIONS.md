@@ -1319,7 +1319,7 @@ passes nil while the switch is on would reintroduce exactly the canvas/export di
 Flipping the default on needs: the bench price, and a corpus check that the damping helps —
 which needs soft frames in a corpus, i.e. a blur degradation arm, which does not exist yet.
 
-## D26 — A levels-style range stretch for flat frames · **Proposed** (schema change — needs owner sign-off)
+## D26 — A levels-style range stretch for flat frames · **Decided 28 August 2026** (schema addition; the owner approved the day's decisions in bulk)
 
 **The gap this closes is already measured and recorded** (D-tone-1, "a real gap, recorded not
 tuned away"): with the tone controls behaving truthfully, the engine is measurably *worse than
@@ -1359,7 +1359,40 @@ re-renders every stored edit — the same recipes produce different pixels under
 which breaks the promise that a recipe on disk is a description of a look. A schema *addition*
 with a neutral default is the version of this change that leaves existing work alone.
 
-### What decides it worked
+### Built and measured, 28 August 2026
+
+Shipped as proposed: `range_low` / `range_high` on `GlobalAdjustments` (absent = 0 and 1, so every
+older recipe decodes unchanged; `NeutralNoOpTests` and `RangeStretchTests` pin the no-op),
+rendered as `CIColorPolynomial` + clamp first in the display-referred stage, fired from
+`RecipeEngine.RangeStretch.placement` in the shared corrective baseline every candidate goes
+through — and in `RecipeEngine.recipe` — with the endpoint levers yielding by the stretch's load.
+
+Two things the first measurement taught, both in the code now. The stretch has to live in
+`CandidateGeneration`'s baseline, not only in `RecipeEngine.recipe`, because the app never calls
+the latter — the first eval moved **zero** frames. And it has to be sized on the range the exposure
+lever *leaves*, not the range the source had: sized on the source, an underexposed frame had its
+white point restored twice (`_DSC6550-3__underexposed` 1.6 → 5.7 ΔE; now 1.6 → 1.9).
+
+The constants are property-chosen, not swept: at full recovery the measured black point lands on
+0.02 and the white point on `whitePointTarget` — the two targets the endpoint levers already aim
+at — fading in below `dynamicRange` 0.65 (`KELVIN_STRETCH`, `KELVIN_STRETCH_DR`, both in
+`tuningSignature`). Then measured once, on both corpora, against reports taken before the change
+on the same binary:
+
+| corpus | engine-default before | after | frames moved | helped / hurt | worst hurt |
+|---|---|---|---|---|---|
+| paired (77 real edits) | 7.48 | **7.35** | 6 | 6 / 0 | — |
+| degradation (54) | 8.09 | **7.04** | 23 | 18 / 5 | +1.55 (`_DSC6892__overexposed`) |
+| ↳ `flat` rows | 8.14 | **3.60** | | | |
+| ↳ `underexposed` rows | 9.28 | **7.51** | | | |
+
+The benchmark's flat case, asserted as a gap since D-tone-1, flips: engine 4.35 ΔE against 8.86
+for doing nothing (it was 11.8). The assertion now pins the fix. The five hurt frames on the
+degradation corpus are all under 1.6 ΔE and none is a `flat` row; the paired corpus, which
+penalises under-editing, moved only in the right direction. `ablate` gains a `range` lever, and
+`kelvin-cli engine` prints the statistics it read, so "why didn't it fire" is one command.
+
+### What decided it worked (as written before the build)
 
 The benchmark's flat case dropping below the naive-auto floor it currently cites (the assertion
 flips from documenting the gap to pinning the fix), no regression on the paired corpus (a stretch

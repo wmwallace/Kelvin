@@ -500,6 +500,20 @@ believing the result; the known-good cross-check is that `KELVIN_SKY_EV=0.45` pu
 Dramatic's `← mask` column at −0.040 and its sky spread at 0.112, the values recorded in
 `b0bd667`.
 
+## The flat-frame gap is closed (D26)
+
+The one case the benchmark asserted as a *gap* since D-tone-1 — a genuinely flat frame, where the
+engine measured worse than doing nothing because `whites`/`blacks` cannot map a compressed range
+back out — is closed by the levels-style range stretch (`range_low`/`range_high`, D26). Measured
+28 August 2026 on both corpora against pre-change reports from the same binary: paired
+engine-default 7.48 → 7.35 (six frames helped, none hurt); degradation 8.09 → 7.04, with the
+`flat` rows 8.14 → 3.60 and `underexposed` 9.28 → 7.51; worst single hurt +1.55. Benchmark flat
+case 11.8 → 4.35 against 8.86 for doing nothing. Two lessons are recorded in D26: the lever had to
+be in `CandidateGeneration`'s shared baseline (the first run moved zero frames, because the app
+never calls `RecipeEngine.recipe`), and it had to be sized on the post-exposure range or it
+restored an underexposed frame's white point twice. `kelvin-cli engine` now prints the statistics
+it read, so "why didn't it fire" is one command.
+
 ## What predicts which look wins
 
 ```

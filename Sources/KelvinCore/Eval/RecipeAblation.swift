@@ -61,7 +61,8 @@ public enum RecipeAblation {
         ("clarity", { $0.clarity = 0 }),
         ("texture", { $0.texture = 0 }),
         ("dehaze", { $0.dehaze = 0 }),
-        ("fusion", { $0.fusion = 0 })
+        ("fusion", { $0.fusion = 0 }),
+        ("range", { $0.rangeLow = nil; $0.rangeHigh = nil })
     ]
 
     /// - Parameters:
