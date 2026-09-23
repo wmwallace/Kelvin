@@ -173,6 +173,62 @@ final class EditSession {
         }
     }
 
+    // MARK: Carrying the look across the shoot
+
+    /// Progress of an apply, for the caption. Nil when none is running.
+    private(set) var batch: (done: Int, total: Int)?
+    private var batchTask: Task<Void, Never>?
+
+    /// The chosen look, carried to other photographs — the second half of the product's sentence.
+    ///
+    /// Each photo is resolved on its own (`Pipeline.resolve`): the look is the same, the exposure and
+    /// white balance under it are that frame's, so a frame shot into the sun and the next one shot
+    /// away from it both come out as "Soft" rather than as copies of the first frame's sliders. The
+    /// adjustments ride on top as offsets, as they do on the photo you chose them on. Each result is
+    /// saved to Photos as a new photo; originals are never touched.
+    func apply(to items: [PhotosPickerItem]) {
+        guard let look = selectedLook, !items.isEmpty, batch == nil else { return }
+        let style = look.id, adjustments = self.adjustments, name = look.name
+        batchTask = Task { [weak self] in
+            guard let self else { return }
+            let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+            guard status == .authorized || status == .limited else {
+                self.notice = "To save, allow \(Branding.displayName) to add photos in Settings"
+                return
+            }
+            self.batch = (0, items.count)
+            var saved = 0, failed = 0
+            for (i, item) in items.enumerated() {
+                if Task.isCancelled { break }
+                do {
+                    guard let picked = try await item.loadTransferable(type: PickedPhoto.self) else {
+                        throw OpenError.unreadable
+                    }
+                    let recipe = adjustments.applied(to: try await Pipeline.resolve(style: style, on: picked.url))
+                    let file = try await Pipeline.export(recipe, from: picked.url)
+                    try await PHPhotoLibrary.shared().performChanges {
+                        PHAssetCreationRequest.forAsset().addResource(with: .photo, fileURL: file, options: nil)
+                    }
+                    try? FileManager.default.removeItem(at: file)
+                    try? FileManager.default.removeItem(at: picked.url)
+                    if let key = item.itemIdentifier {
+                        PhoneEditStore.save(PhoneEdit(styleId: style, adjustments: adjustments), for: key)
+                    }
+                    saved += 1
+                } catch {
+                    failed += 1
+                }
+                self.batch = (i + 1, items.count)
+            }
+            self.batch = nil
+            self.notice = Task.isCancelled
+                ? "Stopped — \(saved) saved to Photos as \(name)"
+                : "\(saved) saved to Photos as \(name)" + (failed > 0 ? " · \(failed) couldn't be read" : "")
+        }
+    }
+
+    func stopApplying() { batchTask?.cancel() }
+
     enum OpenError: LocalizedError {
         case unreadable
         var errorDescription: String? { "That photo couldn't be opened." }

@@ -54,6 +54,8 @@ struct RootView: View {
     @Environment(\.horizontalSizeClass) private var width
     @State private var pickerItem: PhotosPickerItem?
     @State private var adjusting = false
+    @State private var applyItems: [PhotosPickerItem] = []
+    @State private var choosingMore = false
 
     var body: some View {
         NavigationStack {
@@ -72,6 +74,13 @@ struct RootView: View {
             ShareSheet(url: item.url).ignoresSafeArea()
         }
         .sheet(isPresented: $adjusting) { AdjustPanel() }
+        .photosPicker(isPresented: $choosingMore, selection: $applyItems, maxSelectionCount: 200,
+                      matching: .images, photoLibrary: .shared())
+        .onChange(of: applyItems) { _, items in
+            guard !items.isEmpty else { return }
+            session.apply(to: items)
+            applyItems = []
+        }
         // The adjusted canvas follows both the sliders and the look they are applied to.
         .onChange(of: session.adjustments) {
             session.persistChoice()
@@ -116,6 +125,15 @@ struct RootView: View {
                 Menu {
                     Button { Task { await session.saveToPhotos() } } label: {
                         Label("Save to Photos", systemImage: "square.and.arrow.down")
+                    }
+                    if session.batch == nil {
+                        Button { choosingMore = true } label: {
+                            Label("Apply to More Photos…", systemImage: "square.stack.3d.down.right")
+                        }
+                    } else {
+                        Button(role: .destructive) { session.stopApplying() } label: {
+                            Label("Stop Applying", systemImage: "stop.circle")
+                        }
                     }
                     Button { Task { await session.share() } } label: {
                         Label("Share…", systemImage: "square.and.arrow.up")
@@ -244,7 +262,8 @@ struct Caption: View {
                 Text(session.showingOriginal ? "Original" : (session.selectedLook?.name ?? ""))
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(Theme.ink)
-                Text(session.notice ?? (session.showingOriginal ? "As it came off the camera"
+                Text(session.batch.map { "Applying \(session.selectedLook?.name ?? "the look") — \($0.done) of \($0.total)" }
+                     ?? session.notice ?? (session.showingOriginal ? "As it came off the camera"
                                         : (session.restoredEdit ? "Your choice from last time · " : "")
                                           + (session.selectedLook?.description ?? "")))
                     .font(.subheadline)
