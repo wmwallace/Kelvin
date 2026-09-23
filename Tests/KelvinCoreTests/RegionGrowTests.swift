@@ -204,6 +204,41 @@ final class RegionGrowTests: XCTestCase {
                        "the lift leaked outside the grown region")
     }
 
+    /// The export grows the wand on the photograph the user clicked, not on the edit. The app's
+    /// preview grows it on the unedited proxy; the renderer used to grow it on its running image,
+    /// after white balance, exposure, tone and HSL, so any global edit that changed how far apart
+    /// two tones sit changed which pixels joined. Here a band 30 levels brighter than the seed is
+    /// inside the tolerance on the original and outside it after +1.5 EV — the preview selected it
+    /// and the export did not.
+    func testAGlobalEditDoesNotChangeWhatTheWandSelects() {
+        let seedTone: (UInt8, UInt8, UInt8) = (100, 100, 100)
+        let nearTone: (UInt8, UInt8, UInt8) = (130, 130, 130)
+        let image = field([(x: 150..<350, y: 150..<350, c: seedTone),
+                           (x: 350..<420, y: 150..<350, c: nearTone)])
+        let wand = Mask(id: "wand", type: "wand", source: "region-grow", invert: false,
+                        feather: 0, opacity: 1, adjustments: ["exposure_ev": -2.0],
+                        region: RegionSeed(x: 0.5, y: 0.5, tolerance: 0.15, softness: 0.1))
+
+        /// Which of the two probe points the mask darkened, under a given global exposure.
+        func selected(globalEV: Double) -> (seed: Bool, near: Bool) {
+            var base = Recipe.neutral
+            base.global.exposureEV = globalEV
+            var masked = base
+            masked.masks = [wand]
+            let before = readback(Renderer.render(image, with: base, maskBitmaps: [:]))
+            let after = readback(Renderer.render(image, with: masked, maskBitmaps: [:]))
+            func hit(_ nx: Double) -> Bool { alpha(before, nx, 0.5) - alpha(after, nx, 0.5) > 0.1 }
+            return (hit(0.5), hit(385.0 / 512))
+        }
+
+        let unedited = selected(globalEV: 0)
+        let brightened = selected(globalEV: 1.5)
+        XCTAssertTrue(unedited.seed && brightened.seed, "the clicked region must be selected")
+        XCTAssertTrue(unedited.near, "the fixture's near band should join on the original")
+        XCTAssertEqual(brightened.near, unedited.near,
+                       "a global exposure change altered which pixels the wand selected")
+    }
+
     /// A recipe written before the wand existed decodes exactly as it did — the field is absent and
     /// absent means "this is not a wand mask".
     func testARecipeWithoutARegionDecodesUnchanged() throws {

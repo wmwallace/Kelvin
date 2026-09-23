@@ -372,8 +372,14 @@ public enum Renderer {
                 //
                 // A caller-supplied bitmap still wins, so the app can hand over the region it
                 // already grew for the preview instead of paying for the fill on every slider drag.
+                //
+                // Grown on `image`, the frame as it came in, NOT on the running `img`. The app grows
+                // its preview region on the unedited proxy, which is the photograph the user
+                // clicked; growing here on the edit — after white balance, exposure, tone, HSL and
+                // every earlier mask — let any global move that spread two tones apart change which
+                // pixels joined, so the export selected a different region from the one on screen.
                 bitmap = maskBitmaps[mask.id]
-                    ?? RegionGrow.mask(in: img, seed: CGPoint(x: seed.x, y: seed.y),
+                    ?? RegionGrow.mask(in: image, seed: CGPoint(x: seed.x, y: seed.y),
                                        tolerance: seed.tolerance, softness: seed.softness)
             } else {
                 bitmap = maskBitmaps[mask.id] ?? maskBitmaps[mask.type]

@@ -74,8 +74,8 @@ public struct Recipe: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion)
-            ?? Recipe.currentSchemaVersion
+        schemaVersion = try c.schemaVersion(.schemaVersion, current: Recipe.currentSchemaVersion,
+                                            what: "recipe")
         id = try c.decodeIfPresent(String.self, forKey: .id)
         label = try c.decodeIfPresent(String.self, forKey: .label)
         provenance = try c.decodeIfPresent(Provenance.self, forKey: .provenance)
@@ -406,7 +406,14 @@ public struct Mask: Codable, Equatable, Sendable {
         invert = try c.decodeIfPresent(Bool.self, forKey: .invert) ?? false
         feather = try c.clampedDouble(.feather, default: 0, in: Ranges.unsigned100)
         opacity = try c.clampedDouble(.opacity, default: 1, in: Ranges.opacity)
-        adjustments = try c.decodeIfPresent([String: Double].self, forKey: .adjustments) ?? [:]
+        // Clamped to the global ranges, key by key. The schema's rule is "clamp on
+        // deserialization, never trust a recipe from disk", and a mask's adjustments are the same
+        // controls applied locally — `exposure_ev: 40` inside a mask otherwise reached
+        // `CIExposureAdjust` as forty stops.
+        adjustments = (try c.decodeIfPresent([String: Double].self, forKey: .adjustments) ?? [:])
+            .reduce(into: [:]) { out, entry in
+                out[entry.key] = Mask.clampedAdjustment(entry.key, entry.value)
+            }
         shape = try c.decodeIfPresent(MaskShape.self, forKey: .shape)
         stamps = try c.decodeIfPresent([BrushStamp].self, forKey: .stamps)
         selection = try c.decodeIfPresent(MaskSelection.self, forKey: .selection)
@@ -426,6 +433,22 @@ public struct Mask: Codable, Equatable, Sendable {
             selection = nil
             type = "subject"
             source = source ?? "segmentation"
+        }
+    }
+
+    /// The global range a local adjustment key shares, per `Ranges` and docs/RECIPE-SCHEMA.md.
+    /// A key this build does not render is kept as written: it has no range here to be wrong
+    /// against, and dropping it would lose data a newer build might have meant.
+    static func clampedAdjustment(_ key: String, _ value: Double) -> Double {
+        switch key {
+        case "exposure_ev": return clamp(value, to: Ranges.exposureEV)
+        case "temperature_k": return clamp(value, to: Ranges.temperatureK)
+        case "tint": return clamp(value, to: Ranges.tint)
+        case "fusion": return clamp(value, to: Ranges.unsigned100)
+        case "contrast", "highlights", "shadows", "whites", "blacks", "vibrance", "saturation",
+             "clarity", "texture", "dehaze":
+            return clamp(value, to: Ranges.signed100)
+        default: return value
         }
     }
 

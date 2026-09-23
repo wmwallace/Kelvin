@@ -49,4 +49,24 @@ extension KeyedDecodingContainer {
         guard let raw = try decodeIfPresent(Double.self, forKey: key) else { return nil }
         return clamp(raw, to: range)
     }
+
+    /// Decode a `schema_version`, refusing one newer than this build understands.
+    ///
+    /// Absent means the current version: version 1 has been the only one since commit one, so a
+    /// file without the key is a version-1 file. A NEWER version is the dangerous case: a file written by
+    /// a later build may carry fields this one has never heard of, and `Codable` would drop them
+    /// without a word. The edit would then render as something its author never made, and saving
+    /// it back would destroy the fields for good. A clear error is the honest answer; it names both
+    /// versions so the message says "update the app" rather than "your file is corrupt".
+    func schemaVersion(_ key: Key, current: Int, what: String) throws -> Int {
+        let version = try decodeIfPresent(Int.self, forKey: key) ?? current
+        guard version <= current else {
+            throw DecodingError.dataCorruptedError(
+                forKey: key, in: self,
+                debugDescription: "This \(what) was written with schema version \(version); this "
+                    + "build of \(Branding.displayName) understands up to \(current). "
+                    + "Update the app to open it.")
+        }
+        return version
+    }
 }

@@ -68,8 +68,11 @@ public struct Perception: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion)
-            ?? Perception.currentSchemaVersion
+        // Same refusal as `Recipe`: a scene read from a newer build may carry judgments this one
+        // would silently drop. The model is never asked for this key, so a live read is always
+        // "absent" and unaffected; this guards the stored reads in Application Support.
+        schemaVersion = try c.schemaVersion(.schemaVersion, current: Perception.currentSchemaVersion,
+                                            what: "scene read")
         scene = try c.decodeIfPresent(Scene.self, forKey: .scene) ?? .other
         subject = try c.decodeIfPresent(Subject.self, forKey: .subject) ?? .absent
         lighting = try c.decodeIfPresent(Lighting.self, forKey: .lighting) ?? .unknown
