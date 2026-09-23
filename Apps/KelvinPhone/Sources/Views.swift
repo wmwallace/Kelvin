@@ -27,7 +27,7 @@ struct KelvinPhoneApp: App {
                     if let i = args.firstIndex(of: "-adjust"), i + 1 < args.count {
                         let v = args[i + 1].split(separator: ",").compactMap { Double($0) }
                         if v.count == 3 {
-                            session.adjustments = Adjustments(light: v[0], warmth: v[1], contrast: v[2])
+                            session.adjustments = LookAdjustments(light: v[0], warmth: v[1], contrast: v[2])
                             await session.refreshAdjustedPreview()
                         }
                     }

@@ -31,9 +31,9 @@ final class EditSession {
     private(set) var notice: String?
     private(set) var isSaving = false
     var shareItem: ShareItem?
-    /// Offsets on top of whichever look is chosen — see `Adjustments`. They follow the photograph
+    /// Offsets on top of whichever look is chosen — see `LookAdjustments`. They follow the photograph
     /// across a change of look, the way someone asking for "a bit brighter" means the photo.
-    var adjustments = Adjustments()
+    var adjustments = LookAdjustments()
     /// The chosen look re-rendered with `adjustments`, for the canvas. Nil when there are none.
     private(set) var adjustedPreview: CGImage?
     private var adjustToken = 0
@@ -127,7 +127,7 @@ final class EditSession {
                 restoredEdit = true
             } else {
                 selectedID = result.openingID
-                adjustments = Adjustments()
+                adjustments = LookAdjustments()
                 restoredEdit = false
             }
             phase = .ready(result)
