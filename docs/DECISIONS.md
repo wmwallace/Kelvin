@@ -1479,3 +1479,32 @@ confidences decide a category inside the provider and never reach the engine.
 answer, measured on both corpora. Apple's Foundation Models framework is the candidate for any
 display-only prose, never for an engine input: it changes with the OS, so an engine that read it
 would stop being reproducible.
+
+---
+
+## D28 — HDR export from the RAW's own headroom · **Proposed 23 September 2026 — needs eyes, not a table**
+
+**What.** An optional HDR export: one HEIC whose base image is the SDR edit every viewer shows, plus a
+gain map an HDR display applies (`HDRDelivery`, `kelvin-cli hdr-probe`). Nothing in the app calls it.
+
+**How it is built, and why this way.** The renderer is display-referred — its tone curves end at white
+— and every recipe and every corpus number is about that SDR photograph. Re-deriving the pipeline in
+extended range would change every edit. Instead the HDR rendition is the SDR EDIT given back the RAW's
+own highlight headroom: Apple's decoder releases what the sensor held above white
+(`CIRAWFilter.extendedDynamicRangeAmount`, 0–2), and the per-pixel ratio EDR/SDR, released only where
+the SDR frame is already bright (0 below 50% luminance, full by 90%), capped at 4× and softly blurred,
+multiplies the edit. Everything the edit decided below white stays as it decided.
+
+**Two traps found building it** (both measured, both in the code's comments): `CIDivideBlendMode`
+divides the input by the background — the other way from how it reads — and, like the blend modes,
+clamps its result to 1, so the quotient is taken of an eighth of the EDR value and scaled back. And the
+EDR decode tone-maps differently all the way down, so the unweighted ratio put an 8× gain on shadows.
+
+**Measured so far.** An overcast Cannon Beach frame has no headroom to give (decode peak 0.654 → 0.676
+at maximum EDR) and correctly gets no gain map. A sunlit Sunriver frame (`_DSC3965`) decodes to 3.57×
+white and gets highlights up to 4×. ~5 s per 60 MP frame.
+
+**What decides it.** Whether the result looks like the photograph on an HDR screen — the owner's eye,
+on samples sent 23 September — not a ΔE, since the references are SDR. Open questions for that look:
+the 4× cap, the 50–90% release ramp, and whether it should be the default for RAW exports or a toggle.
+If it passes, it ships as an export option on Mac and iPhone (iOS 18+/macOS 15+ write gain maps).

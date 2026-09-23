@@ -105,6 +105,17 @@ jobs:
         # should download 1.6 GB of weights, and nothing here does.
         run: swift test
 
+      # A test process that dies on a signal leaves no backtrace in the log — only "unexpected signal
+      # code 11". macOS writes the crash report to disk; print it, so a crash that only reproduces on
+      # CI's toolchain can be read rather than guessed at.
+      - name: Crash reports
+        if: failure()
+        run: |
+          for f in ~/Library/Logs/DiagnosticReports/*.ips; do
+            [ -e "$f" ] || continue
+            echo "=== $f"; head -c 60000 "$f"
+          done
+
   # The iPhone app (Apps/KelvinPhone). Built, not tested — its logic is KelvinCore's, which the core
   # job tests; this job exists so a change to the core that breaks the phone's build, or an API the
   # phone uses, fails a pull request instead of the next person to open Xcode. The project is
