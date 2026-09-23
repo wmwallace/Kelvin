@@ -24,6 +24,7 @@ test: ratchet
 
 ratchet:
 	@scripts/check-detached.sh
+	@scripts/check-loose-masks.sh
 
 release:
 	$(SWIFT) build -c release $(SWIFTFLAGS)

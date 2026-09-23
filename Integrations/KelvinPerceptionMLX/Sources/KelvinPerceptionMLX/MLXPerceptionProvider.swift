@@ -6,7 +6,7 @@ import Foundation
 import KelvinCore
 
 // These three modules are what mlx-swift-lm's #huggingFaceLoadModelContainer macro expands
-// against: MLXVLM registers the Qwen2.5-VL factory, MLXLMCommon holds ChatSession/UserInput,
+// against: MLXVLM registers the Qwen VL factories, MLXLMCommon holds ChatSession/UserInput,
 // MLXHuggingFace provides the loader macros — and those macros expand to fully-qualified
 // `HuggingFace.*` / `Tokenizers.*` references, so both must be imported here too.
 import MLX
@@ -280,8 +280,27 @@ public actor MLXPerceptionProvider: @preconcurrency PerceptionProvider {
         MLX.Memory.cacheLimit = 256 * 1024 * 1024
     }
 
+    /// The load in flight, shared by every caller that arrives while it runs.
+    ///
+    /// An actor serialises its methods only up to their first `await`. The load awaits for ~15 s,
+    /// and the double-click-to-open path hits exactly that window: the launch warm-up starts the
+    /// load, the photograph Finder handed over decodes in about a second, and its `perceive` found
+    /// `container` still nil and began a SECOND 1.6 GB load beside the first. Waiting on the one
+    /// task instead makes "loads once" true across suspension, not just between calls.
+    private var inFlightLoad: Task<ModelContainer, Error>?
+
     private func loadedContainer() async throws -> ModelContainer {
         if let container { return container }
+        if let inFlightLoad { return try await inFlightLoad.value }
+        let load = Task { try await self.loadContainer() }
+        inFlightLoad = load
+        defer { inFlightLoad = nil }
+        let loaded = try await load.value
+        container = loaded
+        return loaded
+    }
+
+    private func loadContainer() async throws -> ModelContainer {
         loading.enter()
         defer { loading.leave() }
         Self.boundMemory()
@@ -303,9 +322,7 @@ public actor MLXPerceptionProvider: @preconcurrency PerceptionProvider {
                 ? ModelConfiguration(id: modelID, revision: Self.defaultModelRevision)
                 : ModelConfiguration(id: modelID)
         }
-        let loaded = try await #huggingFaceLoadModelContainer(configuration: configuration)
-        container = loaded
-        return loaded
+        return try await #huggingFaceLoadModelContainer(configuration: configuration)
     }
 
     /// Whether this provider will read from disk or from the network — so the app can say which,

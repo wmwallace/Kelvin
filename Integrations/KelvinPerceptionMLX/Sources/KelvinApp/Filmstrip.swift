@@ -118,12 +118,10 @@ struct PhotoSession {
     /// people listed under this one — and detection is a Vision pass, far too slow to redo on
     /// every switch when the whole point of this cache is that coming back is instant.
     let subjectInstances: [SubjectInstances.Instance]
-    let subjectLuma: Double?
-    /// What produced this frame's subject mask. Cached with the rest because the mask cards read it
-    /// to decide whether to say "person", and a stale origin would have photo B's card describing
-    /// photo A's subject.
-    let subjectOrigin: SubjectMask.Origin?
-    let skyLuma: Double?
+    /// The frame's local measurements as the engine reads them. Cached whole because a restored
+    /// frame regenerates from it, and it includes the subject's origin, which the mask cards read to
+    /// decide whether to say "person" — a stale one would have photo B's card describing photo A.
+    let localMeasure: LocalMasks.Summary
     let healSpots: [HealSpot]
 
     /// What the camera recorded. Cached with the rest because `restore` puts a photo back WITHOUT
