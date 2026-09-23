@@ -161,7 +161,7 @@ public enum BatchApply {
                         // frame's subject and sky, not the reference frame's — the masks adapt even when
                         // the recipe parameters are propagated verbatim.
                         let bitmaps = recipe.masks?.isEmpty == false
-                            ? LocalMasks.measure(in: image).bitmaps : [:]
+                            ? LocalMasks.measureForDelivery(in: image) : [:]
                         let rendered = Renderer.render(image, with: recipe, maskBitmaps: bitmaps)
                         try ImageWriter.write(rendered, to: out, format: destination.format,
                                               metadata: destination.metadata)

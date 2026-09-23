@@ -385,23 +385,6 @@ final class AppState {
     /// "Person 2" tells you nothing about which person that is until you can see it.
     var highlightedInstanceId: String?
 
-    /// True while the pointer is over the Repair controls, which draws a ring around every detected
-    /// spot on the photograph.
-    ///
-    /// Dust spots are a few pixels across and the whole difficulty is that you cannot see them at
-    /// preview size — so a toggle you switch on and cannot verify is a toggle you have to take on
-    /// faith. Hover rather than a switch, for two reasons: it is the pattern the subject list
-    /// already uses (hover a row, see which person it means), and rings over a photograph are
-    /// clutter for every second you are not asking the question.
-    ///
-    /// Deliberately NOT a before/after: the app already has one. Hold to compare shows the frame
-    /// with the spots back, which answers "what did it change". This answers "what did it find".
-    var showingRepairSpots = false
-    /// The transient cousin: rings shown because the pointer is over the Repair controls. Kept
-    /// separate from the latched toggle above so a hover-out cannot switch off something the
-    /// user deliberately switched on — which is exactly what happened when one flag served both:
-    /// the rings vanished the moment the pointer moved toward the photograph to look at them.
-    var hoveringRepairControls = false
 
     /// Instances that already have a mask, so the list can show which are in play and clicking one
     /// again selects it rather than adding a duplicate.
@@ -1228,12 +1211,6 @@ final class AppState {
     /// The folder the open shoot lives in. Nil when nothing is open.
     var currentShootFolder: URL? {
         imageURL?.deletingLastPathComponent() ?? folderPhotos.first?.deletingLastPathComponent()
-    }
-
-    /// How many frames the shoot's look currently claims, for the label on the control.
-    var shootLookCount: Int {
-        guard shootLook != nil else { return 0 }
-        return folderPhotos.filter { effectiveStyle(for: $0) != nil }.count
     }
 
     /// What the apply control says it will do. It names the scope because the same button means two
@@ -2830,7 +2807,7 @@ final class AppState {
         // the incoming one's name for the whole decode, and a nudge in that window started from them.
         edit = .neutral; editBaseline = .neutral
         candidateWork = [:]; loadFailure = nil
-        showingOriginal = false; showingRepairSpots = false; hoveringRepairControls = false
+        showingOriginal = false
         // The grid is four renders of the photograph being left behind, and the comparison it
         // offers is not a comparison of the one arriving.
         comparing = false; compareRenders = [:]; comparePartnerId = nil
@@ -5341,23 +5318,6 @@ final class AppState {
                     self.activeCraftIssues = issues
                 }
             }
-            return
-            #if false
-            // Statistics and face are kept, not just the flag list: a subject fix is sized from the
-            // same measurement the flags came from, so what the button does and what the warning
-            // says can never be reading different numbers.
-            guard let stats = try? ImageStatistics.compute(r) else {
-                self.lastCraftReading = nil; self.activeCraftIssues = []; return
-            }
-            // The scene reading goes in with the measurement. Warm light measures exactly like a
-            // white-balance error, and only the perception layer knows which one this is — without
-            // it, every golden-hour frame is told it has a "strong colour cast" and offered a Fix
-            // button that would take the golden hour out of it.
-            let reading = CraftFix.Reading(stats: stats, face: FaceSkin.read(in: r),
-                                           condition: self.perception?.lighting.condition)
-            self.lastCraftReading = reading
-            self.activeCraftIssues = reading.issues
-            #endif
         }
     }
 
@@ -5381,37 +5341,6 @@ final class AppState {
             pick.imageId = await self.resolvedImageId() ?? ""
             try? await self.store.record(pick: pick)
         }
-    }
-
-    /// The mask bitmaps for a full-resolution render — the merged subject/sky pair, plus a mask for
-    /// every per-subject mask the recipe names.
-    ///
-    /// The per-subject part cannot simply re-detect and use what comes back. Instance ids are
-    /// Vision's per-pass indices: run the segmentation again at 60 MP instead of 1200 px and
-    /// `person0` may be a different person, or nobody. Trusting the id would export an edit landing
-    /// on the wrong face, in a file that looked right on screen the whole time. So the pass the
-    /// photographer actually edited against is handed forward as references, and the fresh
-    /// detection is matched back onto it by geometry.
-    ///
-    /// A subject that cannot be matched is *reported*, not papered over: its bitmap is absent, the
-    /// renderer skips that mask, and the status line says whose edit did not make it. Silently
-    /// dropping a local edit from an export is the failure worth avoiding here.
-    private func fullResolutionMaskBitmaps(for fullRes: CIImage) -> [String: CIImage] {
-        var bitmaps = LocalMasks.measure(in: fullRes).bitmaps
-        let wanted = Set(userMasks.compactMap(\.boundInstanceId))
-        guard !wanted.isEmpty else { return bitmaps }
-
-        let references = subjectInstances.filter { wanted.contains($0.id) }.map(\.reference)
-        let matched = SubjectInstances.reidentify(SubjectInstances.detect(in: fullRes),
-                                                  as: references)
-        bitmaps.merge(matched.bitmaps) { _, fresh in fresh }
-        if !matched.unmatched.isEmpty {
-            let names = matched.unmatched
-                .compactMap { id in userMasks.first { $0.instanceId == id }?.label }
-                .joined(separator: ", ")
-            statusMessage = "Couldn't find \(names) again at full size — that edit is not in the export"
-        }
-        return bitmaps
     }
 
     /// The name a photographer gave a subject mask, or the name Vision gave it — never a raw id.
@@ -5491,7 +5420,7 @@ final class AppState {
     /// because the renderer's response to a missing bitmap is to skip that mask silently. A
     /// per-subject local edit could therefore be absent from the written file while the status
     /// line said "Exported IMG_1234.jpg". The code that was supposed to report this existed
-    /// (`fullResolutionMaskBitmaps`) and was never called from anywhere — dead since it was
+    /// and was never called from anywhere — dead since it was, and since deleted —
     /// written, while the live path inlined the re-identification and discarded `unmatched`.
     private func renderCurrentPhoto(_ fullRes: CIImage, recipe: Recipe, to url: URL,
                                     metadata: ImageWriter.MetadataPolicy) async
@@ -5509,18 +5438,9 @@ final class AppState {
         // Two lanes: the Vision passes on theirs, the write on the export lane. Neither is on a
         // cooperative thread while it works — see `Offload`.
         let measured = await Offload.run(.vision) { () -> ExportMasks in
-            var bitmaps: [String: CIImage] = [:]
-            var lost: [String] = []
-            if masksNeeded {
-                bitmaps = LocalMasks.measure(in: input.fullRes).bitmaps
-                if !references.isEmpty {
-                    let matched = SubjectInstances.reidentify(
-                        SubjectInstances.detect(in: input.fullRes), as: references)
-                    bitmaps.merge(matched.bitmaps) { _, fresh in fresh }
-                    lost = matched.unmatched
-                }
-            }
-            return ExportMasks(bitmaps: bitmaps, lost: lost)
+            guard masksNeeded else { return ExportMasks(bitmaps: [:], lost: []) }
+            let delivery = LocalMasks.measureForDelivery(in: input.fullRes, reidentifying: references)
+            return ExportMasks(bitmaps: delivery.bitmaps, lost: delivery.unmatched)
         }
         do {
             try await Offload.run(.export) {
@@ -6030,15 +5950,8 @@ final class AppState {
         // bound subject found again at this resolution. See `RenderJob.instanceReferences`.
         let measured = needsMasks
             ? await Offload.run(.vision) { () -> ExportMasks in
-                var bitmaps = LocalMasks.measure(in: decoded.image).bitmaps
-                var lost: [String] = []
-                if !references.isEmpty {
-                    let matched = SubjectInstances.reidentify(
-                        SubjectInstances.detect(in: decoded.image), as: references)
-                    bitmaps.merge(matched.bitmaps) { _, fresh in fresh }
-                    lost = matched.unmatched
-                }
-                return ExportMasks(bitmaps: bitmaps, lost: lost)
+                let delivery = LocalMasks.measureForDelivery(in: decoded.image, reidentifying: references)
+                return ExportMasks(bitmaps: delivery.bitmaps, lost: delivery.unmatched)
             }
             : ExportMasks(bitmaps: [:], lost: [])
         do {
@@ -6277,8 +6190,6 @@ final class AppState {
     /// Render a lazy CIImage into a concrete bitmap-backed one, so downstream passes sample real
     /// pixels instead of re-evaluating the whole graph each time.
     private func materialise(_ image: CIImage) -> CIImage { Self.materialiseShared(image) }
-
-    private func ciToNSImage(_ ciImage: CIImage) -> NSImage? { Self.ciToNSImageShared(ciImage) }
 
     // Static twins of the two above, for use inside `Task.detached` during load. `CIContext` is
     // documented as thread-safe and `sharedContext` is already used this way by the candidate
@@ -8340,28 +8251,6 @@ struct ContentView: View {
                 // two things travelling at once for one click is one too many.
                 if isOpen { content().transition(.opacity) }
             }
-        }
-    }
-
-    private func sectionLabel(_ text: String, trailing: String?) -> some View {
-        HStack {
-            Text(text.uppercased())
-                .font(Theme.mono(10, .semibold)).tracking(2).foregroundColor(Theme.inkDim)
-            Spacer()
-            if let trailing {
-                Text(trailing.uppercased())
-                    .font(Theme.mono(9, .semibold)).tracking(1.5)
-                    .foregroundColor(Theme.glow)
-                    .padding(.horizontal, 7).padding(.vertical, 2)
-                    .background(Capsule().fill(Theme.glow.opacity(0.14)))
-            }
-        }
-    }
-
-    private func stat(_ value: String, _ label: String, _ color: Color) -> some View {
-        VStack(spacing: 4) {
-            Text(value).font(Theme.mono(30, .medium)).foregroundColor(color)
-            Text(label.uppercased()).font(Theme.mono(9)).tracking(1.5).foregroundColor(Theme.inkDim)
         }
     }
 

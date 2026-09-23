@@ -29,6 +29,7 @@ func printUsage() {
       \(tool) corpus-init --root <dir> --references <a,b,c> [--source <dir>] [--perception <dir>]
       \(tool) corpus-degrade --in-dir <good-photos> --out-dir <corpus>
       \(tool) vision-label --in-dir <dir> --out-dir <dir> [--scene]
+      \(tool) export-probe --in <image> [--style <id>] [--out <png>] | --compare <a.png> --with <b.png>
       \(tool) eval --corpus <dir> [--out <report.json>] [--engine-version <v>]
       \(tool) triage-compare --in-dir <dir> [--limit <n>]
       \(tool) sky-metrics --in-dir <dir> [--limit <n>] [--perception <p.json>] [--dump-dir <dir>]
@@ -762,6 +763,58 @@ case "triage-compare":
             print("set fastRAW: false in the scan, before trusting the speed-up.")
         }
     }
+
+case "export-probe":
+    // What a full-resolution export costs, stage by stage, and what it produces — so a change to the
+    // export path is judged on time AND pixels. Composes on the proxy the way the app does (Vision
+    // read, ShippedCandidates), then delivers one style at full size: masks measured on the frame,
+    // the render, and the encode. `--out` writes a 1600 px PNG of the delivered frame so two runs
+    // (e.g. with and without KELVIN_SAMPLED_FULL_RASTER=1) can be compared with `--compare`.
+    let rest = Array(arguments.dropFirst())
+    if let a = value(for: "--compare", in: rest), let b = value(for: "--with", in: rest) {
+        do {
+            let ia = try ImageDecoder.decode(url: URL(fileURLWithPath: a))
+            let ib = try ImageDecoder.decode(url: URL(fileURLWithPath: b))
+            let da = try ImageWriter.rgba8Sampled(ia, width: 400, height: 400)
+            let db = try ImageWriter.rgba8Sampled(ib, width: 400, height: 400)
+            print(String(format: "mean ΔE2000 %.4f", ImageMetrics.meanDeltaE2000(da, db)))
+        } catch { fail("\(error)") }
+        break
+    }
+    guard let inPath = value(for: "--in", in: rest) else { fail("export-probe requires --in") }
+    let styleID = value(for: "--style", in: rest) ?? "dramatic"
+    do {
+        let url = URL(fileURLWithPath: inPath)
+        func time<T>(_ label: String, _ work: () throws -> T) rethrows -> T {
+            let start = Date(); let out = try work()
+            print(String(format: "  %-28@ %8.0f ms", label as NSString, Date().timeIntervalSince(start) * 1000))
+            return out
+        }
+        print("export-probe \(url.lastPathComponent) — style \(styleID)"
+              + (ProcessInfo.processInfo.environment["KELVIN_SAMPLED_FULL_RASTER"] == "1" ? " (full raster)" : ""))
+        let full = try time("decode (lazy)") { try ImageDecoder.decode(url: url) }
+        // Materialised, as the app's is: a lazy proxy re-runs the RAW decode on every read of it.
+        let proxy = time("proxy (materialised)") { LocalMasks.deliveryImage(full) }
+        let perceptionProxy = PerceptionProxy.downsample(proxy)
+        let perception = time("scene read (Vision)") { VisionPerceptionProvider.read(perceptionProxy) }
+        let composed = try time("compose on proxy") {
+            try ShippedCandidates.compose(for: perceptionProxy, perception: perception,
+                                          iso: ExifReader.iso(url: url))
+        }
+        guard let recipe = composed.candidate(styleID: styleID)?.recipe else { fail("no style \(styleID)") }
+        let fullMasks = ProcessInfo.processInfo.environment["KELVIN_MEASURE_FULL"] == "1"
+        let masks = time(fullMasks ? "masks at full size" : "masks at delivery size") {
+            fullMasks ? LocalMasks.measure(in: full).bitmaps : LocalMasks.measureForDelivery(in: full)
+        }
+        let delivered = time("render graph") { ShippedCandidates.deliver(recipe, on: full, masks: masks) }
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("export-probe-\(UUID().uuidString).jpg")
+        try time("render + encode JPEG") { try ImageWriter.write(delivered, to: tmp, format: .jpeg(quality: 0.9)) }
+        try? FileManager.default.removeItem(at: tmp)
+        if let out = value(for: "--out", in: rest) {
+            try ImageWriter.write(PerceptionProxy.downsample(delivered, maxEdge: 1600),
+                                  to: URL(fileURLWithPath: out), format: .png)
+        }
+    } catch { fail("\(error)") }
 
 case "bench":
     // Where does interactive render time actually go? Measures the proxy render + read-back for
