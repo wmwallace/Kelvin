@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The iPhone app's privacy manifest. Kelvin collects nothing and tracks nothing: photographs are read,
+  edited and saved on the device, and no network request is made to do any of it.
+
+  The one required-reason API in the build is file timestamps, reached through KelvinCore:
+  PerceptionStore keys a scene read on a photo's size and modification date (a photo the user chose),
+  and ImageWriter ages out its own partial files in the directory it writes to (the app's container).
+-->
+<plist version="1.0">
+<dict>
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>C617.1</string>
+				<string>3B52.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>
