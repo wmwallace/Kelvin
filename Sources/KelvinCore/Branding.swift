@@ -64,6 +64,12 @@ public enum Branding {
     /// label, and keeping a stale-looking one is far cheaper than orphaning a user's work.
     public static let bundleIdentifier = "app.usekelvin.kelvin"
 
+    /// The iPhone app's identity. A separate identifier rather than the Mac's, because the Mac build
+    /// ships outside the App Store under Developer ID and an App Store app sharing its identifier
+    /// would contend with it for the same preferences domain on a Mac that runs iPhone apps.
+    /// **Frozen from the first TestFlight upload**, for the same reason `bundleIdentifier` is.
+    public static let iPhoneBundleIdentifier = "app.usekelvin.kelvin.mobile"
+
     /// File extension for recipe sidecars (no leading dot). Expensive to change once
     /// sidecars exist in the wild, so it lives here from commit one.
     public static let sidecarExtension = "kelvin"

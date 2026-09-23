@@ -208,6 +208,46 @@ func renderMaster(_ S: Double) -> CGImage {
     return ctx.makeImage()!
 }
 
+// MARK: - iPhone
+
+/// The iPhone icon: the same tile, full-bleed and opaque. iOS draws its own corner mask, and the
+/// App Store refuses an icon with an alpha channel, so the Mac's squircle and glass edge — that
+/// platform's shape — are left to the system here. The ground, the washes and the mark are the
+/// Mac tile's, scaled so the mark holds the same share of the tile it does there.
+func renderPhoneMaster(_ S: Double) -> CGImage {
+    let ctx = CGContext(data: nil, width: Int(S), height: Int(S), bitsPerComponent: 8,
+                        bytesPerRow: 0, space: cs,
+                        bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+    let M = S / tileFraction            // the Mac canvas whose tile is this whole image
+    let shift = (M - S) / 2
+    func at(_ fx: Double, _ fy: Double) -> CGPoint { CGPoint(x: fx * M - shift, y: fy * M - shift) }
+
+    let bg = CGGradient(colorsSpace: cs,
+                        colors: [rgb(0x2A3240), rgb(0x1A1F28), rgb(0x0D1014)] as CFArray,
+                        locations: [0, 0.55, 1])!
+    ctx.drawLinearGradient(bg, start: CGPoint(x: S / 2, y: S), end: CGPoint(x: S / 2, y: 0),
+                           options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+    let warmWash = CGGradient(colorsSpace: cs, colors: [rgb(0xFF8A3A, 0.20), rgb(0xFF8A3A, 0)] as CFArray, locations: [0, 1])!
+    ctx.drawRadialGradient(warmWash, startCenter: at(0.20, 0.30), startRadius: 0,
+                           endCenter: at(0.20, 0.30), endRadius: M * 0.52, options: [])
+    let coolWash = CGGradient(colorsSpace: cs, colors: [rgb(0x4E8CFF, 0.20), rgb(0x4E8CFF, 0)] as CFArray, locations: [0, 1])!
+    ctx.drawRadialGradient(coolWash, startCenter: at(0.82, 0.30), startRadius: 0,
+                           endCenter: at(0.82, 0.30), endRadius: M * 0.52, options: [])
+
+    let markCtx = bitmap(Int(S))
+    markCtx.translateBy(x: -shift, y: -shift)
+    drawMark(markCtx, M)
+    let mark = markCtx.makeImage()!
+    let rect = CGRect(x: 0, y: 0, width: S, height: S)
+    ctx.setAlpha(0.42)
+    ctx.draw(blurred(mark, radius: M * 0.018, S), in: rect)
+    ctx.setAlpha(0.16)
+    ctx.draw(blurred(mark, radius: M * 0.055, S), in: rect)
+    ctx.setAlpha(1)
+    ctx.draw(mark, in: rect)
+    return ctx.makeImage()!
+}
+
 // MARK: - Output
 
 func downsample(_ master: CGImage, _ size: Int) -> CGImage {
@@ -282,6 +322,13 @@ enum AppIconData {
 """
 try! source.write(to: embedURL, atomically: true, encoding: .utf8)
 print("✓ \(embedURL.path)")
+
+// The iPhone app's icon: one 1024 image, which is all an asset catalog needs since Xcode 14.
+let phoneIconURL = repoRoot.appendingPathComponent(
+    "Apps/KelvinPhone/Resources/Assets.xcassets/AppIcon.appiconset/icon-1024.png")
+try! fm.createDirectory(at: phoneIconURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+writePNG(renderPhoneMaster(1024), phoneIconURL)
+print("✓ \(phoneIconURL.path)")
 
 if let previewDir {
     try? fm.createDirectory(at: previewDir, withIntermediateDirectories: true)
