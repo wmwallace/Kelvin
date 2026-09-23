@@ -853,6 +853,50 @@ case "nr-agreement":
         if !all.isEmpty { print(String(format: "mean %.3f over %d", all.reduce(0, +) / Double(all.count), all.count)) }
     } catch { fail("\(error)") }
 
+case "hdr-probe":
+    // An HDR rendition of one look, for a person to judge on an HDR screen (D28 — experimental, not
+    // shipped). Writes <out>.heic: the SDR edit as the base image, the RAW's own headroom as a gain map.
+    let rest = Array(arguments.dropFirst())
+    guard let inPath = value(for: "--in", in: rest), let outPath = value(for: "--out", in: rest)
+    else { fail("hdr-probe requires --in <raw> --out <file.heic>") }
+    let styleID = value(for: "--style", in: rest) ?? "natural"
+    do {
+        let url = URL(fileURLWithPath: inPath)
+        let full = try ImageDecoder.decode(url: url)
+        let proxy = LocalMasks.deliveryImage(full)
+        let perceptionProxy = PerceptionProxy.downsample(proxy)
+        let composed = try ShippedCandidates.compose(for: perceptionProxy,
+                                                     perception: VisionPerceptionProvider.read(perceptionProxy),
+                                                     iso: ExifReader.iso(url: url))
+        guard let recipe = composed.candidate(styleID: styleID)?.recipe else { fail("no style \(styleID)") }
+        guard let headroom = HDRDelivery.headroom(for: url) else { fail("not a RAW, or no headroom") }
+        let sdr = ShippedCandidates.deliver(recipe, on: full)
+        let hdr = HDRDelivery.hdrCompanion(ofEdit: sdr, headroom: headroom)
+        func peak(_ i: CIImage) -> Float {
+            var px = [Float](repeating: 0, count: 4)
+            let m = i.applyingFilter("CIAreaMaximum", parameters: [kCIInputExtentKey: CIVector(cgRect: i.extent)])
+            CIContext().render(m, toBitmap: &px, rowBytes: 16,
+                                             bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+                                             format: .RGBAf, colorSpace: nil)
+            return px[0]
+        }
+        if let a = CIRAWFilter(imageURL: url), let b = CIRAWFilter(imageURL: url) {
+            a.extendedDynamicRangeAmount = 1; b.extendedDynamicRangeAmount = 2
+            if let sa = a.outputImage, let sb = b.outputImage {
+                print(String(format: "decoded peak: EDR 1 → %.3f · EDR 2 → %.3f", peak(sa), peak(sb)))
+            }
+            if let h2 = HDRDelivery.headroom(for: url, amount: 2) {
+                print(String(format: "peak gain at amount 2: %.2f", peak(h2)))
+            }
+        }
+        print(String(format: "peak gain %.2f · peak SDR %.3f · peak HDR %.3f", peak(headroom), peak(sdr), peak(hdr)))
+        let out = URL(fileURLWithPath: outPath)
+        let start = Date()
+        try HDRDelivery.writeHEIC(sdr: sdr, hdr: hdr, to: out)
+        print(String(format: "wrote %@ in %.1f s — gain map present: %@", out.lastPathComponent as NSString,
+                     Date().timeIntervalSince(start), HDRDelivery.hasGainMap(out) ? "yes" : "NO"))
+    } catch { fail("\(error)") }
+
 case "bench":
     // Where does interactive render time actually go? Measures the proxy render + read-back for
     // each stage, so optimisation targets are chosen from data rather than guesswork.

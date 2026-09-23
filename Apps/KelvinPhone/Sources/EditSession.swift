@@ -152,9 +152,7 @@ final class EditSession {
                 return
             }
             let file = try await Pipeline.export(recipe, from: source)
-            try await PHPhotoLibrary.shared().performChanges {
-                PHAssetCreationRequest.forAsset().addResource(with: .photo, fileURL: file, options: nil)
-            }
+            try await Self.addToLibrary(file)
             try? FileManager.default.removeItem(at: file)
             notice = "Saved to Photos as \(look.name)"
         } catch {
@@ -206,9 +204,7 @@ final class EditSession {
                     }
                     let recipe = adjustments.applied(to: try await Pipeline.resolve(style: style, on: picked.url))
                     let file = try await Pipeline.export(recipe, from: picked.url)
-                    try await PHPhotoLibrary.shared().performChanges {
-                        PHAssetCreationRequest.forAsset().addResource(with: .photo, fileURL: file, options: nil)
-                    }
+                    try await Self.addToLibrary(file)
                     try? FileManager.default.removeItem(at: file)
                     try? FileManager.default.removeItem(at: picked.url)
                     if let key = item.itemIdentifier {
@@ -228,6 +224,14 @@ final class EditSession {
     }
 
     func stopApplying() { batchTask?.cancel() }
+
+    /// Add a written file to the library as a new photo. `@Sendable` and `nonisolated` because Photos
+    /// runs the change block on its own queue — the older Swift CI builds with says so out loud.
+    nonisolated private static func addToLibrary(_ file: URL) async throws {
+        try await PHPhotoLibrary.shared().performChanges { @Sendable in
+            PHAssetCreationRequest.forAsset().addResource(with: .photo, fileURL: file, options: nil)
+        }
+    }
 
     enum OpenError: LocalizedError {
         case unreadable
