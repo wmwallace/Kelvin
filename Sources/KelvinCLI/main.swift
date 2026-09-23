@@ -819,6 +819,40 @@ case "export-probe":
         }
     } catch { fail("\(error)") }
 
+case "nr-agreement":
+    // Does the canvas show what the export writes? For each frame: the Natural candidate rendered
+    // on the 1200 px canvas proxy, against the same recipe rendered at full resolution and shrunk to
+    // 1200 px. No reference edit is involved, so this cannot favour a look — it measures only
+    // whether two resolutions of one recipe agree. Run with and without KELVIN_NR_FIXED=1.
+    let rest = Array(arguments.dropFirst())
+    guard let inDir = value(for: "--in-dir", in: rest) else { fail("nr-agreement requires --in-dir") }
+    let style = value(for: "--style", in: rest) ?? "natural"
+    do {
+        let files = try BatchApply.imageFiles(in: URL(fileURLWithPath: inDir, isDirectory: true))
+        var all: [Double] = []
+        for url in files {
+            let raw = try ImageDecoder.decode(url: url)
+            let canvas = PerceptionProxy.downsample(raw, maxEdge: 1200)
+            let perception = VisionPerceptionProvider.read(PerceptionProxy.downsample(canvas))
+            let composed = try ShippedCandidates.compose(for: canvas, perception: perception,
+                                                         iso: ExifReader.iso(url: url))
+            guard let recipe = composed.candidate(styleID: style)?.recipe else { continue }
+            let masks = composed.masks.bitmaps
+            let onCanvas = Renderer.render(canvas, with: recipe,
+                                           maskBitmaps: masks.mapValues { LocalMasks.scale($0, to: canvas.extent) })
+            let exported = ShippedCandidates.deliver(recipe, on: raw)
+            let shrunk = PerceptionProxy.downsample(exported, maxEdge: 1200)
+            let a = try ImageWriter.rgba8Sampled(onCanvas, width: 300, height: 200)
+            let b = try ImageWriter.rgba8Sampled(shrunk, width: 300, height: 200)
+            let de = ImageMetrics.meanDeltaE2000(a, b)
+            all.append(de)
+            let nr = recipe.detail.map { String(format: "nr %.0f/%.0f", $0.nrLuma, $0.nrColor) } ?? "no nr"
+            print(String(format: "%@  ISO %5.0f  %@  canvas↔export ΔE %.3f", url.lastPathComponent as NSString,
+                         ExifReader.iso(url: url) ?? 0, nr as NSString, de))
+        }
+        if !all.isEmpty { print(String(format: "mean %.3f over %d", all.reduce(0, +) / Double(all.count), all.count)) }
+    } catch { fail("\(error)") }
+
 case "bench":
     // Where does interactive render time actually go? Measures the proxy render + read-back for
     // each stage, so optimisation targets are chosen from data rather than guesswork.
