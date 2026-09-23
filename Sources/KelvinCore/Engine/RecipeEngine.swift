@@ -672,8 +672,14 @@ public enum RecipeEngine {
     // MARK: - Exposure
 
     /// Move the median toward a scene-appropriate target and express the move in stops.
-    /// EV = log2(target / current) is the physically correct way to say "make it this much
-    /// brighter," and it self-limits: a frame already near target barely moves.
+    /// EV = log2(target / current), on sRGB-ENCODED values, and it self-limits: a frame already near
+    /// target barely moves.
+    ///
+    /// Not the physics, and deliberately so. CIExposureAdjust multiplies linear light, so the
+    /// physically exact ratio is of the decoded values — and that was measured on 22 September 2026
+    /// and is worse: paired 7.27 → 7.71, degradation 6.68 → 6.75 (EVALUATION.md, "Display space
+    /// wins"). Encoded values are closer to how brightness is seen, the targets and the 0.6 pull
+    /// were tuned in them, and a ratio of them lifts a dark frame less than the physics would.
     public static func exposure(_ p: Perception, _ s: ImageStatistics,
                                 subjectLuma: Double? = nil) -> Double {
         let median = max(0.02, s.medianLuma)
@@ -761,7 +767,10 @@ public enum RecipeEngine {
     /// `p99.5` is the anchor rather than `highlightClip` because it is where the brightest REAL
     /// content sits — a frame can have a specular pixel at 255 and acres of headroom.
     static func highlightHeadroom(_ g: GlobalAdjustments, _ s: ImageStatistics) -> Double {
-        // Exposure is multiplicative on luminance.
+        // A display-space prediction: the sRGB-encoded white point scaled by 2^EV. The exact one
+        // (decode, scale, re-encode) predicts a lower white point after a lift and asks for less
+        // recovery — measured 22 September 2026 and slightly worse on both corpora (7.27 → 7.28,
+        // 6.68 → 6.70), so `headroomGain` stays calibrated against this form. See EVALUATION.md.
         var predicted = s.whitePoint * pow(2, g.exposureEV)
         // Display-referred contrast expands about 0.5 with the renderer's own gain (Renderer:124).
         if g.contrast != 0 {

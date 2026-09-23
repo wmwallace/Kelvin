@@ -654,6 +654,25 @@ fix the parked fine render names — made agreement WORSE on all eleven (mean 0.
 also sharpens edges (`inputSharpness`), and taking it off the canvas took that away too. Not shipped.
 The median pass (NR ≥ 40) never fires at these ISOs, so its resolution-dependence is untested.
 
+## Display space wins (the exposure maths, 22 September 2026)
+
+The audit flagged the engine's EV arithmetic as "display values treated as linear light":
+`exposure()` takes log2 of a ratio of sRGB-encoded medians, and `highlightHeadroom` scales an encoded
+white point by 2^EV, while `CIExposureAdjust` multiplies linear light. Both were rebuilt in linear
+light behind switches and scored on the Vision-read corpora:
+
+| | paired | degradation |
+|---|---|---|
+| as shipped (display space) | **7.27** | **6.68** |
+| linear headroom | 7.28 | 6.70 |
+| linear exposure | 7.71 | 6.75 |
+| both | 7.78 | 6.81 |
+
+The physically exact forms are worse everywhere, the exposure one badly. The constants were tuned
+in display space, which is nearer to perceived brightness, and the encoded ratio lifts a dark frame
+less than the physics would — which is what photographers' edits do. Shipped as it was; the
+comments that called it physics now say what it is. Do not "fix" it again without the corpus.
+
 ## A read that changes is not an edit that changes
 
 ⚠️ **Before blaming a prompt change for a quality complaint, measure whether it reached the
