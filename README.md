@@ -4,9 +4,9 @@
 
 # Kelvin
 
-**A local-AI photo editor for macOS.**
+**An on-device photo editor for Mac, coming to iPhone.**
 
-A small vision model reads your photograph. Deterministic code writes the edit.<br>
+Apple's Vision framework reads your photograph. Deterministic code writes the edit.<br>
 Everything runs on your machine — your photographs never leave it.
 
 [![Download for macOS](https://img.shields.io/github/v/release/wmwallace/Kelvin?label=download%20for%20macOS&color=e8833a&style=for-the-badge)](https://github.com/wmwallace/Kelvin/releases/latest)
@@ -40,10 +40,16 @@ first, or repaint your pixels with a generative model.
 Kelvin reads one photograph and offers a few defensible interpretations of it. You pick. That choice
 is the point of the whole app.
 
-The idea underneath: **the model never chooses numbers.** It answers categorical questions — what
-kind of scene, what the light is doing, what's technically wrong. Every actual value is then computed
-by ordinary, tested code from the histogram and the EXIF. Ask a small model for `exposure: +0.37` and
-it will invent one, confidently, and you will never know which answers were guesses.
+The idea underneath: **whatever reads the scene never chooses numbers.** It answers categorical
+questions — is there a subject, is it a person, an animal, a sea stack. Every actual value is then
+computed by ordinary, tested code from the histogram, the EXIF and the masks. Ask a model for
+`exposure: +0.37` and it will invent one, confidently, and you will never know which answers were
+guesses.
+
+That reader used to be a 1.7 GB vision-language model. Measured against real before-and-after edits,
+Apple's own Vision framework does the job better — on both of the project's test corpora — in a tenth
+of a second instead of five, with nothing to download
+([D27](docs/DECISIONS.md)). So that is what reads your photograph now.
 
 ## Status: pre-alpha
 
@@ -70,7 +76,7 @@ it will invent one, confidently, and you will never know which answers were gues
 - Auto-masks can be refined and inverted, but not brushed by hand
 - Nothing generative, on purpose
 
-903 tests — 619 over the core, 284 over the app. CI runs on every pull request.
+The core and the app each have their own test suite, and CI runs them on every pull request.
 
 <p align="center">
 <img src="docs/images/01-hero.webp" width="900" alt="The Kelvin window: the photograph, what the model made of the scene, the candidate list, the adjustment panel and the filmstrip">
@@ -103,13 +109,13 @@ nothing here can quietly go stale the way a pinned download link does.
 macOS 14+, Xcode 16.3+.
 
 ```sh
-xcodebuild -downloadComponent MetalToolchain   # once — Xcode doesn't install this by default
 make build && make test
 make app
 ```
 
-The first run downloads about 1.6 GB of model weights. Released builds include them instead — see
-[It runs on your Mac](#it-runs-on-your-mac). [`CONTRIBUTING.md`](CONTRIBUTING.md) has the details and the gotchas.
+The iPhone app is generated with [XcodeGen](https://github.com/yonaskolb/XcodeGen):
+`scripts/make-iphone-project.sh`, then open `Apps/KelvinPhone/KelvinPhone.xcodeproj`.
+[`CONTRIBUTING.md`](CONTRIBUTING.md) has the details and the gotchas.
 
 Opens RAW, JPEG, HEIC, PNG and TIFF.
 
@@ -120,8 +126,8 @@ photographs are never uploaded. Two small things do use the network — an updat
 names for geotagged photos — and both are listed below and switchable off. If your library already lives in iCloud then it
 lives in iCloud — that's your setup, and Kelvin neither adds to it nor takes it away.
 
-A released build carries the model inside it and needs no network to work. Built from source, it
-fetches the weights once, at a pinned revision. A release asks the network two things, both of them
+Scene reading uses Apple's Vision framework, which is part of macOS, so reading a photograph needs no
+network and nothing is ever downloaded to do it. A release asks the network two things, both of them
 switchable off in Settings. The first is whether an update exists. It does that on its own, because an alpha whose fixes only reach the
 people who agreed to a dialog is an alpha that stays broken for everyone else — the check sends no
 account, no identifier and nothing about your photographs, and both switches are in
@@ -146,10 +152,12 @@ file back to check.
 
 ## Built with
 
-Swift 6 and SwiftUI. Core Image for RAW decoding, so camera profiles come from Apple. MLX for
-on-device inference with a 4-bit vision model. Edits are stored as small JSON recipes.
+Swift 6 and SwiftUI. Core Image for RAW decoding and rendering, so camera profiles come from Apple.
+Apple's Vision framework for reading the scene and finding subjects, skies and faces. Edits are
+stored as small JSON recipes.
 
-Mac-only is a choice, not an oversight — see [`docs/DECISIONS.md`](docs/DECISIONS.md).
+Apple platforms only, by choice — the Mac app today and an iPhone app in progress, sharing one engine.
+See [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ## Documentation
 

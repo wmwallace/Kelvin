@@ -444,6 +444,10 @@ deliberate act with a failing test attached.
 
 ## D-model-4 — Ship the weights in the bundle, do not fetch them
 
+> **Superseded by D27 (22 September 2026).** No model ships and none is fetched: scenes are read by
+> Apple's Vision framework. Kept for the licence verification and the reasoning about downloads,
+> both of which still apply to anything that is ever bundled again.
+
 **Decided with the owner, 25 July 2026. Loading path built; bundle assembly still to do.**
 
 The perception layer downloaded ~**1.6 GB** (measured, not the ~2–3 GB the code comments claimed)
@@ -1211,7 +1215,7 @@ count; if they match, something inline is reading the edit.
 — same numbers, more code. `EquatableView` around the slider row — declined by SwiftUI for views
 holding dynamic properties (the comment on `ToneSlider` already recorded this).
 
-## D24 — The per-frame opener is built, margin-gated, and ships inert until calibrated · **Built 28 August 2026, awaiting the owner's calibration**
+## D24 — The per-frame opener is built, margin-gated, and ships inert until calibrated · **Calibrated 28 August 2026 — stays off**
 
 **This implements the ruling D18 already recorded**, not a new decision: a photograph may open in
 something other than Natural, but only above a margin calibrated on the harness, and only if the
@@ -1407,3 +1411,58 @@ helps against untouched originals by construction, so the degradation corpus alo
 validate it — D-tone-1's own lesson), and `ablate` showing the new lever earning rather than
 costing on real pairs. Not proposed: touching clarity/texture/vibrance spaces, which D-tone-1
 already scoped out at ~5 ΔE of measured cost.
+
+---
+
+## D27 — The scene is read by Apple's Vision framework; the bundled model is retired · **Decided 22 September 2026**
+
+Owner direction the same day: *"I want to move towards iPhone support"*, and on the model, to use
+the Apple tools and pipelines available rather than carry the 1.72 GB of weights. The decision was
+delegated ("you can make the good decisions") and taken on the measurement below.
+
+**What changes.** `VisionPerceptionProvider` (KelvinCore) is the perception provider on every
+platform. It answers the two fields the engine's output depends on — `subject.present` and
+`subject.type` — from Vision's face, body and animal detectors and its image classifier (for
+natural features: cliff, rocks, waterfall, arch, island, …), and leaves every other field at the
+constant read `conservativeRead` already shipped. The scene-summary line is written from the
+classifier's labels. The MLX model, its weights and `KelvinPerceptionMLX`'s provider leave the
+shipping path; D-model-4's bundling is superseded.
+
+**Why.** EVALUATION.md had already shown ("What the perception read is worth") that eight of the
+model's ten fields are worth 0.05 ΔE as constants and that its `problems[]` did harm (D19). This
+decision is the other half: whether the two fields that DO matter can come from detectors. Measured
+on the rebuilt corpora (engine 0.7.0, `kelvin-cli vision-label`, same binary, only the perception
+folder differing):
+
+| read | paired (77) engine-default | frames better / worse than the model | degradation (54) engine-default | better / worse |
+|---|---|---|---|---|
+| the model (Qwen3.5-2B, 4-bit) | 7.355 | — | 7.044 | — |
+| constant | 7.426 | 34 / 43 | 6.406 | 37 / 17 |
+| **Vision, subject only** | **7.272** | **51 / 26** | 6.678 | 37 / 17 |
+| Vision + classifier scene | 7.372 | 30 / 47 | 6.561 | 38 / 16 |
+
+Mean difference against the model, paired bootstrap 95% CI: Vision **−0.083 [−0.139, −0.023]** on
+the pairs and **−0.365 [−0.720, −0.092]** on the degradations. **Vision is the only read that beats
+the model on both corpora with an interval excluding zero.** The constant read wins the degradation
+corpus — which rewards doing less, its known bias — and loses the pairs, which is exactly where the
+subject lift earns its keep. Ruined frames (engine-default more than 1 ΔE worse than doing
+nothing): model 2 / 7, Vision 3 / 5.
+
+The classifier's scene mapping (`sceneFromClassifier`) is measured worse on the pairs and ships
+off: a confident scene can switch the sky lever off on an outdoor frame, where `.other` leaves it on.
+
+**What it buys.** A read in ~0.1 s instead of 4.5–6 s (77 frames labelled in 7 s, decode
+included); no ~15 s warm-up and no 1.6 GB resident model; a Mac download that drops from ~1.5 GB to
+tens of megabytes; and an iPhone app that fits every iOS 17 device rather than 8 GB ones — the
+memory risk the iPhone feasibility audit ranked first. Deterministic, like the engine: the same
+pixels give the same read on every run, with no model revision to pin.
+
+**What it costs.** The scene sentence is plainer (classifier labels, not a model's sentence), and
+the pitch loses "a vision-language model reads your photo" — which the measurements say was never
+where the value was. Non-negotiable #1 holds more strictly than before: the classifier's
+confidences decide a category inside the provider and never reach the engine.
+
+**What would reopen it.** A perception field the engine starts to read that detectors cannot
+answer, measured on both corpora. Apple's Foundation Models framework is the candidate for any
+display-only prose, never for an engine input: it changes with the OS, so an engine that read it
+would stop being reproducible.

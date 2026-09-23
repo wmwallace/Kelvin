@@ -1,7 +1,6 @@
 import SwiftUI
 import AppKit
 import KelvinCore
-import KelvinPerceptionMLX
 import Sparkle
 
 /// Settings — ⌘, — which the app did not have.
@@ -201,9 +200,9 @@ private struct PerceptionSettings: View {
     var body: some View {
         Form {
             Section {
-                LabeledContent("Model", value: PerceptionInfo.modelName)
+                LabeledContent("Reads with", value: PerceptionInfo.readerName)
                 LabeledContent("Source", value: PerceptionInfo.sourceDescription)
-                LabeledContent("Runs on", value: "This Mac — Apple Silicon GPU via MLX")
+                LabeledContent("Runs on", value: "This Mac — the Neural Engine and GPU")
             } header: {
                 Text("Scene reading")
             }
@@ -284,53 +283,22 @@ private struct PerceptionSettings: View {
     }
 }
 
-/// Reads what it can from the bundle rather than restating it, so this pane cannot drift out of
-/// agreement with the build it is inside.
+/// What reads a photograph, said plainly enough to check.
+///
+/// Since D27 the answer is the same for a release, a build from source and a development run —
+/// Apple's Vision framework, which ships with macOS — so this pane no longer has to find out where
+/// a set of weights came from. It stays a pane because "runs on your machine" is still a claim
+/// someone should be able to check rather than take on trust.
 enum PerceptionInfo {
-    /// Whether the weights travelled with the app. The packaging script refuses to make a signed
-    /// build without them, so for anything a user installs this is true.
-    static var isBundled: Bool {
-        guard let resources = Bundle.main.resourceURL else { return false }
-        return FileManager.default.fileExists(
-            atPath: resources.appendingPathComponent("PerceptionModel/config.json").path)
-    }
-
-    static var modelName: String {
-        // The repo id without the org prefix: "Qwen3.5-2B-MLX-4bit" is the useful half.
-        let id = ProcessInfo.processInfo.environment["KELVIN_MODEL"]
-            ?? MLXPerceptionProvider.defaultModelID
-        return id.split(separator: "/").last.map(String.init) ?? id
-    }
-
-    /// Weights loaded from an explicit path rather than the Hugging Face cache — what
-    /// `make app-staged` does. Neither bundled nor downloaded, and saying "downloaded" here was
-    /// simply untrue: nothing had been fetched.
-    static var localPath: String? {
-        guard !isBundled,
-              let path = ProcessInfo.processInfo.environment["KELVIN_MODEL_PATH"],
-              !path.isEmpty else { return nil }
-        return (path as NSString).abbreviatingWithTildeInPath
-    }
-
-    static var sourceDescription: String {
-        if isBundled { return "Included in the app" }
-        if let path = localPath { return path }
-        return "Downloaded once to ~/.cache/huggingface"
-    }
+    static let readerName = "Apple Vision"
+    static let sourceDescription = "Built into macOS — nothing to download"
 
     /// Said as a CAPABILITY — "needs no network" — rather than as a promise about behaviour.
-    /// "Makes no network requests" is true today and would quietly become false the moment an
-    /// update check ships, and a claim a packet capture can disprove is worth more trouble than
-    /// it buys. What the user actually wants to know is that the reading happens here.
-    static var networkStatement: String {
-        if isBundled {
-            return "The model is inside the app, so reading a photograph needs no network at all. No account, no telemetry."
-        }
-        if localPath != nil {
-            return "Reading the model from a folder on this Mac — nothing was downloaded. No account, no telemetry."
-        }
-        return "Built from source, so the model was fetched once from Hugging Face at a pinned revision. Reading a photograph runs here. No account, no telemetry."
-    }
+    /// "Makes no network requests" would quietly become false the moment an update check ran, and
+    /// a claim a packet capture can disprove is worth more trouble than it buys. What the user
+    /// actually wants to know is that the reading happens here.
+    static let networkStatement =
+        "Scenes are read by Apple's Vision framework on this Mac, so reading a photograph needs no network at all. No account, no telemetry."
 }
 
 // MARK: - About
