@@ -394,13 +394,54 @@ public enum ImageWriter {
         return Data(bytes)
     }
 
+    /// Above this many pixels, `rgba8Sampled` stops rasterising the whole frame in software.
+    ///
+    /// It used to render the FULL extent through the software context and only then shrink it with
+    /// CGContext — right for the proxies every measurement is taken on (the largest is 1800 px, about
+    /// 2.4 MP), and ruinous for the full-resolution frames export measures masks on: a 60 MP frame
+    /// was ~6 software rasters of 240 MB each, per exported photograph, to produce grids of 64–160
+    /// cells. Above the threshold the frame is shrunk by Core Image on the GPU first, to a
+    /// fixed multiple of the grid, and only that is read back. Below it nothing changes, byte for
+    /// byte, which is what keeps every proxy measurement — and so every recipe and the whole corpus
+    /// — exactly as it was. `KELVIN_SAMPLED_FULL_RASTER=1` restores the old path for an A/B.
+    static let sampledPrefilterPixels = 4_000_000
+    static let sampledFullRaster = ProcessInfo.processInfo.environment["KELVIN_SAMPLED_FULL_RASTER"] == "1"
+
+    private static func sampledSource(_ image: CIImage, width: Int, height: Int)
+        -> (image: CIImage, context: CIContext) {
+        let extent = image.extent
+        guard extent.width * extent.height > CGFloat(sampledPrefilterPixels)
+        else { return (image, context) }
+        // Four source samples per grid cell each way: enough that CGContext's final `.medium`
+        // resample averages real neighbourhoods, as it did over the full frame, rather than
+        // point-sampling a Lanczos output.
+        let scale = min(1, max(CGFloat(width) * 4 / extent.width, CGFloat(height) * 4 / extent.height))
+        // An affine scale rather than Lanczos: `exportContext` downsamples with
+        // `highQualityDownsample`, which Core Image serves from a mip chain, where a Lanczos kernel
+        // at a hundredth of the size has a footprint so wide it cost more than the software raster.
+        let shrunk = image
+            .transformed(by: CGAffineTransform(translationX: -extent.minX, y: -extent.minY)
+                .concatenating(CGAffineTransform(scaleX: scale, y: scale)))
+        return (shrunk.cropped(to: CGRect(x: 0, y: 0, width: (extent.width * scale).rounded(.down),
+                                          height: (extent.height * scale).rounded(.down))),
+                exportContext)
+    }
+
     /// Rasterize to a fixed `width`×`height` RGBA8 grid in sRGB, so two images of
     /// different pixel dimensions can be compared sample-for-sample. Used by the eval
     /// metrics. Returns row-major RGBA8 bytes of length `width*height*4`.
     public static func rgba8Sampled(_ image: CIImage, width: Int, height: Int) throws -> Data {
+        try rgba8Sampled(image, width: width, height: height, fullRaster: sampledFullRaster)
+    }
+
+    /// `fullRaster` forces the old whole-frame software path — for the test that holds the two to
+    /// the same answer, and for the environment switch above.
+    static func rgba8Sampled(_ image: CIImage, width: Int, height: Int, fullRaster: Bool) throws -> Data {
         let extent = image.extent
-        guard !extent.isInfinite,
-              let cg = context.createCGImage(image, from: extent, format: .RGBA8, colorSpace: outputColorSpace)
+        guard !extent.isInfinite else { throw Error.rasterFailed }
+        let source = fullRaster ? (image: image, context: context) : sampledSource(image, width: width, height: height)
+        guard let cg = source.context.createCGImage(source.image, from: source.image.extent,
+                                                    format: .RGBA8, colorSpace: outputColorSpace)
         else {
             throw Error.rasterFailed
         }

@@ -218,7 +218,7 @@ public enum ShippedCandidates {
     public static func deliver(_ recipe: Recipe, on image: CIImage,
                               masks: [String: CIImage]? = nil) -> CIImage {
         let bitmaps = masks ?? (recipe.masks?.isEmpty == false
-                                ? LocalMasks.measure(in: image).bitmaps
+                                ? LocalMasks.measureForDelivery(in: image)
                                 : [:])
         return Renderer.render(image, with: recipe, maskBitmaps: bitmaps)
     }
