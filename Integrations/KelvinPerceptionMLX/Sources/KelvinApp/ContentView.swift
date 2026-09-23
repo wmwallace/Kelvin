@@ -4351,28 +4351,36 @@ final class AppState {
         // (see its doc); it moves only when a decode lands or a cached session is restored.
         let owner = loadedURL
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
-            // AND NOT WHILE THE PANEL BELONGS TO NOBODY. `clearPerPhotoState` bumps the token, which
-            // cancels a commit already pending — but a slider nudged AFTER the clear, while the next
-            // decode runs (or after it failed), scheduled a fresh one with `loadedURL` still naming
-            // the photograph just left. It then filed the empty panel under that photograph and
-            // `persistEdit` read "untouched" as "delete the saved edit".
-            guard let self, self.commitToken == t, self.loadedURL == owner,
-                  !self.perPhotoStateIsCleared else { return }
-            if let prev = self.committed, prev != self.snapshot() {
-                self.undoStack.append(prev)
-                if self.undoStack.count > 60 { self.undoStack.removeFirst() }
-                self.redoStack.removeAll()
-            }
-            self.committed = self.snapshot()
-            self.refreshUndoState()
-            // Keep the filmstrip's "edited" dot honest as you work, not just on switch, and put
-            // the edit on disk so quitting the app doesn't throw the work away.
-            if let url = owner {
-                if self.isTouched { self.editedURLs.insert(url) } else { self.editedURLs.remove(url) }
-                self.persistEdit(for: url)
-            }
+            self?.landCommit(token: t, owner: owner)
         }
     }
+
+    /// The coalesced commit, landing. Split from `scheduleCommit` so a test can land one directly
+    /// instead of spinning the run loop for the coalescing delay — which ran whatever earlier tests
+    /// had left queued on the main queue, and made the cleared-window test the one that paid for it.
+    func landCommit(token t: Int, owner: URL?) {
+        // AND NOT WHILE THE PANEL BELONGS TO NOBODY. `clearPerPhotoState` bumps the token, which
+        // cancels a commit already pending — but a slider nudged AFTER the clear, while the next
+        // decode runs (or after it failed), scheduled a fresh one with `loadedURL` still naming
+        // the photograph just left. It then filed the empty panel under that photograph and
+        // `persistEdit` read "untouched" as "delete the saved edit".
+        guard commitToken == t, loadedURL == owner, !perPhotoStateIsCleared else { return }
+        if let prev = committed, prev != snapshot() {
+            undoStack.append(prev)
+            if undoStack.count > 60 { undoStack.removeFirst() }
+            redoStack.removeAll()
+        }
+        committed = snapshot()
+        refreshUndoState()
+        // Keep the filmstrip's "edited" dot honest as you work, not just on switch, and put
+        // the edit on disk so quitting the app doesn't throw the work away.
+        if let url = owner {
+            if isTouched { editedURLs.insert(url) } else { editedURLs.remove(url) }
+            persistEdit(for: url)
+        }
+    }
+    /// The token the next `scheduleCommit` will land with — for the test that lands one by hand.
+    var pendingCommitToken: Int { commitToken }
     private func refreshUndoState() { canUndo = !undoStack.isEmpty; canRedo = !redoStack.isEmpty }
 
     /// Commit the current state as an undo step *now*, instead of when the edit burst settles.

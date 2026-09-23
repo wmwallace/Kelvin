@@ -91,9 +91,9 @@ final class SessionSwitchTests: XCTestCase {
 
         s.edit.exposureEV = 0.3
         s.onEdit()
-        let settled = expectation(description: "the coalesced commit window has passed")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { settled.fulfill() }
-        wait(for: [settled], timeout: 2)
+        // Land the commit `onEdit` scheduled, now, rather than waiting out the coalescing delay on
+        // the run loop — the owner it was scheduled with is still the photograph just left.
+        s.landCommit(token: s.pendingCommitToken, owner: p)
 
         let onDisk = try XCTUnwrap(EditStore.load(for: p), "the previous photograph's edit was deleted")
         XCTAssertFalse(onDisk.userMasks.isEmpty, "and not overwritten with the cleared panel")
