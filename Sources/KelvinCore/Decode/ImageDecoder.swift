@@ -1,5 +1,6 @@
 import Foundation
 import CoreImage
+import ImageIO
 
 /// Decode: file → linear working buffer. Knows nothing about recipes (ARCHITECTURE.md).
 ///
@@ -58,9 +59,38 @@ public enum ImageDecoder {
             return image
         }
 
-        guard let image = CIImage(contentsOf: url) else {
+        // UPRIGHT AT DECODE. A phone held vertically writes landscape pixels plus an EXIF tag
+        // saying "rotate me", and every other reader of the file honours it: the filmstrip and the
+        // fast proxy both ask ImageIO with `kCGImageSourceCreateThumbnailWithTransform`, and
+        // `CIRAWFilter` orients a RAW by default. Without `.applyOrientationProperty` this decode
+        // alone came back on its side, so the editor showed a portrait sideways, the fast proxy was
+        // refused by its aspect guard, and a mask measured on one could not honestly be applied to
+        // the other.
+        guard let image = CIImage(contentsOf: url, options: [.applyOrientationProperty: true]) else {
             throw Error.unreadable(url)
         }
-        return image
+        return uprightProperties(image)
+    }
+
+    /// Mark the metadata upright, because the pixels now are.
+    ///
+    /// Core Image rotates the pixels but leaves the source's `properties` alone, and that dictionary
+    /// is what `ImageWriter` encodes into an export. An upright picture still tagged "rotate 90°"
+    /// would be rotated a second time by every viewer that opened the export — the fix above would
+    /// have moved the sideways photo from the editor into the client's inbox.
+    static func uprightProperties(_ image: CIImage) -> CIImage {
+        var properties = image.properties
+        let key = kCGImagePropertyOrientation as String
+        let tiffKey = kCGImagePropertyTIFFDictionary as String
+        let tiffOrientation = kCGImagePropertyTIFFOrientation as String
+        guard properties[key] != nil
+                || (properties[tiffKey] as? [String: Any])?[tiffOrientation] != nil
+        else { return image }
+        properties[key] = 1
+        if var tiff = properties[tiffKey] as? [String: Any] {
+            tiff[tiffOrientation] = 1
+            properties[tiffKey] = tiff
+        }
+        return image.settingProperties(properties)
     }
 }
