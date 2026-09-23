@@ -28,6 +28,7 @@ func printUsage() {
                     [--on-collision unique|skip|overwrite]
       \(tool) corpus-init --root <dir> --references <a,b,c> [--source <dir>] [--perception <dir>]
       \(tool) corpus-degrade --in-dir <good-photos> --out-dir <corpus>
+      \(tool) vision-label --in-dir <dir> --out-dir <dir> [--scene]
       \(tool) eval --corpus <dir> [--out <report.json>] [--engine-version <v>]
       \(tool) triage-compare --in-dir <dir> [--limit <n>]
       \(tool) sky-metrics --in-dir <dir> [--limit <n>] [--perception <p.json>] [--dump-dir <dir>]
@@ -407,6 +408,42 @@ case "corpus-init":
         print("Wrote manifest with \(manifest.entries.count) entries "
             + "(\(references.count) experts each, \(labelled) with perception labels) to "
             + (outURL?.path ?? root.appendingPathComponent("manifest.json").path))
+    } catch {
+        fail("\(error)")
+    }
+
+case "vision-label":
+    // The model-free read (VisionPerceptionProvider): the same output shape `kelvin-perceive label`
+    // writes, so a corpus can be scored under either by pointing its manifest at a different
+    // perception folder. The model sees a 768 px proxy, so this does too.
+    let rest = Array(arguments.dropFirst())
+    guard let inDir = value(for: "--in-dir", in: rest) else { fail("vision-label requires --in-dir") }
+    guard let outDir = value(for: "--out-dir", in: rest) else { fail("vision-label requires --out-dir") }
+    let options = VisionPerceptionProvider.Options(sceneFromClassifier: rest.contains("--scene"))
+    do {
+        let images = try BatchApply.imageFiles(in: URL(fileURLWithPath: inDir, isDirectory: true))
+        guard !images.isEmpty else { fail("no images in \(inDir)") }
+        let outURL = URL(fileURLWithPath: outDir, isDirectory: true)
+        try FileManager.default.createDirectory(at: outURL, withIntermediateDirectories: true)
+        var failed = 0
+        let started = Date()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        for image in images {
+            let stem = image.deletingPathExtension().lastPathComponent
+            do {
+                let proxy = PerceptionProxy.downsample(try ImageDecoder.decode(url: image))
+                let p = VisionPerceptionProvider.read(proxy, options: options)
+                try encoder.encode(p).write(
+                    to: outURL.appendingPathComponent(stem).appendingPathExtension("json"))
+                print("\(stem)\t\(p.subject.present ? p.subject.type.rawValue : "-")\t\(p.scene.rawValue)\t\(p.notes ?? "")")
+            } catch {
+                failed += 1
+                print("✗ \(stem): \(error)")
+            }
+        }
+        print(String(format: "Labelled %d, %d failed, %.1f s", images.count - failed, failed,
+                     Date().timeIntervalSince(started)))
     } catch {
         fail("\(error)")
     }
