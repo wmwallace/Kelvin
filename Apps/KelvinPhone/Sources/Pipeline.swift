@@ -56,6 +56,39 @@ struct Composed: @unchecked Sendable {
     /// For the export: the source and the masks the looks were rendered with.
     let source: URL
     let masks: [String: CIImage]
+    /// The canvas image and its masks at canvas size, kept so an adjustment re-renders the look
+    /// without decoding anything again.
+    let canvas: CIImage
+    let canvasMasks: [String: CIImage]
+}
+
+/// The three things someone who is not a photographer reaches for after choosing a look: a bit
+/// brighter, a bit warmer, a bit more punch. Offsets on top of the chosen look's own recipe, never
+/// absolute values — a look is a starting point that stays itself.
+struct Adjustments: Equatable, Sendable {
+    /// Stops of exposure.
+    var light = 0.0
+    /// Mireds, positive warmer. Mireds rather than Kelvin because equal steps look equal there.
+    var warmth = 0.0
+    /// Contrast points.
+    var contrast = 0.0
+
+    var isNeutral: Bool { self == Adjustments() }
+
+    func applied(to recipe: Recipe) -> Recipe {
+        guard !isNeutral else { return recipe }
+        var r = recipe
+        r.global.exposureEV = min(5, max(-5, r.global.exposureEV + light))
+        r.global.contrast = min(100, max(-100, r.global.contrast + contrast))
+        if warmth != 0 {
+            // This engine's axis: a LOWER target temperature renders warmer (Warm is −420 K), so
+            // warming raises the target's mireds.
+            let base = r.global.temperatureK ?? 6500
+            let mired = 1_000_000 / base + warmth
+            r.global.temperatureK = min(15000, max(2000, 1_000_000 / max(mired, 1)))
+        }
+        return r
+    }
 }
 
 enum Pipeline {
@@ -113,14 +146,23 @@ enum Pipeline {
                         original: original.image,
                         sceneSummary: perception.notes,
                         source: url,
-                        masks: composition.masks.bitmaps)
+                        masks: composition.masks.bitmaps,
+                        canvas: canvas,
+                        canvasMasks: masks)
+    }
+
+    /// One look, re-rendered on the canvas with adjustments on top. On the render lane.
+    static func renderAdjusted(_ recipe: Recipe, in composed: Composed) async throws -> CGImage {
+        let canvas = composed.canvas, masks = composed.canvasMasks
+        return try await Lane.render.run {
+            Image(image: try cgImage(Renderer.render(canvas, with: recipe, maskBitmaps: masks)))
+        }.image
     }
 
     /// The full-resolution file, rendered once — non-negotiable #4, proxy-first: nothing before
     /// this touched every pixel. Masks are measured again at the frame's own size, never the
     /// proxy's stretched, which is the export rule on the Mac too.
-    static func export(_ look: Composed.Look, from source: URL) async throws -> URL {
-        let recipe = look.recipe
+    static func export(_ recipe: Recipe, from source: URL) async throws -> URL {
         return try await Lane.render.run {
             let full = try ImageDecoder.decode(url: source)
             let out = FileManager.default.temporaryDirectory
