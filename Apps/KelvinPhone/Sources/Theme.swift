@@ -40,12 +40,19 @@ extension View {
     /// Liquid Glass where the system has it, the material before it where it does not. Chrome only
     /// — **glass never touches the photograph**, the Mac app's one rule about it: translucency is a
     /// colour cast in the surround the eye uses to judge a grade.
+    ///
+    /// The `compiler` check is for CI, which builds with an SDK older than Liquid Glass: there the
+    /// API does not exist to be guarded, so the material is the only branch compiled.
     @ViewBuilder
     func chromeGlass<S: Shape>(in shape: S) -> some View {
+        #if compiler(>=6.2)
         if #available(iOS 26, *) {
             self.glassEffect(.regular, in: shape)
         } else {
             self.background(.ultraThinMaterial, in: shape)
         }
+        #else
+        self.background(.ultraThinMaterial, in: shape)
+        #endif
     }
 }

@@ -104,3 +104,29 @@ jobs:
         # defaults, zoom) need no window. They do NOT load the perception model — nothing in CI
         # should download 1.6 GB of weights, and nothing here does.
         run: swift test
+
+  # The iPhone app (Apps/KelvinPhone). Built, not tested — its logic is KelvinCore's, which the core
+  # job tests; this job exists so a change to the core that breaks the phone's build, or an API the
+  # phone uses, fails a pull request instead of the next person to open Xcode. The project is
+  # generated (XcodeGen), never committed, so this also proves the generator still works.
+  iphone:
+    name: iPhone app — build
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the project
+        run: scripts/make-iphone-project.sh
+
+      - name: Build for the iOS Simulator
+        working-directory: Apps/KelvinPhone
+        run: |
+          xcodebuild -project KelvinPhone.xcodeproj -scheme KelvinPhone \
+            -destination 'generic/platform=iOS Simulator' \
+            -skipPackagePluginValidation -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=NO build
