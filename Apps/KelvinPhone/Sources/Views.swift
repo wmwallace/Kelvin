@@ -73,8 +73,14 @@ struct RootView: View {
         }
         .sheet(isPresented: $adjusting) { AdjustPanel() }
         // The adjusted canvas follows both the sliders and the look they are applied to.
-        .onChange(of: session.adjustments) { Task { await session.refreshAdjustedPreview() } }
-        .onChange(of: session.selectedID) { Task { await session.refreshAdjustedPreview() } }
+        .onChange(of: session.adjustments) {
+            session.persistChoice()
+            Task { await session.refreshAdjustedPreview() }
+        }
+        .onChange(of: session.selectedID) {
+            session.persistChoice()
+            Task { await session.refreshAdjustedPreview() }
+        }
     }
 
     @ViewBuilder private var content: some View {
@@ -239,7 +245,8 @@ struct Caption: View {
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(Theme.ink)
                 Text(session.notice ?? (session.showingOriginal ? "As it came off the camera"
-                                                                  : session.selectedLook?.description ?? ""))
+                                        : (session.restoredEdit ? "Your choice from last time · " : "")
+                                          + (session.selectedLook?.description ?? "")))
                     .font(.subheadline)
                     .foregroundStyle(Theme.inkDim)
                     .lineLimit(2)
