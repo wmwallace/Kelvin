@@ -1,0 +1,45 @@
+# The iPhone app's Xcode project, generated — never edited by hand, never committed.
+#
+#   scripts/make-iphone-project.sh      # writes Apps/KelvinPhone/KelvinPhone.xcodeproj
+#
+# The display name and bundle identifier arrive as environment variables read from
+# Sources/KelvinCore/Branding.swift by that script, the same way package-app.sh builds the Mac
+# app's Info.plist: the name lives in exactly one constant (CLAUDE.md, "Naming").
+name: KelvinPhone
+options:
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+packages:
+  Kelvin:
+    path: ../..
+targets:
+  KelvinPhone:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+      - Resources
+    dependencies:
+      - package: Kelvin
+        product: KelvinCore
+    settings:
+      base:
+        PRODUCT_NAME: KelvinPhone
+        PRODUCT_BUNDLE_IDENTIFIER: ${KELVIN_IPHONE_BUNDLE_ID}
+        MARKETING_VERSION: ${KELVIN_VERSION}
+        CURRENT_PROJECT_VERSION: "1"
+        DEVELOPMENT_TEAM: ${KELVIN_TEAM}
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: ${KELVIN_DISPLAY_NAME}
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.photography
+        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: "Saves the edited copy of your photo to your library. Your original is never changed."
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_UIUserInterfaceStyle: Dark
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
