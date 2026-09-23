@@ -1628,20 +1628,10 @@ case "bg-probe":
             autoreleasepool {
                 let url = URL(fileURLWithPath: path)
                 let stem = url.deletingPathExtension().lastPathComponent
-                // `ImageDecoder.decode` does NOT apply the EXIF orientation of a non-RAW file
-                // (`CIImage(contentsOf:)` without `.applyOrientationProperty` — see
-                // `PerceptionProxy.fromFile`'s doc, which declines to assume it). The corpus's own
-                // PNGs are baked upright, but this command accepts any two folders, and a
-                // tag-rotated JPEG capture would either sample the reference's ground with the
-                // capture's sky mask or be dropped as misaligned. Orient here, so the aspect gate
-                // below compares what the masks will actually see.
-                func decodeUpright(_ u: URL) -> CIImage? {
-                    if ImageDecoder.rawExtensions.contains(u.pathExtension.lowercased()) {
-                        return try? ImageDecoder.decode(url: u)
-                    }
-                    return CIImage(contentsOf: u, options: [.applyOrientationProperty: true])
-                }
-                guard let capture = decodeUpright(url) else {
+                // `ImageDecoder.decode` applies a non-RAW file's EXIF orientation, so a tag-rotated
+                // JPEG capture comes back upright and the aspect gate below compares what the masks
+                // will actually see.
+                guard let capture = try? ImageDecoder.decode(url: url) else {
                     unreadable += 1; return
                 }
                 var refImage: CIImage?
@@ -1649,12 +1639,12 @@ case "bg-probe":
                     let refURL = URL(fileURLWithPath: referenceDir)
                         .appendingPathComponent(stem).appendingPathExtension(ext)
                     if FileManager.default.fileExists(atPath: refURL.path) {
-                        refImage = decodeUpright(refURL)
+                        refImage = try? ImageDecoder.decode(url: refURL)
                     }
                 }
                 guard let reference = refImage else { noReference += 1; return }
 
-                // With orientation applied above, an alignable pair has the SAME aspect, not
+                // With orientation applied at decode, an alignable pair has the SAME aspect, not
                 // merely the same long/short ratio. A pair that still disagrees cannot share
                 // one mask honestly; skip it and say so in the summary.
                 let (cw, ch) = (capture.extent.width, capture.extent.height)
