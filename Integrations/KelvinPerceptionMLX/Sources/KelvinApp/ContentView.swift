@@ -1116,7 +1116,13 @@ final class AppState {
     private nonisolated static func decodeReadProxy(_ url: URL) -> Task<ReadAheadProxy, Error> {
         Task {
             try await Offload.run(.decode, qos: .utility, priority: .low) {
-                try autoreleasepool {
+                // An evicted neighbour is left in iCloud, not read. Its first byte is a 40-second
+                // download, and this lane's one slot would be held for all of it while the photo
+                // actually opened queued behind — measured at 50 s, then 5 minutes. The frame is
+                // read when someone opens it; the read loop counts it done like any undecodable
+                // one. See `CloudFile`.
+                if CloudFile.isEvicted(url) { throw CloudFile.DownloadFailed(name: url.lastPathComponent) }
+                return try autoreleasepool {
                     let image = try ImageDecoder.decode(url: url)
                     return ReadAheadProxy(
                         proxy: Self.materialiseDecoded(PerceptionProxy.downsample(image)))
@@ -2618,7 +2624,9 @@ final class AppState {
     private func signature(for url: URL) async -> PhotoTriage.Signature? {
         if let known = triage[url]?.signature { return known }
         return await Offload.run(.scan) {
-            guard let proxy = PerceptionProxy.measurementProxy(url, maxEdge: PhotoTriage.proxyEdge)
+            // Speculative, so an evicted frame stays in iCloud and simply has no fingerprint yet.
+            guard !CloudFile.isEvicted(url),
+                  let proxy = PerceptionProxy.measurementProxy(url, maxEdge: PhotoTriage.proxyEdge)
             else { return nil }
             return PhotoTriage.signature(of: proxy)
         }
@@ -3271,6 +3279,26 @@ final class AppState {
         if loadedURL != url { clearPerPhotoState() }
         imageURL = url
         guard await enterShoot(around: url) else { return }
+        // IN iCLOUD, NOT ON THIS MAC. An evicted original is a 40-second download before any of
+        // it can be read — the EXIF header below included — so it comes down FIRST, on its own
+        // lane, and says so. Left to happen inside the first read, it held whichever lane that
+        // read was on for the whole download, and the canvas said "Decoding…" throughout. See
+        // `CloudFile`.
+        if await Offload.run(.io, priority: .veryHigh, { CloudFile.isEvicted(url) }) {
+            statusMessage = "Downloading from iCloud…"
+            Self.lifecycle.notice("downloading \(url.lastPathComponent, privacy: .public) from iCloud")
+            do {
+                try await Offload.run(.fetch, priority: .veryHigh) { try CloudFile.materialise(url) }
+            } catch {
+                guard imageURL == url else { return }
+                statusMessage = "Couldn't read that photo — \(error.localizedDescription)"
+                loadFailure = "Couldn't read this photo. \(error.localizedDescription)"
+                isProcessing = false
+                return
+            }
+            guard imageURL == url else { return }
+            statusMessage = "Decoding…"
+        }
         // An EXIF header read, off the main actor and through the cache. It is one file open, which
         // is nothing locally and a round trip on a share — and it sat on the main thread in front of
         // the decode, so the window could not even paint the new filename until it came back.
@@ -5803,6 +5831,9 @@ final class AppState {
         if let cached = ResolvedRecipeStore.load(for: url, styleId: style.id, modelId: modelIdForCache) {
             return cached
         }
+        // An evicted original comes down on its own lane before it takes a decode slot, so a batch
+        // over an iCloud folder does not hold the photograph being edited behind each download.
+        try await Offload.run(.fetch, qos: .utility) { try CloudFile.materialise(url) }
         // Decode and proxy off the main actor. `AppState` is `@MainActor`, and doing this here
         // would block the thread drawing the window for every frame in the shoot.
         let decoded = try await Offload.run(.decode) { () -> DecodedForExport in
@@ -5892,8 +5923,10 @@ final class AppState {
                                            hdr: Bool = false) async -> BatchFrameResult {
         // Three lanes in sequence — decode, Vision, write — each awaited. The task-group slot this
         // runs in bounds how many frames are in flight; the lanes are what keep the work off the
-        // cooperative pool. See `Offload`.
-        guard let decoded = try? await Offload.run(.decode, { () throws -> ImageBox in
+        // cooperative pool. See `Offload`. An evicted original is downloaded first, on the fetch
+        // lane, for the same reason as in `adaptedRecipe`.
+        guard (try? await Offload.run(.fetch, qos: .utility, { try CloudFile.materialise(job.source) })) != nil,
+              let decoded = try? await Offload.run(.decode, { () throws -> ImageBox in
             ImageBox(image: try ImageDecoder.decode(url: job.source))
         }) else { return .failed }
         let needsMasks = job.recipe.masks?.isEmpty == false
@@ -6237,6 +6270,29 @@ struct PreviewImage: View {
 /// one's name, which is how somebody ends up editing a frame they are not looking at. So: say what
 /// is happening. The status line carries the detail; this is the acknowledgement that the click
 /// landed.
+/// The first open of a session, before anything has decoded: which photo, and what it is waiting on.
+struct FirstOpenState: View {
+    @Bindable var appState: AppState
+
+    var body: some View {
+        VStack(spacing: 14) {
+            ProgressView()
+                .controlSize(.large)
+                .tint(Theme.glow)
+            if let url = appState.imageURL {
+                Text(url.lastPathComponent)
+                    .font(Theme.mono(12))
+                    .foregroundColor(Theme.ink)
+            }
+            Text(appState.statusMessage)
+                .font(Theme.mono(11))
+                .foregroundColor(Theme.inkDim)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .combine)
+    }
+}
+
 struct CanvasLoadingState: View {
     @Bindable var preview: PreviewState
     let url: URL?
@@ -6374,6 +6430,13 @@ struct ContentView: View {
             // run — the photo is right there, so show it and let the looks arrive around it.
             if appState.proxyCI != nil {
                 workspace
+            } else if appState.isProcessing, appState.imageURL != nil {
+                // The first photo of a session, still on its way in. Usually two seconds of
+                // "Decoding…"; for a file macOS has evicted to iCloud, the length of a download —
+                // a minute and a half, measured — and the welcome screen for all of it read as if
+                // the open had been ignored. Its own view, so the status text changing does not
+                // re-evaluate this body (D23).
+                FirstOpenState(appState: appState)
             } else {
                 emptyState
             }
