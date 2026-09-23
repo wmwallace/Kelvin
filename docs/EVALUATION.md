@@ -642,6 +642,18 @@ frames change, every style is slightly worse with it (+0.007 to +0.015 ΔE), the
 and the sharp corpora do not change at all. Read D25 for why this instrument cannot settle the look
 question it was built for.
 
+## Does the canvas show what the export writes? (`nr-agreement`, 22 September 2026)
+
+`kelvin-cli nr-agreement --in-dir <dir>` renders a candidate on the 1200 px canvas proxy and at full
+resolution shrunk to 1200 px, and reports the ΔE between them. No reference edit is involved, so it
+cannot favour a look; it measures only whether one recipe agrees with itself across resolutions.
+
+On the 11 high-ISO frames in the shoots (ISO 3200–4000, NR 18–23): mean **0.685**, with one outlier
+(`_DSC3959`, 3.48) worth a look of its own. Scaling `CINoiseReduction`'s level with resolution — the
+fix the parked fine render names — made agreement WORSE on all eleven (mean 0.729), because the filter
+also sharpens edges (`inputSharpness`), and taking it off the canvas took that away too. Not shipped.
+The median pass (NR ≥ 40) never fires at these ISOs, so its resolution-dependence is untested.
+
 ## A read that changes is not an edit that changes
 
 ⚠️ **Before blaming a prompt change for a quality complaint, measure whether it reached the
