@@ -112,6 +112,72 @@ public enum ShippedCandidates {
         }
     }
 
+    /// The render stage's shared state, behind one lock: which style is next, and what each gave.
+    private final class RenderWork: @unchecked Sendable {
+        let recipes: [Recipe]
+        let measureOn: CIImage
+        let bitmaps: [String: CIImage]
+        private let isCurrent: @Sendable () -> Bool
+        private let lock = NSLock()
+        private var next = 0
+        private var measured: [(preview: CIImage, stats: ImageStatistics?)?]
+
+        init(recipes: [Recipe], measureOn: CIImage, bitmaps: [String: CIImage],
+             isCurrent: @escaping @Sendable () -> Bool) {
+            self.recipes = recipes; self.measureOn = measureOn; self.bitmaps = bitmaps
+            self.isCurrent = isCurrent
+            measured = Array(repeating: nil, count: recipes.count)
+        }
+
+        func claim() -> Int? {
+            lock.withLock {
+                guard next < recipes.count, isCurrent() else { return nil }
+                defer { next += 1 }
+                return next
+            }
+        }
+
+        func store(_ i: Int, preview: CIImage, stats: ImageStatistics?) {
+            lock.withLock { measured[i] = (preview, stats) }
+        }
+
+        var results: [(preview: CIImage, stats: ImageStatistics?)?] { lock.withLock { measured } }
+    }
+
+    /// Measurements a caller has already taken of the frame, so `compose` does not take them again.
+    /// The canvas measures the proxy once for the strip, the masks and the engine; handing those
+    /// in is what lets it call `compose` rather than keep a copy of it.
+    public struct Premeasured: @unchecked Sendable {
+        public let measuredOn: CIImage
+        public let statistics: ImageStatistics
+        public let masks: LocalMasks.Measured
+        public let focus: FocusMeasure.Reading?
+        public init(measuredOn: CIImage, statistics: ImageStatistics, masks: LocalMasks.Measured,
+                    focus: FocusMeasure.Reading?) {
+            self.measuredOn = measuredOn; self.statistics = statistics
+            self.masks = masks; self.focus = focus
+        }
+    }
+
+    /// How the candidate stage runs — never what it decides.
+    public struct Options: @unchecked Sendable {
+        /// How many styles render at once.
+        public var width: Int
+        /// Drop a style whose render cannot be measured instead of throwing.
+        public var skipUnmeasurable: Bool
+        /// Checked between renders; false stops the stage with `CancellationError` — a photograph
+        /// the user has already left should not keep the render lane busy.
+        public var isCurrent: @Sendable () -> Bool
+
+        public init(width: Int = 1, skipUnmeasurable: Bool = false,
+                    isCurrent: @escaping @Sendable () -> Bool = { true }) {
+            self.width = width; self.skipUnmeasurable = skipUnmeasurable; self.isCurrent = isCurrent
+        }
+
+        /// The harness: one at a time, in order, and loud about anything it cannot measure.
+        public static let instrument = Options()
+    }
+
     /// Generate, render, score and curate — the app's candidate stage, headless.
     ///
     /// - Parameters:
@@ -137,11 +203,14 @@ public enum ShippedCandidates {
         count: Int = 4,
         perceptionHash: String? = nil,
         generatedAt: String? = nil,
-        opening: OpeningRule.Configuration? = nil
+        opening: OpeningRule.Configuration? = nil,
+        premeasured: Premeasured? = nil,
+        options: Options = .instrument
     ) throws -> Composition {
-        let measureOn = PerceptionProxy.downsample(image)
-        let stats = try ImageStatistics.compute(measureOn)
-        let masks = LocalMasks.measure(in: measureOn)
+        let measureOn = premeasured?.measuredOn ?? PerceptionProxy.downsample(image)
+        let stats = try premeasured?.statistics ?? ImageStatistics.compute(measureOn)
+        let masks = premeasured?.masks ?? LocalMasks.measure(in: measureOn)
+        let focus = premeasured.map { $0.focus } ?? FocusMeasure.engineReading(for: measureOn)
 
         let recipes = RecipeEngine.candidates(
             perception: perception,
@@ -152,7 +221,7 @@ public enum ShippedCandidates {
             generatedAt: generatedAt,
             // Nil unless KELVIN_CLARITY_FOCUS is on; measured on the same proxy as `stats`, like
             // every other path that generates candidates — see `FocusMeasure.engineReading`.
-            focus: FocusMeasure.engineReading(for: measureOn)
+            focus: focus
         )
 
         // ONE face detection for the whole set, not one per candidate — the app's optimisation and
@@ -163,21 +232,39 @@ public enum ShippedCandidates {
         // makes the comparison fairer than a detection that shifted between candidates.
         let faces = FaceSkin.detect(in: measureOn)
 
+        // Render and measure every style — `options.width` at a time. The renders are
+        // independent and each is a readback, so the canvas does two at once (its render lane's
+        // width); the harness does one, in order. Either way the scores are taken afterwards,
+        // serially, against the one face set above, so the concurrency cannot change an answer.
+        let work = RenderWork(recipes: recipes, measureOn: measureOn, bitmaps: masks.bitmaps,
+                              isCurrent: options.isCurrent)
+        DispatchQueue.concurrentPerform(iterations: max(1, min(options.width, recipes.count))) { _ in
+            while let i = work.claim() {
+                // WITH the mask bitmaps. Without them the local half of the recipe is silently
+                // discarded and the curator scores a photograph that will never be shown.
+                let preview = Renderer.render(work.measureOn, with: work.recipes[i],
+                                              maskBitmaps: work.bitmaps)
+                work.store(i, preview: preview, stats: try? ImageStatistics.compute(preview))
+            }
+        }
+        let measured = work.results
+        guard options.isCurrent() else { throw CancellationError() }
+
         var all: [Candidate] = []
-        for recipe in recipes {
-            // WITH the mask bitmaps. Without them the local half of the recipe is silently
-            // discarded and the curator scores a photograph that will never be shown.
-            let preview = Renderer.render(measureOn, with: recipe, maskBitmaps: masks.bitmaps)
-            // Throws rather than skipping the candidate. The app skips one it cannot measure — it
-            // would rather show seven looks than fail to open a photograph — but this composition
-            // feeds an instrument, and a set that quietly became seven styles would report a
-            // per-style row missing and a curated set chosen from a smaller pool, with nothing
-            // saying so. A loud failure beats a quiet omission in a measurement.
+        for (recipe, result) in zip(recipes, measured) {
+            guard let result, let renderedStats = result.stats else {
+                // An instrument throws rather than skipping: a set that quietly became seven
+                // styles would report a per-style row missing and a curated set chosen from a
+                // smaller pool, with nothing saying so. The app would rather show seven looks than
+                // fail to open a photograph, and asks for that with `skipUnmeasurable`.
+                if options.skipUnmeasurable { continue }
+                throw ImageWriter.Error.rasterFailed
+            }
             let score = AestheticEvaluator.score(
-                stats: try ImageStatistics.compute(preview),
-                face: FaceSkin.meter(in: preview, faces: faces)
+                stats: renderedStats,
+                face: FaceSkin.meter(in: result.preview, faces: faces)
             )
-            all.append(Candidate(recipe: recipe, preview: preview, score: score))
+            all.append(Candidate(recipe: recipe, preview: result.preview, score: score))
         }
 
         // THE FRAME MAY CHOOSE ITS OWN OPENER — but only when nothing outranks it. A requested
