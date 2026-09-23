@@ -116,6 +116,33 @@ public struct CaptureInfo: Sendable, Equatable {
 
 public enum CaptureInfoReader {
 
+    /// The one formatter every EXIF timestamp is parsed with.
+    ///
+    /// **Fixed locale and calendar, because the string is a file format, not a sentence.** A bare
+    /// `DateFormatter()` inherits the user's region, and "yyyy" then means the year in THEIR
+    /// calendar: under a Thai region (Buddhist calendar) "2026:08:02" parsed as Buddhist year 2026,
+    /// which is Gregorian 1483, so every frame sorted five centuries into the past and the browse
+    /// groups by day and by gap came apart. A Japanese-calendar region misreads the year too, and
+    /// a 12-hour region preference can bend "HH". `en_US_POSIX` is Apple's documented answer for
+    /// fixed-format strings, and the Gregorian calendar is what EXIF means by a date.
+    ///
+    /// The time zone is left as the system's: EXIF carries none, the camera wrote local time, and
+    /// local is what a photographer means by "when I took it".
+    ///
+    /// One shared instance rather than one per read: this runs for every file a folder listing
+    /// touches, and a `DateFormatter` is expensive to build. It is safe to share — Apple documents
+    /// `DateFormatter` as thread-safe on 64-bit macOS — and nothing mutates it after this closure.
+    /// `nonisolated(unsafe)` because the SDKs disagree about whether `DateFormatter` is `Sendable`:
+    /// the local toolchain says yes and warns that the marker is redundant, an older one rejects the
+    /// constant without it, and CI has been the older one before.
+    nonisolated(unsafe) static let exifDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
+        f.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        return f
+    }()
+
     public static func read(url: URL) -> CaptureInfo {
         var info = CaptureInfo()
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
@@ -157,9 +184,7 @@ public enum CaptureInfoReader {
         // EXIF stores the capture time in the camera's local time with no zone, so it's parsed as
         // local — which is what the photographer means by "when I took it".
         if let raw = exif[kCGImagePropertyExifDateTimeOriginal] as? String {
-            let f = DateFormatter()
-            f.dateFormat = "yyyy:MM:dd HH:mm:ss"
-            info.captured = f.date(from: raw)
+            info.captured = exifDateFormatter.date(from: raw)
         }
 
         // GPS is read from the same property dictionary as everything else above — still a header
