@@ -158,8 +158,12 @@ enum Pipeline {
             let out = FileManager.default.temporaryDirectory
                 .appendingPathComponent(Branding.exportStem + "-" + UUID().uuidString.prefix(8))
                 .appendingPathExtension("heic")
-            try ImageWriter.write(ShippedCandidates.deliver(recipe, on: full), to: out,
-                                  format: .heic(quality: 0.92), metadata: .asShot)
+            // With the RAW's own headroom as the HEIC's gain map when there is any (D28) — the
+            // Photos app shows it as HDR, and every other viewer sees the edit exactly as chosen.
+            let sdr = ShippedCandidates.deliver(recipe, on: full)
+            try ImageWriter.write(sdr, to: out, format: .heic(quality: 0.92), metadata: .asShot,
+                                  colorSpace: .displayP3,
+                                  hdr: HDRDelivery.companion(forEdit: sdr, from: source))
             return out
         }
     }

@@ -2223,6 +2223,11 @@ final class AppState {
     var exportColorSpaceId = UserDefaults.standard.string(forKey: "export.colorSpace") ?? "sRGB" {
         didSet { UserDefaults.standard.set(exportColorSpaceId, forKey: "export.colorSpace") }
     }
+    /// HDR highlights in HEIC exports of RAW files (D28). On by default: the owner judged the
+    /// samples on an HDR screen and chose it, and a viewer without HDR sees the edit unchanged.
+    var exportHDR = UserDefaults.standard.object(forKey: "export.hdr") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(exportHDR, forKey: "export.hdr") }
+    }
     var exportNamingId = UserDefaults.standard.string(forKey: "export.naming") ?? "descriptive" {
         didSet { UserDefaults.standard.set(exportNamingId, forKey: "export.naming") }
     }
@@ -5395,7 +5400,8 @@ final class AppState {
         }.map(\.reference)
         let input = ExportInput(fullRes: fullRes, recipe: recipe, url: url,
                                 metadata: metadata, format: exportFormat,
-                                size: exportSize, colorSpace: exportColorSpace)
+                                size: exportSize, colorSpace: exportColorSpace,
+                                hdrSource: exportHDR && exportFormatId == "heic" ? loadedURL : nil)
         // Two lanes: the Vision passes on theirs, the write on the export lane. Neither is on a
         // cooperative thread while it works — see `Offload`.
         let measured = await Offload.run(.vision) { () -> ExportMasks in
@@ -5405,10 +5411,12 @@ final class AppState {
         }
         do {
             try await Offload.run(.export) {
+                let rendered = Renderer.render(input.fullRes, with: input.recipe, maskBitmaps: measured.bitmaps)
                 try ImageWriter.write(
-                    Renderer.render(input.fullRes, with: input.recipe, maskBitmaps: measured.bitmaps),
+                    rendered,
                     to: input.url, format: input.format, metadata: input.metadata,
-                    size: input.size, colorSpace: input.colorSpace)
+                    size: input.size, colorSpace: input.colorSpace,
+                    hdr: input.hdrSource.flatMap { HDRDelivery.companion(forEdit: rendered, from: $0) })
             }
             return .success(measured.lost)
         } catch { return .failure(error) }
@@ -5666,6 +5674,7 @@ final class AppState {
         // cheaper is where the time is (`masks (full-res)` is 1.8s of a warm frame and `write`
         // forces the whole graph).
         let format = exportFormat, metadata = exportMetadata
+        let hdr = exportHDR && exportFormatId == "heic"
         let lanes = 1
         var completed = 0
         // A shorter window than the scan's: frames here are ten seconds each, not tens of
@@ -5681,7 +5690,7 @@ final class AppState {
                 next += 1
                 group.addTask {
                     let result = await Self.renderAndWrite(job, format: format, metadata: metadata,
-                                                           size: size, colorSpace: space)
+                                                           size: size, colorSpace: space, hdr: hdr)
                     return (result, job.wasAdapted)
                 }
             }
@@ -5879,7 +5888,8 @@ final class AppState {
                                            format: ImageWriter.Format,
                                            metadata: ImageWriter.MetadataPolicy,
                                            size: ImageWriter.Size,
-                                           colorSpace: ImageWriter.ColorSpace) async -> BatchFrameResult {
+                                           colorSpace: ImageWriter.ColorSpace,
+                                           hdr: Bool = false) async -> BatchFrameResult {
         // Three lanes in sequence — decode, Vision, write — each awaited. The task-group slot this
         // runs in bounds how many frames are in flight; the lanes are what keep the work off the
         // cooperative pool. See `Offload`.
@@ -5900,7 +5910,8 @@ final class AppState {
             try await Offload.run(.export) {
                 let rendered = Renderer.render(decoded.image, with: job.recipe, maskBitmaps: measured.bitmaps)
                 try ImageWriter.write(rendered, to: job.out, format: format, metadata: metadata,
-                                      size: size, colorSpace: colorSpace)
+                                      size: size, colorSpace: colorSpace,
+                                      hdr: hdr ? HDRDelivery.companion(forEdit: rendered, from: job.source) : nil)
             }
             return measured.lost.isEmpty ? .written : .writtenMissingSubjects
         } catch { return .failed }
@@ -5936,6 +5947,9 @@ final class AppState {
         let format: ImageWriter.Format
         let size: ImageWriter.Size
         let colorSpace: ImageWriter.ColorSpace
+        /// The photograph the render came from, when HDR highlights are wanted (D28): its RAW
+        /// headroom becomes the HEIC's gain map. Nil for an SDR export.
+        let hdrSource: URL?
     }
 
 

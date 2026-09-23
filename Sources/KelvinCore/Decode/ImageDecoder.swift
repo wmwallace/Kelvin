@@ -9,7 +9,7 @@ import ImageIO
 /// pipeline). Everything else is decoded by Core Image directly. In both cases the result
 /// is a scene-linear `CIImage`; downstream stages never re-decode.
 public enum ImageDecoder {
-    public enum Error: Swift.Error, CustomStringConvertible {
+    public enum Error: Swift.Error, CustomStringConvertible, LocalizedError {
         case unreadable(URL)
         case rawDecodeFailed(URL)
 
@@ -17,6 +17,18 @@ public enum ImageDecoder {
             switch self {
             case .unreadable(let url): return "Could not read image at \(url.path)"
             case .rawDecodeFailed(let url): return "RAW decode failed for \(url.path)"
+            }
+        }
+
+        /// What a person is shown. Without this, a failed open read "The operation couldn't be
+        /// completed. (KelvinCore.ImageDecoder.Error error 1.)" — found running the iPhone app on
+        /// the Duo simulator. Names the file, says what went wrong, not where in the code.
+        public var errorDescription: String? {
+            switch self {
+            case .unreadable(let url):
+                return "\(url.lastPathComponent) couldn't be opened. It may be missing, or not a photo Kelvin can read."
+            case .rawDecodeFailed(let url):
+                return "\(url.lastPathComponent) is a RAW file this Mac's camera support can't decode."
             }
         }
     }
