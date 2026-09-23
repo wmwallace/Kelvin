@@ -3540,157 +3540,46 @@ final class AppState {
             self.focus[url] = measurement.focus
 
             statusMessage = "Composing candidates…"
-            // Clean candidates straight from the engine — no cross-image "profile". The way to
-            // reuse an edit is to pick/tune one photo, then Batch apply that exact look.
-            let recipes = RecipeEngine.candidates(perception: perceptionRead, statistics: stats,
-                                                  masks: self.localMeasure,
-                                                  iso: opened.iso,
-                                                  focus: measurement.engineFocus)
-
-            // Render every style, score each on the craft floors, then CURATE. The engine offers
-            // eight looks and several will be wrong for any given photo — Dramatic silhouettes a
-            // backlit sunset, Vivid pushes skin past plausible. Showing those beside the good ones
-            // makes the photographer do the culling and implies Kelvin rates them equally. It
-            // doesn't, and the evaluator already knows which is which.
-            // Rendering eight candidates and scoring each — every score runs Vision face detection
-            // and a full statistics pass — is far too much to do on the main thread: it froze the
-            // window for the whole of it. Hand the batch to a background task and come back with
-            // the results.
-            let built = await Task.detached(priority: .userInitiated) { () -> CandidateBatch in
-                // TWO PHASES, and the split is a crash-avoidance decision rather than a tidy one.
-                //
-                // This was one serial loop over eight styles, measured at 378 ms in release and
-                // 515 ms in debug — the whole of "Composing candidates…", and the wait people
-                // describe as the app being slow. The eight jobs are independent, so the obvious
-                // move is to run them together.
-                //
-                // What stops that being one `withTaskGroup` around the whole body: scoring calls
-                // `AestheticEvaluator.score(rendered:)`, which calls `FaceSkin.read`, which runs
-                // **Vision**. Running Vision requests concurrently is exactly what crashed this app
-                // before — EXC_BAD_ACCESS in `objc_release` inside Vision's own request queue,
-                // intermittent at 2 crashes in 6 runs, documented at the measurement site in
-                // `loadPhoto`. A quarter of a second is not worth a segfault, and it was not worth
-                // one then either.
-                //
-                // So: phase one is Core Image and statistics, which are thread-safe and are the
-                // expensive half — run concurrently. Phase two is the Vision read, kept strictly
-                // serial. Every candidate is still rendered and scored on the same 768 px
-                // measurement image with the same inputs, so no number here changes; only the
-                // wall-clock does.
-                struct Prepared: @unchecked Sendable {
-                    let index: Int
-                    let recipe: Recipe
-                    let rendered: CIImage
-                    let cg: CGImage
-                    let stats: ImageStatistics
-                }
-
-                // The renderer's INPUTS, boxed, for the same reason `Prepared` above boxes its
-                // outputs: `CIImage` is `Sendable` on the macOS 27 SDK and is NOT on the one CI
-                // builds against (Xcode 16.4 / macOS 15.5), so capturing `measureOn` and
-                // `proxyMasks` directly in the task-group closure below compiles on this machine and
-                // fails for everybody else. Boxing states the promise once, in the place where the
-                // reasoning for it belongs.
-                //
-                // The promise is the same one `Prepared` already makes and it is sound: these two
-                // values are read-only for the whole of the group's life, `Renderer.render` does not
-                // mutate what it is handed, and Core Image is documented thread-safe for concurrent
-                // reads of an immutable `CIImage`.
-                struct Inputs: @unchecked Sendable {
-                    let measureOn: CIImage
-                    let masks: [String: CIImage]
-                }
-                let inputs = Inputs(measureOn: measureOn, masks: proxyMasks)
-
-                let prepared: [Prepared] = await withTaskGroup(of: Prepared?.self) { group in
-                    for (index, recipe) in recipes.enumerated() {
-                        group.addTask {
-                            // ON THE RENDER LANE, not on this pool thread. Eight of these used to
-                            // block eight cooperative threads on one context's lock — see the note
-                            // at the top of `Offload` for what that cost. The group still runs
-                            // them together; the lane decides how many render at once.
-                            await Offload.run(.render) { () -> Prepared? in
-                                guard Self.latestRequest.isCurrent(url) else { return nil }
-                                // Rendered on the 768 px measurement image, matching
-                                // `adaptedRecipe` exactly. The previews are picker thumbnails,
-                                // so 768 is ample.
-                                let renderedCI = Renderer.render(inputs.measureOn, with: recipe,
-                                                                 maskBitmaps: inputs.masks)
-                                guard let cg = Self.sharedContext.createCGImage(
-                                          renderedCI, from: renderedCI.extent),
-                                      let stats = try? ImageStatistics.compute(renderedCI)
-                                else { return nil }
-                                return Prepared(index: index, recipe: recipe,
-                                                rendered: renderedCI, cg: cg, stats: stats)
-                            }
-                        }
-                    }
-                    var out: [Prepared] = []
-                    for await item in group { if let item { out.append(item) } }
-                    // A task group completes in whatever order the work finishes. The curator is
-                    // fed a list and ties on score are broken by position, so an order that
-                    // depends on which GPU job landed first would make the candidate set
-                    // non-deterministic between runs on the same photograph. Sorted back into
-                    // engine order.
-                    return out.sorted { $0.index < $1.index }
-                }
-
-                // The Vision half, on its serial lane.
-                return await Offload.run(.vision) { () -> CandidateBatch in
-                guard Self.latestRequest.isCurrent(url) else {
-                    return CandidateBatch(scored: [], previews: [:])
-                }
-
-                // ONE face detection for the whole set, not one per candidate.
-                //
-                // Eight candidates are eight gradings of ONE photograph, so detecting faces in each
-                // was finding the same faces eight times — measured as roughly half the entire
-                // candidate stage. `FaceSkin.detect` runs Vision once here; `meter` then reads the
-                // skin inside those boxes per candidate, which is a 32×32 sample and touches no
-                // Vision at all.
-                //
-                // Metering still happens per candidate, because that is the part that must differ:
-                // skin plausibility is exactly the question "what did THIS grade do to their skin".
-                // Holding the face set constant across the eight also makes the comparison a fairer
-                // one than it was — a detection that shifted between candidates would have them
-                // answering slightly different questions.
-                let faces = FaceSkin.detect(in: inputs.measureOn)
-
-                var scored: [CandidateCurator.Scored] = []
-                var previews: [String: NSImage] = [:]
-                for item in prepared {
-                    let face = FaceSkin.meter(in: item.rendered, faces: faces)
-                    let score = AestheticEvaluator.score(stats: item.stats, face: face)
-                    let key = item.recipe.id ?? UUID().uuidString
-                    previews[key] = NSImage(cgImage: item.cg, size: .zero)
-                    scored.append(.init(recipe: item.recipe, score: score))
-                }
-                return CandidateBatch(scored: scored, previews: previews)
-                }
-            }.value
-            // Building candidates is now asynchronous, so a second photo can be opened while the
-            // first is still working. Without this guard those results would land on whichever
-            // photo happens to be showing — thumbnails from one frame beside the preview of
-            // another. If we've moved on, drop them.
-            guard imageURL == url else { return }
-            Self.lifecycle.notice("candidates for \(url.lastPathComponent, privacy: .public) at \(Int(Date().timeIntervalSince(openedAt) * 1000)) ms — \(built.scored.count) scored")
-            let scored = built.scored
-            let previews = built.previews
-            // THE SHOOT'S LOOK DECIDES WHICH CANDIDATE OPENS, when the shoot is in one — and the
-            // rule for that, including what happens when the curator drops the style, lives in
-            // `CandidateCurator.resolve` so the export path resolves it the same way. It used to
-            // live here as a comment, and the export path did not honour it.
+            // THE HARNESS'S OWN COMPOSITION. This stage used to be a hand copy of
+            // `ShippedCandidates.compose` — generate, render the eight styles two at a time, one
+            // face pass, score, curate — kept in step by reading; the audit found four such copies,
+            // already drifting. Now the canvas hands `compose` what it has already measured (the
+            // proxy, its statistics, the masks, the focus read) and asks for the canvas's way of
+            // running it: two renders at once, a style that cannot be measured skipped rather than
+            // fatal, and a stop the moment this photograph stops being the one on screen. Options
+            // change how the stage runs and never what it decides (`ComposeOptionsTests`), so what
+            // you are offered here is, by construction, what the corpus measures.
             let wanted = effectiveStyle(for: url)
-            // THE FRAME MAY CHOOSE ITS OWN OPENER — `OpeningRule`, D18's measured replacement for
-            // the deleted learner, consulted only when no shoot look has a claim (a hand edit is
-            // applied below and outranks both). Routed through `resolve` as a request so a
-            // suggestion the curator dropped falls back to Natural exactly as before the rule
-            // existed. Same seam as `ShippedCandidates.compose`, so the eval harness measures
-            // exactly what this path shows. Inert unless KELVIN_OPENER is set — see the rule.
-            let suggested = wanted == nil ? OpeningRule.suggestion(for: stats) : nil
-            let resolution = CandidateCurator.resolve(from: scored,
-                                                      requested: wanted ?? suggested, count: 4)
-            let curated = resolution.curated
+            let premeasured = ShippedCandidates.Premeasured(
+                measuredOn: measureOn, statistics: stats, masks: measurement.masks,
+                focus: measurement.engineFocus)
+            let perceptionForCompose = perceptionRead
+            let isoForCompose = opened.iso
+            let composeOptions = ShippedCandidates.Options(
+                width: 2, skipUnmeasurable: true, isCurrent: { Self.latestRequest.isCurrent(url) })
+            let built = try? await Offload.run(.render, qos: .userInitiated) { () throws -> CanvasComposition in
+                let c = try ShippedCandidates.compose(
+                    for: premeasured.measuredOn, perception: perceptionForCompose, iso: isoForCompose,
+                    requestedStyleID: wanted, premeasured: premeasured, options: composeOptions)
+                // Thumbnails for the styles the picker will show, rendered on this lane.
+                var previews: [String: CGImage] = [:]
+                for candidate in c.all where c.curatedStyleIDs.contains(candidate.styleID) {
+                    previews[candidate.styleID] = Self.sharedContext.createCGImage(
+                        candidate.preview, from: candidate.preview.extent)
+                }
+                return CanvasComposition(composition: c, previews: previews)
+            }
+            guard imageURL == url else { return }
+            guard let built else {
+                statusMessage = "Couldn't compose looks for this photo"
+                isProcessing = false
+                return
+            }
+            let composition = built.composition
+            Self.lifecycle.notice("candidates for \(url.lastPathComponent, privacy: .public) at \(Int(Date().timeIntervalSince(openedAt) * 1000)) ms — \(composition.all.count) scored")
+            let previews = built.previews.mapValues { NSImage(cgImage: $0, size: .zero) }
+            let recipes = composition.all.map(\.recipe)
+            let curated = composition.curated
             let naturalRecipe = recipes.first { $0.id == CandidateStyle.natural.id }
                 ?? curated.first?.recipe ?? .neutral
             self.candidates = curated.compactMap { item in
@@ -3709,13 +3598,12 @@ final class AppState {
             // its own masks — which is exactly what `candidates` already are, one per style, built
             // from THIS photograph. So honouring the shoot look is choosing among them, not
             // replaying somebody else's numbers.
-            let resolved = models.first { $0.id == resolution.chosen?.recipe.id }
-            let shootStyle = (wanted != nil && resolution.honouredRequest) ? resolved : nil
+            let resolved = models.first { $0.id == composition.chosen?.recipe.id }
+            let shootStyle = composition.honouredRequest ? resolved : nil
             // The measurement's choice, only when it was actually taken: nothing else had a claim,
             // the rule fired, and its style survived curation. Kept apart from `shootStyle`
             // because the two owe the user different sentences.
-            let ruleStyle = (wanted == nil && suggested != nil && resolution.honouredRequest)
-                ? resolved : nil
+            let ruleStyle = composition.openedByMeasurement ? resolved : nil
             if let shootStyle { selectCandidate(id: shootStyle.id) }
             else if let ruleStyle { selectCandidate(id: ruleStyle.id) }
             else if let first = models.first { selectCandidate(id: first.id) }
@@ -6140,9 +6028,10 @@ final class AppState {
 
     /// Results of the off-main candidate build. CIContext/CGImage are thread-safe; NSImage built
     /// from a CGImage is immutable here, so carrying them across is sound.
-    private struct CandidateBatch: @unchecked Sendable {
-        let scored: [CandidateCurator.Scored]
-        let previews: [String: NSImage]
+    /// The candidate stage's result crossing back from the render lane.
+    private struct CanvasComposition: @unchecked Sendable {
+        let composition: ShippedCandidates.Composition
+        let previews: [String: CGImage]
     }
 
     /// Everything the decode stage produces. Bundled so the whole of it can be computed on a
