@@ -11,7 +11,7 @@ Everything runs on your machine — your photographs never leave it.
 
 [![Download for macOS](https://img.shields.io/github/v/release/wmwallace/Kelvin?label=download%20for%20macOS&color=e8833a&style=for-the-badge)](https://github.com/wmwallace/Kelvin/releases/latest)
 
-<sub>Signed and notarised · macOS 14+ · Apple silicon · the model ships inside, so it is a big download and no small ones later</sub>
+<sub>Signed and notarised · macOS 14+ · Apple silicon · about 5 MB</sub>
 
 [![CI](https://github.com/wmwallace/Kelvin/actions/workflows/ci.yml/badge.svg)](https://github.com/wmwallace/Kelvin/actions/workflows/ci.yml)
 [![Licence: AGPL-3.0-only](https://img.shields.io/badge/licence-AGPL--3.0--only-4a7bab)](LICENSE)
@@ -96,10 +96,9 @@ under burst or near-duplicate it marks the sharpest frame of each run.</sub></p>
 notarised disk image. Drag it to Applications and open it; there is no right-click-Open dance and no
 Gatekeeper warning.
 
-It is about 1.5 GB, and that is the whole point: the perception model travels inside the app, so
-nothing is fetched on first run and no photograph you open is ever sent anywhere to be read. Updates after the
-first one are small — a few megabytes — because releases ship a binary patch rather than the model
-again.
+It is about 5 MB. Scenes are read by Apple's Vision framework, which is part of macOS, so there is no
+model to download — not on first run, not ever — and no photograph you open is sent anywhere to be
+read. (Until 0.9 the app carried a 1.7 GB model inside it; see D27 for why it no longer does.)
 
 The link above always resolves to the newest release. Nothing on this page names a version, so
 nothing here can quietly go stale the way a pinned download link does.

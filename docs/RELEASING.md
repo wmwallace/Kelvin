@@ -20,7 +20,6 @@ ever, and losing the certificate's private key means revoking and reissuing.
 ## Building a release
 
 ```sh
-make stage-model                       # copies the weights + their licence into Vendor/
 KELVIN_SIGN_IDENTITY="Developer ID Application: … (TEAMID)" \
 KELVIN_NOTARY_PROFILE=kelvin-notary \
   scripts/package-app.sh
@@ -38,8 +37,9 @@ an ad-hoc build; it will run on your Mac and nowhere else.
 2. **Assembles the bundle.** Resource bundles go in `Contents/Resources`, not `Contents/MacOS` —
    MLX looks for `default.metallib` inside each bundle's `resourceURL`, and getting this wrong
    produces an app that launches fine and then dies on the first photo.
-3. **Bundles the weights** from `Vendor/PerceptionModel`, and refuses to make a *signed* build
-   without them. A release must not depend on a download.
+3. **Ships no weights** (D27, from 0.9). Scenes are read by Apple's Vision framework; the script
+   refuses a bundle that contains `PerceptionModel/`, which would mean the retired model path had
+   been re-linked. (Until 0.8.2 this step bundled 1.6 GB of weights.)
 4. **Signs inside out** — nested bundles first, the app last, with the hardened runtime and a secure
    timestamp. Never `--deep`, which Apple documents as unsuitable for signing.
 5. **Notarises the app, then staples it.** Stapling matters: a stapled app validates with no network,
@@ -170,8 +170,8 @@ Getting this wrong costs bandwidth, not installs.
 In order, because several of these are irreversible:
 
 1. `make test` green, and the version decided (see the version scheme above).
-2. `make stage-model`, then `scripts/package-app.sh` with `KELVIN_SIGN_IDENTITY`,
-   `KELVIN_NOTARY_PROFILE` and `KELVIN_VERSION` set. Two notarisation waits, ~35 min total.
+2. `scripts/package-app.sh` with `KELVIN_SIGN_IDENTITY`, `KELVIN_NOTARY_PROFILE` and
+   `KELVIN_VERSION` set. Two notarisation waits.
 3. Run the first-run checks below on the DMG, not just the app.
 4. `scripts/make-delta.sh` against every still-installed predecessor.
 5. Tag `vX.Y.Z` on the exact commit that was built, and push it.
@@ -185,9 +185,9 @@ In order, because several of these are irreversible:
 
 ## Sizes
 
-The app is about 1.7 GB with the weights inside; the DMG about 1.4 GB. **GitHub caps a release asset
-at 2 GB.** The packaging script warns if the bundle crosses it. A larger perception model would not
-fit, and would force a split-asset design.
+From 0.9 the app is about 13 MB and the DMG about 5 MB (D27). Until 0.8.2 they were 1.7 GB and
+1.4 GB with the model inside, which is why the delta section below speaks of 1.4 GB downloads: a
+delta from 0.8.x to 0.9 mostly deletes the weights. **GitHub caps a release asset at 2 GB.**
 
 ## Before the FIRST published release
 
