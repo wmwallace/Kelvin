@@ -145,7 +145,8 @@ enum TestSupport {
     /// Encoded with ImageIO so the readers are tested against a real file. Asserting against a
     /// property dictionary made up in the test would only prove the reader agrees with itself,
     /// where what matters is that it agrees with what a camera writes.
-    static func writeJPEG(to url: URL, captured: Date? = nil, gps: [CFString: Any]? = nil) throws {
+    static func writeJPEG(to url: URL, captured: Date? = nil, capturedRaw: String? = nil,
+                          gps: [CFString: Any]? = nil) throws {
         let context = CGContext(data: nil, width: 8, height: 8, bitsPerComponent: 8,
                                 bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
                                 bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
@@ -158,13 +159,13 @@ enum TestSupport {
 
         var properties: [CFString: Any] = [:]
         if let gps { properties[kCGImagePropertyGPSDictionary] = gps }
-        if let captured {
+        if let raw = capturedRaw ?? captured.map(CaptureInfoReader.exifDateFormatter.string(from:)) {
             // EXIF has no time zone: the camera writes local time, and the reader parses it as
-            // local. The fixture has to be written the same way or the round trip shifts.
-            let formatter = DateFormatter()
-            formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+            // local. The fixture has to be written the same way or the round trip shifts — and in
+            // the same fixed locale and calendar, or a Thai-region test machine would write a
+            // Buddhist-era year into the fixture.
             properties[kCGImagePropertyExifDictionary] = [
-                kCGImagePropertyExifDateTimeOriginal: formatter.string(from: captured)
+                kCGImagePropertyExifDateTimeOriginal: raw
             ]
         }
         CGImageDestinationAddImage(destination, image, properties as CFDictionary)

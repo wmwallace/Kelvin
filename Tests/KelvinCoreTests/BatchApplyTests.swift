@@ -449,6 +449,51 @@ final class BatchDestinationTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: outDir.path).count, 2)
     }
 
+    /// A RAW+JPEG pair shares a stem — `DSC0001.ARW` and `DSC0001.JPG` — and both map to one output
+    /// name. Under `uniqueSuffix` the second found the first's file and suffixed, but under
+    /// `overwrite` the second REPLACED the first frame's render, and under `skip` it was reported as
+    /// "already there" when what was there was this batch's own output. Both policies describe
+    /// what to do with a file that existed before the batch, not with the batch's own work.
+    func testASharedStemInOneBatchWritesBothUnderEveryPolicy() throws {
+        for policy in BatchApply.Destination.OnCollision.allCases {
+            let inDir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: inDir) }
+            let outDir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: outDir) }
+            try writePhoto(inDir.appendingPathComponent("DSC0001.png"))
+            try ImageWriter.write(TestSupport.makeSolidImage(r: 200, g: 40, b: 40, width: 16, height: 16),
+                                  to: inDir.appendingPathComponent("DSC0001.jpg"), format: .jpeg(quality: 0.9))
+
+            let outcome = try BatchApply.run(
+                inputDir: inDir, recipe: .neutral,
+                destination: .init(directory: outDir, onCollision: policy, format: .png))
+
+            XCTAssertEqual(outcome.succeeded, 2, "\(policy): both frames of the pair must be written")
+            XCTAssertEqual(Set(outcome.written).count, 2, "\(policy): to two distinct files")
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: outDir.path).count, 2,
+                           "\(policy): and both must still be on disk")
+        }
+    }
+
+    /// The disambiguation is only for the batch's own names: a file that was in the destination
+    /// BEFORE the batch still gets the policy the user chose.
+    func testAPreexistingFileStillGetsThePolicyWithinAPairedBatch() throws {
+        let inDir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: inDir) }
+        let outDir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: outDir) }
+        let png = inDir.appendingPathComponent("DSC0001.png")
+        try writePhoto(png)
+        try writePhoto(inDir.appendingPathComponent("DSC0001.tif"))
+        let existing = outDir.appendingPathComponent(
+            ExportNaming.filename(for: png, perception: nil, look: nil, ext: "png"))
+        try Data("an earlier export".utf8).write(to: existing)
+
+        let outcome = try BatchApply.run(
+            inputDir: inDir, recipe: .neutral,
+            destination: .init(directory: outDir, onCollision: .skip, format: .png))
+
+        XCTAssertEqual(outcome.skippedCount, 1, "the first of the pair meets the old file and skips")
+        XCTAssertEqual(outcome.succeeded, 1, "the second is written under a name of its own")
+        XCTAssertEqual(try Data(contentsOf: existing), Data("an earlier export".utf8))
+    }
+
     // MARK: Format
 
     /// The extension has to say what is actually inside the file.

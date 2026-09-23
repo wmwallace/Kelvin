@@ -128,15 +128,66 @@ extension BatchApply {
         /// way: original stem first (that is how the edit maps back to the frame on the card),
         /// then what was understood about the photo. A batch that renamed files differently from
         /// the export panel would be two conventions in one folder.
+        ///
+        /// This form plans one file in isolation. A caller planning a whole batch should use
+        /// `plan(for:perception:look:claimed:)`, or two sources that share a stem will be given
+        /// the same name.
         public func plan(for source: URL, perception: Perception? = nil, look: String? = nil) -> Plan {
-            let stem = ExportNaming.stem(for: source, perception: perception, look: look)
+            var claimed: Set<String> = []
+            return plan(for: source, perception: perception, look: look, claimed: &claimed)
+        }
+
+        /// Decide where `source` should be written, as one of a batch.
+        ///
+        /// **Names are unique within the batch before the collision policy is consulted.** A
+        /// RAW+JPEG pair shares its stem — `DSC0001.ARW` and `DSC0001.JPG` — so both map to one
+        /// output name. `uniqueSuffix` happened to survive that, because the second found the
+        /// first's file and suffixed; but under `overwrite` the second REPLACED the first frame's
+        /// render, and under `skip` it was reported as "already there" when what was there was this
+        /// batch's own output. Both policies are answers about a file that existed BEFORE the
+        /// batch; neither is licence to lose a frame the batch itself just made.
+        ///
+        /// So the second source of a shared name becomes `name-2` (the third `name-3`, …), decided
+        /// in the batch's stable order and only then checked against the disk. That order makes the
+        /// names deterministic, which is what lets `skip` resume a batch: a re-run assigns the pair
+        /// the same two names and finds both already written.
+        ///
+        /// - Parameter claimed: the names this batch has already assigned, updated by this call.
+        ///   Compared case-insensitively, because the default macOS volume is, and `DSC0001.png` and
+        ///   `dsc0001.png` are one file there.
+        public func plan(for source: URL, perception: Perception? = nil, look: String? = nil,
+                         claimed: inout Set<String>) -> Plan {
+            let base = ExportNaming.stem(for: source, perception: perception, look: look)
             let ext = format.fileExtension
-            let direct = directory.appendingPathComponent(stem).appendingPathExtension(ext)
+            let taken = claimed
+            func key(_ url: URL) -> String { url.lastPathComponent.lowercased() }
+            func url(_ stem: String) -> URL {
+                directory.appendingPathComponent(stem).appendingPathExtension(ext)
+            }
+
+            var stem = base
+            var n = 2
+            while taken.contains(key(url(stem))) {
+                // A thousand sources on one stem is not a shoot, but the promise holds anyway.
+                stem = n < 1000 ? "\(base)-\(n)" : "\(base)-\(UUID().uuidString)"
+                n += 1
+            }
+            let direct = url(stem)
+            claimed.insert(key(direct))
+
             guard FileManager.default.fileExists(atPath: direct.path) else { return .write(direct) }
             switch onCollision {
             case .overwrite:    return .write(direct)
             case .skip:         return .skip(existing: direct)
-            case .uniqueSuffix: return .write(ExportNaming.uniqueURL(in: directory, stem: stem, ext: ext))
+            case .uniqueSuffix:
+                // Steer clear of names this batch has already given out as well as of files on
+                // disk: an earlier source's name may not be written yet, and taking it would put
+                // two frames under one file.
+                let unique = ExportNaming.uniqueURL(in: directory, stem: stem, ext: ext) {
+                    taken.contains(key($0)) || FileManager.default.fileExists(atPath: $0.path)
+                }
+                claimed.insert(key(unique))
+                return .write(unique)
             }
         }
 

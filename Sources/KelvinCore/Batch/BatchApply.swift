@@ -133,8 +133,11 @@ public enum BatchApply {
         let inputPaths = Set(ordered.map { $0.resolvingSymlinksInPath().standardizedFileURL.path })
 
         var items: [Outcome.Item] = []
+        // Every name this batch has handed out, so a RAW+JPEG pair sharing a stem gets two
+        // outputs under every collision policy (see `Destination.plan(for:perception:look:claimed:)`).
+        var claimed: Set<String> = []
         for url in ordered {
-            switch destination.plan(for: url, look: look ?? recipe.label) {
+            switch destination.plan(for: url, look: look ?? recipe.label, claimed: &claimed) {
             case .skip(let existing):
                 items.append(.skipped(source: url, existing: existing))
             case .write(let out):

@@ -52,6 +52,45 @@ final class CaptureInfoTests: XCTestCase {
         XCTAssertNil(info.summaryText)
     }
 
+    // MARK: - Capture date
+
+    /// The capture timestamp is a fixed-format string, so it must parse the same on every Mac.
+    /// Written as a camera writes it (a literal string, not formatted by the code under test) and
+    /// read back in the Gregorian calendar the string is in.
+    func testCaptureDateParsesAsAGregorianTimestamp() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("capture-date-\(UUID().uuidString).jpg")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try TestSupport.writeJPEG(to: url, capturedRaw: "2026:08:02 14:30:05")
+
+        let captured = try XCTUnwrap(CaptureInfoReader.read(url: url).captured)
+        let parts = Calendar(identifier: .gregorian).dateComponents(
+            [.year, .month, .day, .hour, .minute, .second], from: captured)
+        XCTAssertEqual([parts.year, parts.month, parts.day, parts.hour, parts.minute, parts.second],
+                       [2026, 8, 2, 14, 30, 5])
+    }
+
+    /// The region the Mac is set to must not reach the parser. The test process cannot change
+    /// `Locale.current`, so this pins the two things that keep it out — and shows, with the
+    /// formatter a bare `DateFormatter()` becomes under a Thai region, what they prevent.
+    func testCaptureDateParsingIgnoresTheUsersRegion() throws {
+        let f = CaptureInfoReader.exifDateFormatter
+        XCTAssertEqual(f.locale.identifier, "en_US_POSIX")
+        XCTAssertEqual(f.calendar.identifier, .gregorian)
+
+        let thai = DateFormatter()
+        thai.locale = Locale(identifier: "th_TH")
+        thai.calendar = Calendar(identifier: .buddhist)
+        thai.dateFormat = f.dateFormat
+        let raw = "2026:08:02 14:30:05"
+        let misread = try XCTUnwrap(thai.date(from: raw))
+        let read = try XCTUnwrap(f.date(from: raw))
+        let year = { Calendar(identifier: .gregorian).component(.year, from: $0) }
+        XCTAssertEqual(year(read), 2026)
+        XCTAssertNotEqual(year(misread), 2026,
+                          "the Buddhist-calendar parse is the bug this formatter exists to avoid")
+    }
+
     // MARK: - GPS, read off a real file
     //
     // These go through ImageIO both ways: the test writes a JPEG with a GPS dictionary and the

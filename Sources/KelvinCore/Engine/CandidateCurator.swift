@@ -74,9 +74,11 @@ public enum CandidateCurator {
         // faithful read trips a defect is exactly the frame where you most want to see it and
         // decide for yourself, rather than being handed only stylised alternatives.
         let clean = candidates.filter(passesFloor)
-        let pool = clean.isEmpty
-            ? [candidates.max { $0.score.overall < $1.score.overall }!]   // least-bad, not nothing
-            : clean
+        // Least-bad, not nothing. `max` is non-nil here because `candidates` is not empty (the
+        // guard above), but that is a fact about two lines, and a force-unwrap would let a later
+        // edit to the guard crash the picker instead of emptying it.
+        let leastBad = candidates.max { $0.score.overall < $1.score.overall }
+        let pool = clean.isEmpty ? leastBad.map { [$0] } ?? [] : clean
 
         var chosen: [Scored] = []
         for candidate in pool {                 // engine order, not score order
