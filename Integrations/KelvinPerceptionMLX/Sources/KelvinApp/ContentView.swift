@@ -238,7 +238,6 @@ final class AppState {
     private var original: TaggedPreview?
 
     /// The current edit, rendered — nil until the first render for THIS photo has landed.
-    var activePreviewImage: NSImage? { preview.active.flatMap { $0.url == imageURL ? $0.image : nil } }
     /// The untouched original (proxy) of the photo now open, for the press-and-hold compare.
     var originalPreviewImage: NSImage? { original.flatMap { $0.url == imageURL ? $0.image : nil } }
     var showingOriginal = false
@@ -4763,59 +4762,83 @@ final class AppState {
         return ms.isEmpty ? nil : ms
     }
 
-    private func activeSelectedMaskBitmap(extent: CGRect) -> (bitmap: CIImage, invert: Bool, feather: Double, tightness: Double)? {
-        var bitmaps = proxyMaskBitmaps.merging(brushBitmaps(extent: extent)) { _, baked in baked }
-        if let proxy = proxyCI {
-            bitmaps.merge(wandBitmaps(extent: extent, source: proxy)) { _, grown in grown }
-        }
+    /// What the overlay should show, decided on the actor from the selection alone — no pixels.
+    ///
+    /// The overlay's BITMAP used to be computed here too, on the main actor, on every render tick:
+    /// that meant baking the brush (`createCGImage`) and growing the wand (`RegionGrow`, a software
+    /// raster) in front of the render, and then doing both again inside the render job, which
+    /// overwrote the first result on landing. The comment on `updateActiveRecipe` said the bakes had
+    /// moved into the job; they had, for the render, and not for the overlay. Now only this cheap
+    /// description is taken on the actor and `overlayMask` turns it into pixels in the job, from the
+    /// bitmaps the job has just baked.
+    struct OverlayRequest: @unchecked Sendable {
+        /// The selected hand-drawn mask, as the renderer sees it.
+        var userMask: Mask?
+        /// Or the selected automatic one, with the panel's settings for it.
+        var auto: (id: String, invert: Bool, feather: Double, tightness: Double)?
+    }
+
+    private func overlayRequest() -> OverlayRequest? {
         if let mid = selectedUserMaskId, let userMask = userMasks.first(where: { $0.id == mid }) {
-            let maskStruct = userMask.toMask()
+            return OverlayRequest(userMask: userMask.toMask(), auto: nil)
+        }
+        // An AUTO mask, now that the selection can name one.
+        if case .auto(let id) = selectedMask {
+            return OverlayRequest(userMask: nil,
+                                  auto: (id, maskInvert[id] ?? false, maskFeather[id] ?? 0, maskTightness[id] ?? 0))
+        }
+        // NO FALLBACK, deliberately. This used to answer "the first enabled auto mask" and then
+        // "the first hand-drawn one" when nothing was selected, which is how the sky ended up
+        // covered in red that nothing could edit and nothing could turn off. Nothing selected now
+        // means nothing drawn, so the overlay always answers to something the user can point at.
+        return nil
+    }
+
+    /// The overlay's pixels, in the render job. `bitmaps` are the ones the job baked for the render
+    /// itself — auto masks, brush strokes and wand regions — so nothing is baked twice.
+    nonisolated static func overlayMask(_ request: OverlayRequest, bitmaps: [String: CIImage],
+                                        proxy: CIImage)
+        -> (bitmap: CIImage, invert: Bool, feather: Double, tightness: Double)? {
+        let extent = proxy.extent
+        if let maskStruct = request.userMask {
             var bitmap: CIImage? = nil
             if let stamps = maskStruct.stamps, !stamps.isEmpty {
                 bitmap = bitmaps[maskStruct.id] ?? Renderer.brushMask(stamps, extent: extent)
             } else if let shape = maskStruct.shape {
                 bitmap = Renderer.gradientMask(shape, extent: extent)
             } else if let sel = maskStruct.selection, let cube = SelectionMask.makeData(sel) {
-                bitmap = (proxyCI ?? CIImage()).applyingFilter("CIColorCubeWithColorSpace", parameters: [
+                bitmap = proxy.applyingFilter("CIColorCubeWithColorSpace", parameters: [
                     "inputCubeDimension": SelectionMask.dimension,
                     "inputCubeData": cube,
                     "inputColorSpace": ImageWriter.outputColorSpace
                 ]).cropped(to: extent)
             } else if let seed = maskStruct.region {
                 bitmap = bitmaps[maskStruct.id]
-                    ?? RegionGrow.mask(in: proxyCI ?? CIImage(),
-                                       seed: CGPoint(x: seed.x, y: seed.y),
+                    ?? RegionGrow.mask(in: proxy, seed: CGPoint(x: seed.x, y: seed.y),
                                        tolerance: seed.tolerance, softness: seed.softness)
             } else {
                 bitmap = bitmaps[maskStruct.id] ?? bitmaps[maskStruct.type]
             }
-            if var b = bitmap {
-                // The red must show what the mask will EDIT. The renderer narrows a refined mask
-                // (skin = the subject ∩ skin hues) before applying its adjustments — but this
-                // overlay skipped the refinement, so a Skin mask painted the entire person and was
-                // reported as "the same as the person mask". The pixels it edited were right all
-                // along; the pixels it CLAIMED were wrong.
-                if let refine = maskStruct.refine, let cube = SelectionMask.makeData(refine),
-                   let proxy = proxyCI {
-                    let selected = proxy.applyingFilter("CIColorCubeWithColorSpace", parameters: [
-                        "inputCubeDimension": SelectionMask.dimension,
-                        "inputCubeData": cube,
-                        "inputColorSpace": ImageWriter.outputColorSpace
-                    ]).cropped(to: extent)
-                    b = selected.applyingFilter("CIMultiplyCompositing", parameters: [
-                        kCIInputBackgroundImageKey: b])
-                }
-                return (b, maskStruct.invert, maskStruct.feather, maskStruct.tightness ?? 0)
+            guard var b = bitmap else { return nil }
+            // The red must show what the mask will EDIT. The renderer narrows a refined mask
+            // (skin = the subject ∩ skin hues) before applying its adjustments — but this overlay
+            // skipped the refinement, so a Skin mask painted the entire person and was reported as
+            // "the same as the person mask". The pixels it edited were right all along; the pixels
+            // it CLAIMED were wrong.
+            if let refine = maskStruct.refine, let cube = SelectionMask.makeData(refine) {
+                let selected = proxy.applyingFilter("CIColorCubeWithColorSpace", parameters: [
+                    "inputCubeDimension": SelectionMask.dimension,
+                    "inputCubeData": cube,
+                    "inputColorSpace": ImageWriter.outputColorSpace
+                ]).cropped(to: extent)
+                b = selected.applyingFilter("CIMultiplyCompositing", parameters: [
+                    kCIInputBackgroundImageKey: b])
             }
+            return (b, maskStruct.invert, maskStruct.feather, maskStruct.tightness ?? 0)
         }
-        // An AUTO mask, now that the selection can name one.
-        if case .auto(let id) = selectedMask, let b = proxyMaskBitmaps[id] {
-            return (b, maskInvert[id] ?? false, maskFeather[id] ?? 0, maskTightness[id] ?? 0)
+        if let auto = request.auto, let b = bitmaps[auto.id] {
+            return (b, auto.invert, auto.feather, auto.tightness)
         }
-        // NO FALLBACK, deliberately. This used to answer "the first enabled auto mask" and then
-        // "the first hand-drawn one" when nothing was selected, which is how the sky ended up
-        // covered in red that nothing could edit and nothing could turn off. Nothing selected now
-        // means nothing drawn, so the overlay always answers to something the user can point at.
         return nil
     }
 
@@ -4988,7 +5011,7 @@ final class AppState {
     /// place, what is already true: the context is thread-safe and the bitmap is immutable.
     private struct RenderSideload: @unchecked Sendable {
         let ctx: CIContext
-        let overlay: (bitmap: CIImage, invert: Bool, feather: Double, tightness: Double)?
+        let overlay: OverlayRequest?
     }
     @ObservationIgnored private var renderInFlight = false
     @ObservationIgnored private var renderDirty = false
@@ -5040,8 +5063,7 @@ final class AppState {
         // adjusting one needs the picture visible. So it stays up for the first and gets out of
         // the way for the second, and comes back on its own when you let go.
         let showOverlay = showMaskOverlay && !isAdjustingMaskTone
-        let side = RenderSideload(ctx: context,
-                                  overlay: showOverlay ? activeSelectedMaskBitmap(extent: proxy.extent) : nil)
+        let side = RenderSideload(ctx: context, overlay: showOverlay ? overlayRequest() : nil)
         Task.detached(priority: .userInitiated) {
             let renderStart = Date()
             // The render itself is on the render lane at interactive QoS — a slider is being
@@ -5056,7 +5078,8 @@ final class AppState {
                     .merging(brush.out) { _, baked in baked }
                     .merging(wand.out) { _, grown in grown }
                 var rendered = Renderer.render(input.proxy, with: input.recipe, maskBitmaps: bitmaps)
-                if let ov = side.overlay {
+                if let request = side.overlay,
+                   let ov = AppState.overlayMask(request, bitmaps: bitmaps, proxy: input.proxy) {
                     rendered = Renderer.renderMaskOverlay(rendered, maskBitmap: ov.bitmap, invert: ov.invert, feather: ov.feather, tightness: ov.tightness, opacity: 0.6)
                 }
                 let cg = side.ctx.createCGImage(rendered, from: rendered.extent)
@@ -6271,6 +6294,39 @@ struct PreviewImage: View {
     }
 }
 
+/// What the canvas shows while a photograph has not been drawn yet.
+///
+/// A LOADING STATE, not a blank canvas and not the previous photograph. The previews are tagged
+/// with the photo they belong to, so once the open moves on there is nothing to draw until the new
+/// frame decodes — and an empty rectangle for a second or two reads as the app having dropped
+/// something. Showing the OLD photo instead would be worse: it is the wrong picture under the new
+/// one's name, which is how somebody ends up editing a frame they are not looking at. So: say what
+/// is happening. The status line carries the detail; this is the acknowledgement that the click
+/// landed.
+struct CanvasLoadingState: View {
+    @Bindable var preview: PreviewState
+    let url: URL?
+    let hasOriginal: Bool
+    let isProcessing: Bool
+    let status: String
+
+    var body: some View {
+        let live = preview.active.flatMap { $0.url == url ? $0.image : nil }
+        if live == nil, !hasOriginal, isProcessing {
+            VStack(spacing: 14) {
+                ProgressView()
+                    .controlSize(.large)
+                    .tint(Theme.glow)
+                Text(status)
+                    .font(Theme.mono(11))
+                    .foregroundColor(Theme.inkDim)
+                    .transition(.opacity)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
 /// The histogram, likewise: it reads the rendered pixels, so it belongs to the render rather than
 /// to the panel it is drawn at the top of.
 struct HistogramHost: View {
@@ -6764,32 +6820,14 @@ struct ContentView: View {
                                      spoken: appState.imageURL.map {
                                          appState.spokenDescription(for: $0)
                                      } ?? "The photograph being edited")
-                        if appState.activePreviewImage == nil,
-                           appState.originalPreviewImage == nil,
-                           appState.isProcessing {
-                            // A LOADING STATE, not a blank canvas and not the previous photograph.
-                            //
-                            // The previews are tagged with the photo they belong to, so once the
-                            // open moves on there is nothing to draw until the new frame decodes —
-                            // and an empty rectangle for a second or two reads as the app having
-                            // dropped something. Showing the OLD photo instead would be worse: it
-                            // is the wrong picture under the new one's name, which is how somebody
-                            // ends up editing a frame they are not looking at.
-                            //
-                            // So: say what is happening. The status line carries the detail
-                            // ("Loading the perception model", "Reading the scene"); this is just
-                            // the acknowledgement that the click landed.
-                            VStack(spacing: 14) {
-                                ProgressView()
-                                    .controlSize(.large)
-                                    .tint(Theme.glow)
-                                Text(appState.statusMessage)
-                                    .font(Theme.mono(11))
-                                    .foregroundColor(Theme.inkDim)
-                                    .transition(.opacity)
-                            }
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        }
+                        // The loading state reads the live preview, so it lives in a view of its own
+                        // that observes `preview` — read here, every render tick re-evaluated this
+                        // whole canvas, gestures and overlays included (D23's rule, and the reason
+                        // `PreviewImage` takes `preview` rather than an image).
+                        CanvasLoadingState(preview: appState.preview, url: appState.imageURL,
+                                           hasOriginal: appState.originalPreviewImage != nil,
+                                           isProcessing: appState.isProcessing,
+                                           status: appState.statusMessage)
                         }
                     }
                     // Photos come in from the filmstrip, a drop, or the arrow keys. A hard cut
@@ -6961,7 +6999,7 @@ struct ContentView: View {
                 HStack(spacing: 0) {
                     canvasColumn
                     panelDivider
-                    sidebar
+                    SidebarPanel(appState: appState)
                         // The live value wins while dragging; the stored one the rest of the time.
                         .frame(width: liveWidth ?? panelWidth)
                         // NO `.clipped()` HERE, and that is the lesson rather than an omission.
@@ -7636,6 +7674,116 @@ struct ContentView: View {
         }
     }
 
+    /// Render, then hand the file to the system picker. No panel in between: the render decides
+    /// nothing a panel would ask, and its failure modes already speak through the status line.
+    private func shareCurrentPhoto() {
+        Task {
+            if let url = await appState.renderCurrentPhotoForSharing() {
+                // Wired per share, so the callback always closes over the CURRENT app state.
+                sharePresenter.onDidChoose = { [weak appState] in
+                    guard let appState,
+                          appState.imageURL == appState.pendingSharePickURL else { return }
+                    appState.recordCurrentPick()
+                }
+                sharePresenter.present([url])
+            }
+        }
+    }
+
+    private func openExportPanel() {
+        let panel = NSSavePanel()
+        // The format the popup is currently set to, not a fixed pair. Hard-coded to [.jpeg, .png],
+        // the panel renamed a HEIC or 16-bit TIFF export to `.jpeg` on the way out while
+        // `ImageWriter` went on encoding the chosen format into it. Kept in step from
+        // `ExportTarget.refresh` for every later change to the popup.
+        panel.allowedContentTypes = [appState.exportFormat.contentType]
+        // Suggest a name that says what the photo IS — still fully editable in the panel.
+        panel.nameFieldStringValue = appState.suggestedExportName(ext: appState.exportFormat.fileExtension)
+        // The one thing about an export that is not visible in the file you get back.
+        //
+        // In the panel rather than in the sidebar, because it is a property of THIS export and the
+        // moment you are deciding it is the moment you are choosing where the file goes. It also
+        // covers the batch, which writes hundreds of files from the same setting — so the checkbox
+        // that says what travels has to be somewhere you meet before either.
+        panel.accessoryView = PanelAccessories.exportOptions(appState, savePanel: panel)
+
+        // OPEN BESIDE THE PHOTOGRAPH, IN ITS OWN "Edited" FOLDER.
+        //
+        // This used to open wherever the save panel happened to have been last, which for a shoot
+        // opened from a card is somewhere else entirely — an export from Tuesday's job landing in
+        // Monday's folder is the kind of mistake nobody notices until a client does. The answer a
+        // photographer wants nine times in ten is "next to the originals, but not among them", and
+        // it is the same answer the group export already gives.
+        //
+        // The folder has to exist for `directoryURL` to point at it, so it is created here rather
+        // than at write time — and removed again below if the export is cancelled and nothing
+        // landed in it, because a folder that appears merely because you opened a panel and
+        // changed your mind is litter.
+        var createdFolder: URL?
+        if let source = appState.imageURL?.deletingLastPathComponent() {
+            let edited = source.appendingPathComponent(Branding.exportFolderName, isDirectory: true)
+            if !FileManager.default.fileExists(atPath: edited.path) {
+                if (try? FileManager.default.createDirectory(at: edited,
+                                                             withIntermediateDirectories: true)) != nil {
+                    createdFolder = edited
+                }
+            }
+            if FileManager.default.fileExists(atPath: edited.path) { panel.directoryURL = edited }
+        }
+
+        let choice = panel.runModal()
+        // Only a folder THIS call created, and only while it is still empty. Never a folder that
+        // was already there, and never one the export has just written into.
+        if let createdFolder,
+           (try? FileManager.default.contentsOfDirectory(atPath: createdFolder.path))?.isEmpty == true,
+           choice != .OK {
+            try? FileManager.default.removeItem(at: createdFolder)
+        }
+        if choice == .OK, let url = panel.url {
+            Task { await appState.exportFullResolution(to: url) }
+        }
+    }
+
+    /// Where the edited photographs go.
+    ///
+    /// A save panel rather than a folder chooser, so the destination arrives PRE-NAMED and visible:
+    /// it opens on the shoot's own folder with "Edited" already typed. The principle is that nothing
+    /// is ever written somewhere the user has not seen named — but they should not have to type it
+    /// either, and the answer is the same nine times in ten.
+    ///
+    /// Writing into the shoot's own folder is refused downstream by `Destination.prepare`, which
+    /// compares filesystem identity; a subfolder is safe and the originals cannot be touched.
+    private func openExportEditedPanel() {
+        let panel = NSSavePanel()
+        panel.title = "Export edited photos"
+        panel.message = "Choose a folder for the edited copies. Your originals are never modified."
+        panel.nameFieldLabel = "Folder:"
+        // The same constant the single-photo export opens into, so exporting one frame and then the
+        // whole shoot puts both in one place rather than in "Edited" and "Edits".
+        panel.nameFieldStringValue = Branding.exportFolderName
+        panel.canCreateDirectories = true
+        if let folder = appState.imageURL?.deletingLastPathComponent() {
+            panel.directoryURL = folder
+        }
+        panel.accessoryView = PanelAccessories.exportOptions(appState, showScope: true)
+        guard panel.runModal() == .OK, let target = panel.url else { return }
+        appState.startExport(to: target)
+    }
+}
+
+/// The edit panel: the photograph's details, the candidates, the looks, the masks and the sliders.
+///
+/// Its own view so its body is its own dependency scope (D23). As a computed property of
+/// `ContentView` it was part of the ROOT body, and the root re-evaluated on every brush dab and
+/// every mask-slider tick because this panel reads `userMasks` — rebuilding the filmstrip's
+/// arguments (the visible photos three times, the grouping twice) and the footer's export scope on
+/// each one. Now a dab re-evaluates this panel and leaves the canvas column and the strip alone.
+struct SidebarPanel: View {
+    @Bindable var appState: AppState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View { sidebar }
+
     /// What the camera recorded. Read-only — this is the photograph's own history, not something
     /// to edit, so it's presented as a record rather than as controls.
     private var capturePanel: some View {
@@ -7987,7 +8135,7 @@ struct ContentView: View {
                         Button {
                             appState.pickingInstance.toggle()
                         } label: {
-                            ContentView.addMaskLabel(appState.pickingInstance
+                            SidebarPanel.addMaskLabel(appState.pickingInstance
                                          ? "Click a subject on the photo… (esc)"
                                          : "Select a subject on the photo",
                                          icon: "hand.point.up.left")
@@ -8074,19 +8222,19 @@ struct ContentView: View {
                         Text("ADD A MASK — PICK WHAT DEFINES THE REGION")
                             .font(Theme.mono(9)).tracking(1.4).foregroundColor(Theme.inkFaint)
                         HStack(spacing: 6) {
-                            Button(action: { appState.addUserMask(.radial) }) { ContentView.addMaskLabel("Radial", icon: "circle.circle") }.buttonStyle(.plain)
-                            Button(action: { appState.addUserMask(.linear) }) { ContentView.addMaskLabel("Grad", icon: "rectangle.tophalf.filled") }.buttonStyle(.plain)
-                            Button(action: { appState.addUserMask(.brush) }) { ContentView.addMaskLabel("Brush", icon: "paintbrush") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.radial) }) { SidebarPanel.addMaskLabel("Radial", icon: "circle.circle") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.linear) }) { SidebarPanel.addMaskLabel("Grad", icon: "rectangle.tophalf.filled") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.brush) }) { SidebarPanel.addMaskLabel("Brush", icon: "paintbrush") }.buttonStyle(.plain)
                         }
                         HStack(spacing: 6) {
-                            Button(action: { appState.addUserMask(.colorRange) }) { ContentView.addMaskLabel("Colour", icon: "eyedropper") }.buttonStyle(.plain)
-                            Button(action: { appState.addUserMask(.luminance) }) { ContentView.addMaskLabel("Luma", icon: "circle.lefthalf.filled") }.buttonStyle(.plain)
-                            Button(action: { appState.addUserMask(.skin) }) { ContentView.addMaskLabel("Skin", icon: "face.smiling") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.colorRange) }) { SidebarPanel.addMaskLabel("Colour", icon: "eyedropper") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.luminance) }) { SidebarPanel.addMaskLabel("Luma", icon: "circle.lefthalf.filled") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.skin) }) { SidebarPanel.addMaskLabel("Skin", icon: "face.smiling") }.buttonStyle(.plain)
                         }
                         HStack(spacing: 6) {
-                            Button(action: { appState.addUserMask(.subject) }) { ContentView.addMaskLabel("Subject", icon: "person.fill") }.buttonStyle(.plain)
-                            Button(action: { appState.addUserMask(.background) }) { ContentView.addMaskLabel("Background", icon: "photo") }.buttonStyle(.plain)
-                            Button(action: { appState.addUserMask(.sky) }) { ContentView.addMaskLabel("Sky", icon: "cloud.sun") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.subject) }) { SidebarPanel.addMaskLabel("Subject", icon: "person.fill") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.background) }) { SidebarPanel.addMaskLabel("Background", icon: "photo") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.sky) }) { SidebarPanel.addMaskLabel("Sky", icon: "cloud.sun") }.buttonStyle(.plain)
                         }
                         // The wand sits beside Colour rather than with the automatic masks, because
                         // that is what it is the other half of: Colour takes every matching pixel in
@@ -8094,7 +8242,7 @@ struct ContentView: View {
                         // answer for everything Vision will not segment — a sea stack, a headland,
                         // a wall — which is most of a landscape.
                         HStack(spacing: 6) {
-                            Button(action: { appState.addUserMask(.wand) }) { ContentView.addMaskLabel("Wand", icon: "wand.and.stars") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.wand) }) { SidebarPanel.addMaskLabel("Wand", icon: "wand.and.stars") }.buttonStyle(.plain)
                             Spacer(minLength: 0)
                         }
                         // Presets: the same masks with the settings already in them. Built-ins
@@ -8121,7 +8269,7 @@ struct ContentView: View {
                                         }
                                     }
                                 } label: {
-                                    ContentView.addMaskLabel(group.label, icon: group.icon)
+                                    SidebarPanel.addMaskLabel(group.label, icon: group.icon)
                                 }
                                 .menuStyle(.borderlessButton)
                                 .menuIndicator(.hidden)
@@ -8256,101 +8404,6 @@ struct ContentView: View {
 
     // MARK: File panels
 
-    /// Render, then hand the file to the system picker. No panel in between: the render decides
-    /// nothing a panel would ask, and its failure modes already speak through the status line.
-    private func shareCurrentPhoto() {
-        Task {
-            if let url = await appState.renderCurrentPhotoForSharing() {
-                // Wired per share, so the callback always closes over the CURRENT app state.
-                sharePresenter.onDidChoose = { [weak appState] in
-                    guard let appState,
-                          appState.imageURL == appState.pendingSharePickURL else { return }
-                    appState.recordCurrentPick()
-                }
-                sharePresenter.present([url])
-            }
-        }
-    }
-
-    private func openExportPanel() {
-        let panel = NSSavePanel()
-        // The format the popup is currently set to, not a fixed pair. Hard-coded to [.jpeg, .png],
-        // the panel renamed a HEIC or 16-bit TIFF export to `.jpeg` on the way out while
-        // `ImageWriter` went on encoding the chosen format into it. Kept in step from
-        // `ExportTarget.refresh` for every later change to the popup.
-        panel.allowedContentTypes = [appState.exportFormat.contentType]
-        // Suggest a name that says what the photo IS — still fully editable in the panel.
-        panel.nameFieldStringValue = appState.suggestedExportName(ext: appState.exportFormat.fileExtension)
-        // The one thing about an export that is not visible in the file you get back.
-        //
-        // In the panel rather than in the sidebar, because it is a property of THIS export and the
-        // moment you are deciding it is the moment you are choosing where the file goes. It also
-        // covers the batch, which writes hundreds of files from the same setting — so the checkbox
-        // that says what travels has to be somewhere you meet before either.
-        panel.accessoryView = PanelAccessories.exportOptions(appState, savePanel: panel)
-
-        // OPEN BESIDE THE PHOTOGRAPH, IN ITS OWN "Edited" FOLDER.
-        //
-        // This used to open wherever the save panel happened to have been last, which for a shoot
-        // opened from a card is somewhere else entirely — an export from Tuesday's job landing in
-        // Monday's folder is the kind of mistake nobody notices until a client does. The answer a
-        // photographer wants nine times in ten is "next to the originals, but not among them", and
-        // it is the same answer the group export already gives.
-        //
-        // The folder has to exist for `directoryURL` to point at it, so it is created here rather
-        // than at write time — and removed again below if the export is cancelled and nothing
-        // landed in it, because a folder that appears merely because you opened a panel and
-        // changed your mind is litter.
-        var createdFolder: URL?
-        if let source = appState.imageURL?.deletingLastPathComponent() {
-            let edited = source.appendingPathComponent(Branding.exportFolderName, isDirectory: true)
-            if !FileManager.default.fileExists(atPath: edited.path) {
-                if (try? FileManager.default.createDirectory(at: edited,
-                                                             withIntermediateDirectories: true)) != nil {
-                    createdFolder = edited
-                }
-            }
-            if FileManager.default.fileExists(atPath: edited.path) { panel.directoryURL = edited }
-        }
-
-        let choice = panel.runModal()
-        // Only a folder THIS call created, and only while it is still empty. Never a folder that
-        // was already there, and never one the export has just written into.
-        if let createdFolder,
-           (try? FileManager.default.contentsOfDirectory(atPath: createdFolder.path))?.isEmpty == true,
-           choice != .OK {
-            try? FileManager.default.removeItem(at: createdFolder)
-        }
-        if choice == .OK, let url = panel.url {
-            Task { await appState.exportFullResolution(to: url) }
-        }
-    }
-
-    /// Where the edited photographs go.
-    ///
-    /// A save panel rather than a folder chooser, so the destination arrives PRE-NAMED and visible:
-    /// it opens on the shoot's own folder with "Edited" already typed. The principle is that nothing
-    /// is ever written somewhere the user has not seen named — but they should not have to type it
-    /// either, and the answer is the same nine times in ten.
-    ///
-    /// Writing into the shoot's own folder is refused downstream by `Destination.prepare`, which
-    /// compares filesystem identity; a subfolder is safe and the originals cannot be touched.
-    private func openExportEditedPanel() {
-        let panel = NSSavePanel()
-        panel.title = "Export edited photos"
-        panel.message = "Choose a folder for the edited copies. Your originals are never modified."
-        panel.nameFieldLabel = "Folder:"
-        // The same constant the single-photo export opens into, so exporting one frame and then the
-        // whole shoot puts both in one place rather than in "Edited" and "Edits".
-        panel.nameFieldStringValue = Branding.exportFolderName
-        panel.canCreateDirectories = true
-        if let folder = appState.imageURL?.deletingLastPathComponent() {
-            panel.directoryURL = folder
-        }
-        panel.accessoryView = PanelAccessories.exportOptions(appState, showScope: true)
-        guard panel.runModal() == .OK, let target = panel.url else { return }
-        appState.startExport(to: target)
-    }
 }
 
 // MARK: - Candidate row
@@ -8437,7 +8490,7 @@ private struct GeometrySliders: View {
     var body: some View {
         VStack(spacing: 12) {
             ToneSlider(label: "Straighten", value: $appState.straighten, range: -15...15, step: 0.1, unit: "°", onChange: appState.onEdit)
-            Button(action: appState.autoStraighten) { ContentView.addMaskLabel("Auto-level horizon", icon: "level") }
+            Button(action: appState.autoStraighten) { SidebarPanel.addMaskLabel("Auto-level horizon", icon: "level") }
                 .buttonStyle(.plain)
         }
     }
@@ -9907,7 +9960,10 @@ struct MaskControl: View {
                 }
                 // Live, like every `ToneSlider`. Commit-on-release here alone made the one control
                 // in the panel that does not preview read as a control that does not work.
-                Slider(value: $strength, in: 0...100, step: 1)
+                // Snapped in the binding, not with `step:` — the NSSlider tick-mark recursion that
+                // `ToneSlider` documents (83% of the main thread on a 600-step drag) is built by
+                // ANY stepped Slider, and this one had 101 ticks per auto mask.
+                Slider(value: Binding(get: { strength }, set: { strength = $0.rounded() }), in: 0...100)
                     .onChange(of: strength) { onChange() }
                     .tint(Theme.glow).controlSize(.small)
 
