@@ -1011,7 +1011,10 @@ final class AppState {
             // foreground may have read and saved this exact frame (a sweep is never re-seeded),
             // and a six-second generation for an answer already on disk is the one duplicate an
             // audit found this loop could still spend.
-            if PerceptionStore.load(for: url, modelId: perceptionProvider.activeModelID) != nil {
+            // On the I/O lane: `load` stats the original twice, and on a sleeping network share
+            // that is the main thread beachballing between two frames of a read-ahead.
+            let claimModel = perceptionProvider.activeModelID
+            if await Offload.run(.io, { PerceptionStore.load(for: url, modelId: claimModel) }) != nil {
                 readQueue.markDone()
                 publishReadProgress()
                 continue
@@ -1935,10 +1938,23 @@ final class AppState {
         // reading the same 437 sentences again and again. Misses are remembered too (`.some(nil)`),
         // or an unread shoot would stat every frame every pass until the model caught up.
         if let known = readingNotes[url] { return known }
-        let note = PerceptionStore.load(for: url, modelId: perceptionProvider.activeModelID)?.notes
-        readingNotes[url] = .some(note)
-        return note
+        // A miss is filled from disk on the I/O lane, never here: this runs inside a view's body,
+        // and the load stats the original — a network round trip per strip cell on a share. The
+        // cell says nothing for one evaluation and the sentence arrives with the next.
+        guard !readingNotesPending.contains(url) else { return nil }
+        readingNotesPending.insert(url)
+        let modelId = perceptionProvider.activeModelID
+        Task { [weak self] in
+            let note = await Offload.run(.io, qos: .utility) {
+                PerceptionStore.load(for: url, modelId: modelId)?.notes
+            }
+            guard let self else { return }
+            self.readingNotesPending.remove(url)
+            if self.readingNotes[url] == nil { self.readingNotes[url] = .some(note) }
+        }
+        return nil
     }
+    @ObservationIgnored private var readingNotesPending: Set<URL> = []
 
     /// `cachedReading`'s memo. Filled on first ask and whenever a read lands (`rememberPerception`,
     /// the read-ahead loop), so a frame's sentence appears in the strip as soon as it exists.
@@ -2498,7 +2514,10 @@ final class AppState {
         // The buffer counts as a hit: a decoded thumbnail that has not been flushed yet must not
         // be decoded a second time, and must not be reported missing to a cell about to draw.
         if let hit = thumbnails[url] ?? thumbnailBuffer[url] { return hit }
-        guard !thumbnailsInFlight.contains(url) else { return nil }
+        // A frame that could not be thumbnailed stays failed for the session. Without this an
+        // unsupported or corrupt file re-queued an ImageIO open on every evaluation of its cell —
+        // and the strip evaluates often.
+        guard !thumbnailsInFlight.contains(url), !thumbnailFailures.contains(url) else { return nil }
         thumbnailsInFlight.insert(url)
         Task { [weak self] in
             // Returns a CGImage rather than an NSImage: NSImage's Sendable conformance exists on
@@ -2514,10 +2533,13 @@ final class AppState {
             if let image {
                 self.thumbnailBuffer[url] = image
                 self.scheduleThumbnailFlush()
+            } else {
+                self.thumbnailFailures.insert(url)
             }
         }
         return nil
     }
+    @ObservationIgnored private var thumbnailFailures: Set<URL> = []
 
     /// How many masks are actually doing something, for the folded section's badge. A collapsed
     /// section must still say whether there is anything inside it, or folding it away hides work.
@@ -2821,6 +2843,13 @@ final class AppState {
 
     /// Put a previously-edited photo back exactly as it was.
     func restore(_ s: PhotoSession) {
+        // THIS photograph is now the one being waited for. Only `loadPhoto` used to say so, so a hop
+        // A → B (still decoding) → A (cached) left B's decode, its Vision passes and eight candidate
+        // renders all passing their `isCurrent` checks — competing with A's live renders on the
+        // render lane, and landing B's status lines over A's. Claiming the request and cancelling
+        // B's read makes every one of those checks answer "no".
+        Self.latestRequest.set(s.url)
+        perceiveTask?.cancel()
         imageURL = s.url; imageId = s.imageId
         loadedURL = s.url
         perPhotoStateIsCleared = false
@@ -3240,7 +3269,11 @@ final class AppState {
         let opened = await Offload.run(.io, priority: .veryHigh) {
             // Both answers come out of the same trip to the filesystem, and neither belongs on the
             // main thread. `isNetwork` is one `statfs` and cached per volume after the first frame.
-            (capture: MediaCache.shared.captureInfo(for: url), onNetwork: StorageVolume.isNetwork(url))
+            (capture: MediaCache.shared.captureInfo(for: url), onNetwork: StorageVolume.isNetwork(url),
+             // `ExifReader.iso` rather than `capture.iso`: it is the reader the export path
+             // (`adaptedRecipe`) uses, and the canvas and the export must build the same recipe.
+             // It opens the original too, which is why it rides this trip and not the main thread.
+             iso: ExifReader.iso(url: url))
         }
         guard imageURL == url else { return }
         capture = opened.capture
@@ -3366,7 +3399,10 @@ final class AppState {
             // still produces candidates from the measured statistics.
             statusMessage = "Reading the scene…"
             let perceptionRead: Perception
-            if let cached = PerceptionStore.load(for: url, modelId: perceptionProvider.activeModelID) {
+            let storeModel = perceptionProvider.activeModelID
+            if let cached = await Offload.run(.io, priority: .veryHigh, {
+                PerceptionStore.load(for: url, modelId: storeModel)
+            }) {
                 // ALREADY READ, IN AN EARLIER SESSION. A read is a pure function of the pixels, so
                 // this is the same answer the model would spend six seconds producing again.
                 perceptionRead = cached
@@ -3505,7 +3541,7 @@ final class AppState {
             // reuse an edit is to pick/tune one photo, then Batch apply that exact look.
             let recipes = RecipeEngine.candidates(perception: perceptionRead, statistics: stats,
                                                   masks: self.localMeasure,
-                                                  iso: ExifReader.iso(url: url),
+                                                  iso: opened.iso,
                                                   focus: measurement.engineFocus)
 
             // Render every style, score each on the craft floors, then CURATE. The engine offers
@@ -5430,7 +5466,7 @@ final class AppState {
             // the UI must not claim otherwise.
             if imageURL == renderedURL { recordCurrentPick() }
         case .failure(let error):
-            statusMessage = "Export failed — \(error)"
+            statusMessage = "Export failed — \(error.localizedDescription)"
         }
         isProcessing = false
     }
@@ -5513,7 +5549,7 @@ final class AppState {
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         } catch {
-            statusMessage = "Couldn't make a file to share — \(error)"
+            statusMessage = "Couldn't make a file to share — \(error.localizedDescription)"
             return nil
         }
         // OPPOSITE default to Export. An export is a deliberate delivery with a panel in the
@@ -5545,7 +5581,7 @@ final class AppState {
             pendingSharePickURL = renderedURL
             return out
         case .failure(let error):
-            statusMessage = "Couldn't render for sharing — \(error)"
+            statusMessage = "Couldn't render for sharing — \(error.localizedDescription)"
             return nil
         }
     }
@@ -5686,7 +5722,8 @@ final class AppState {
             // now for every adapted frame (`adaptedRecipe` saves it) and for every frame that was
             // ever opened; a frame without one falls back to stem + look, which is the rule:
             // describe only what was actually judged.
-            let named = PerceptionStore.load(for: url, modelId: perceptionProvider.activeModelID)
+            let namingModel = perceptionProvider.activeModelID
+            let named = await Offload.run(.io) { PerceptionStore.load(for: url, modelId: namingModel) }
             let out = ExportNaming.uniqueURL(
                 in: directory,
                 stem: ExportNaming.stem(for: url, perception: named, look: lookName,
@@ -5876,7 +5913,7 @@ final class AppState {
         // 400-frame export goes from about 45 minutes to a couple.
         let modelId = perceptionProvider.activeModelID
         let perception: Perception
-        if let cached = PerceptionStore.load(for: url, modelId: modelId) {
+        if let cached = await Offload.run(.io, { PerceptionStore.load(for: url, modelId: modelId) }) {
             perception = cached
         } else {
             // Perception is its own actor hop and stays here.
@@ -8209,7 +8246,9 @@ struct SidebarPanel: View {
                             people: appState.subjectInstances.filter { $0.kind == .person },
                             onSavePreset: { appState.promptSaveMaskPreset(m) },
                             onAdjustBegin: { appState.isAdjustingMaskTone = true },
-                            onAdjustEnd: { appState.isAdjustingMaskTone = false },
+                            // `onEdit` re-renders with the overlay back — the auto-mask path above always did, and
+                            // without it the red stayed hidden after release, contrary to `isAdjustingMaskTone`.
+                            onAdjustEnd: { appState.isAdjustingMaskTone = false; appState.onEdit() },
                             canMoveUp: appState.userMasks.first?.id != m.id,
                             canMoveDown: appState.userMasks.last?.id != m.id,
                             onMoveUp: { appState.moveUserMask(m.id, by: -1) },
