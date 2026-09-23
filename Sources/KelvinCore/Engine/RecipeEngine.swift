@@ -30,9 +30,6 @@ public enum RecipeEngine {
     /// Rationale: docs/RECIPE-SCHEMA.md — a low-confidence read should not commit to a look.
     public static let confidenceFloor = 0.5
 
-    /// How much darker than its own frame a subject must be before the exposure rules treat it as
-    /// needing help. The same value `subjectMask` uses for `backlit`, deliberately: two rules that
-    /// disagree about what a dark subject is produce a lift with no mask or a mask with no lift.
     /// The ceiling on a subject lift WHEN THE SUBJECT LUMA IS METERED SKIN.
     ///
     /// `LocalMasks` prefers metered skin for `subjectLuma` when a face is present, and the lift is
@@ -51,6 +48,9 @@ public enum RecipeEngine {
             .flatMap(Double.init).map { min(0.85, max(0.0, $0)) } ?? 0.25
     }
 
+    /// How much darker than its own frame a subject must be before the exposure rules treat it as
+    /// needing help. The same value `subjectMask` uses for `backlit`, deliberately: two rules that
+    /// disagree about what a dark subject is produce a lift with no mask or a mask with no lift.
     static var subjectDeficitFloor: Double {
         ProcessInfo.processInfo.environment["KELVIN_SUBJECT_DEFICIT"]
             .flatMap(Double.init).map { min(0.5, max(0.0, $0)) } ?? 0.12

@@ -93,4 +93,25 @@ final class LookPersistenceTests: XCTestCase {
         s.applyLook(nil)
         XCTAssertNil(s.activeRecipe?.curve, "clearing the look must restore the candidate's curve")
     }
+
+    /// The app composes a look onto the candidate itself (`updateActiveRecipe`), so it has to use
+    /// the core's rule for whose curve survives. It used to keep the candidate's per-channel grade
+    /// under a mono look, which prints as a split tone: warm highlights and teal shadows on Mono.
+    func testAMonoLookDropsTheCandidatesColourGradeButKeepsItsTone() throws {
+        let s = AppState()
+        s.proxyCI = CIImage(color: CIColor(red: 0.5, green: 0.45, blue: 0.4))
+            .cropped(to: CGRect(x: 0, y: 0, width: 8, height: 8))
+        var graded = Recipe.neutral
+        graded.id = "dramatic"
+        let json = #"{"luma": [[0, 0], [0.5, 0.45], [1, 1]], "red": [[0, 0], [0.5, 0.55], [1, 1]], "blue": [[0, 0], [0.5, 0.45], [1, 1]]}"#
+        graded.curve = try JSONDecoder().decode(Curve.self, from: Data(json.utf8))
+        s.candidates = [CandidateViewModel(id: "dramatic", label: "Dramatic",
+                                           baseRecipe: graded, previewImage: NSImage())]
+        s.selectCandidate(id: "dramatic")
+        s.applyLook("mono")
+        let curve = try XCTUnwrap(s.activeRecipe?.curve, "the candidate's tone curve must survive")
+        XCTAssertEqual(curve.luma ?? [], graded.curve?.luma ?? [])
+        XCTAssertNil(curve.red, "the colour grade reached the grey print")
+        XCTAssertNil(curve.blue)
+    }
 }
