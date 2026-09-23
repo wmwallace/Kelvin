@@ -1,4 +1,5 @@
 import Foundation
+import QuickLookThumbnailing
 import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
@@ -128,11 +129,41 @@ struct MediaCache: Sendable {
     func thumbnailCG(for url: URL, maxPixel: Int = 160) -> CGImage? {
         let entry = entry(for: url, variant: "thumb\(maxPixel)", ext: "png")
         if let entry, let cached = readImage(at: entry) { return cached }
+        // AN EVICTED FRAME IS NOT DOWNLOADED FOR ITS THUMBNAIL. Reading its embedded preview would
+        // pull the whole 60 MB original back from iCloud — a shoot's worth of them, for a strip of
+        // 160 px pictures. Quick Look asks the file provider instead, which keeps a thumbnail of
+        // every file it evicts: measured 0.11 s, and the file stayed in iCloud. NOT cached — its
+        // pixels are Apple's rendering, not ImageIO's, and the rule above is that this cache only
+        // ever holds what a cold read produces. The real one is cached once the file is back.
+        if CloudFile.isEvicted(url) { return Self.cloudThumbnail(for: url, maxPixel: maxPixel) }
         guard let fresh = PhotoBrowser.decodeThumbnailCG(for: url, maxPixel: maxPixel) else {
             return nil
         }
         if let entry { writeImage(fresh, to: entry) }
         return fresh
+    }
+
+    /// The file provider's own thumbnail of an evicted file. Blocks for the round trip — this runs
+    /// on the thumbnail lane, which exists to absorb exactly that.
+    private static func cloudThumbnail(for url: URL, maxPixel: Int) -> CGImage? {
+        let request = QLThumbnailGenerator.Request(
+            fileAt: url, size: CGSize(width: maxPixel, height: maxPixel), scale: 1,
+            representationTypes: .thumbnail)
+        let done = DispatchSemaphore(value: 0)
+        let box = ThumbnailBox()
+        QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, _ in
+            box.image = representation?.cgImage
+            done.signal()
+        }
+        guard done.wait(timeout: .now() + 10) == .success else {
+            QLThumbnailGenerator.shared.cancel(request)
+            return nil
+        }
+        return box.image
+    }
+
+    private final class ThumbnailBox: @unchecked Sendable {
+        var image: CGImage?
     }
 
     private func readImage(at entry: URL) -> CGImage? {
@@ -213,13 +244,18 @@ struct MediaCache: Sendable {
     /// a shoot from a share: `PhotoOrder.captureIndex` walks every frame to build the strip's
     /// capture-time order and its place grouping, and every one of those is a file open across the
     /// network.
-    func captureInfo(for url: URL) -> CaptureInfo {
+    ///
+    /// `downloading: false` is for the folder-wide walk: an evicted frame that has never been read
+    /// answers with nothing rather than a 40-second download per file, and nothing is cached for it,
+    /// so the real header is read the first time the file is back. See `CloudFile`.
+    func captureInfo(for url: URL, downloading: Bool = true) -> CaptureInfo {
         let entry = entry(for: url, variant: "capture", ext: "json")
         if let entry, let data = try? Data(contentsOf: entry),
            let stored = try? JSONDecoder().decode(StoredCaptureInfo.self, from: data),
            stored.version == StoredCaptureInfo.currentVersion {
             return stored.captureInfo
         }
+        if !downloading, CloudFile.isEvicted(url) { return CaptureInfo() }
         let fresh = CaptureInfoReader.read(url: url)
         if let entry, let data = try? JSONEncoder().encode(StoredCaptureInfo(fresh)) {
             try? data.write(to: entry, options: .atomic)
@@ -237,7 +273,7 @@ struct MediaCache: Sendable {
         index.dates.reserveCapacity(urls.count)
         for url in urls {
             if Task.isCancelled { return index }
-            let info = captureInfo(for: url)
+            let info = captureInfo(for: url, downloading: false)
             if let captured = info.captured { index.dates[url] = captured }
             if let location = info.location { index.locations[url] = location }
         }
@@ -320,7 +356,9 @@ struct MediaCache: Sendable {
     /// Concerns are re-derived from the current thresholds on every load.
     func verdict(for url: URL, fastRAW: Bool = true) -> PhotoTriage.Verdict? {
         if let cached = storedVerdict(for: url, fastRAW: fastRAW) { return cached }
-        guard let fresh = PhotoTriage.readTracingPath(url: url, fastRAW: fastRAW)
+        // The folder scan is speculative: an evicted frame is not downloaded to be graded. It gets
+        // its verdict on the scan after it comes back. See `CloudFile`.
+        guard !CloudFile.isEvicted(url), let fresh = PhotoTriage.readTracingPath(url: url, fastRAW: fastRAW)
         else { return nil }
         // A fallback reading is never cached. The fast path can fail transiently (a network
         // volume mid-hiccup) while the full decode then succeeds, and the two paths can rasterise

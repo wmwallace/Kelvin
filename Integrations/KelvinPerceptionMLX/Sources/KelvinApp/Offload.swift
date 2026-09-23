@@ -46,10 +46,16 @@ enum Offload {
         /// The folder scan and content hashing — bounded wide, because the cost is the decode or the
         /// read of a 60 MB file, and one leaves cores idle.
         case scan
+        /// Downloading an evicted iCloud original before it is decoded (`CloudFile`). The thread
+        /// waits on the network for tens of seconds and uses no core, so it must never be the
+        /// decode lane's one slot; wide enough that the photograph just opened does not queue
+        /// behind one opened and left a moment ago, whose download cannot be interrupted.
+        case fetch
 
         var width: Int {
             switch self {
             case .decode, .vision, .export: return 1
+            case .fetch: return 3
             case .render: return 2
             case .io: return 4
             case .thumbnail: return 4
@@ -156,6 +162,12 @@ enum Offload {
     /// A lane whose jobs queue for seconds is the new shape of the old problem — say so where
     /// `log show` can find it, rather than waiting for someone to notice the app feels slow.
     private static func note(_ lane: Lane, queuedFor wait: TimeInterval, ran: TimeInterval) {
+        // A job that RAN long is the other half: it is what everything behind it was waiting on.
+        // The decode lane's 50-second waits were a read-ahead decode blocked on an iCloud download,
+        // and only the job queued behind it said anything.
+        if ran > 10, lane != .fetch, lane != .scan, lane != .export {
+            log.warning("\(String(describing: lane), privacy: .public) lane: one job ran \(ran, format: .fixed(precision: 1)) s")
+        }
         if wait > 2 {
             log.warning("\(String(describing: lane), privacy: .public) lane: job waited \(wait, format: .fixed(precision: 1)) s behind \(depth(of: lane)) others, then ran \(ran, format: .fixed(precision: 2)) s")
         }
