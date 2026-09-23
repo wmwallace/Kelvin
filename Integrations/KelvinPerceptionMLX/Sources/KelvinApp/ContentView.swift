@@ -5046,11 +5046,14 @@ final class AppState {
         finalRecipe.hsl = hsl.isEmpty ? candidate.baseRecipe.hsl : hsl
         // The look's structured limbs, by the same absolute-if-present rule as
         // `LookPreset.applied(to:)`. Mono is the active look's or none — a look is the only
-        // source of a conversion. The curve replaces the candidate's only when the look owns
-        // the tone character. The look's `hsl` is deliberately NOT read here: `applyLook`
-        // copied it into the editable `hsl` state above, which the user may have tuned since.
+        // source of a conversion. The curve is `LookPreset.curve(composedOnto:)`'s rule, not a
+        // copy of it: a look with its own curve owns the tone character, and a mono look without
+        // one keeps the candidate's luma curve but not its per-channel grade — which otherwise
+        // lands on the grey print as a split tone. The look's `hsl` is deliberately NOT read here:
+        // `applyLook` copied it into the editable `hsl` state above, which the user may have
+        // tuned since.
         finalRecipe.blackAndWhite = activeLook?.mono
-        if let lookCurve = activeLook?.curve { finalRecipe.curve = lookCurve }
+        if let activeLook { finalRecipe.curve = activeLook.curve(composedOnto: candidate.baseRecipe.curve) }
         self.activeRecipe = finalRecipe
 
         if renderInFlight { renderDirty = true; return }
