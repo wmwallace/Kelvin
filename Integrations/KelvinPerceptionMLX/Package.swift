@@ -15,7 +15,8 @@ import PackageDescription
 let package = Package(
     name: "KelvinPerceptionMLX",
     platforms: [
-        .macOS(.v14)   // required by mlx-swift-lm
+        .macOS(.v14),  // required by mlx-swift-lm
+        .iOS(.v17)     // mlx-swift-lm declares iOS 17; the engine and the model are shared with the iPhone app
     ],
     products: [
         .library(name: "KelvinPerceptionMLX", targets: ["KelvinPerceptionMLX"]),

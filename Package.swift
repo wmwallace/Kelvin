@@ -7,7 +7,8 @@ import PackageDescription
 let package = Package(
     name: "Kelvin",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v13),
+        .iOS(.v17)
     ],
     products: [
         .library(name: "KelvinCore", targets: ["KelvinCore"]),
