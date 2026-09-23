@@ -151,6 +151,25 @@ enum Pipeline {
                         canvasMasks: masks)
     }
 
+    /// A look resolved against ANOTHER photograph: that frame decoded, read and composed with the
+    /// style requested, the way the Mac's batch adapts a shoot look — the style is held, the
+    /// corrective baseline underneath it is this frame's own. If the curator drops the style for
+    /// this frame, its fallback is what comes back — the same rule the Mac's export follows.
+    static func resolve(style styleID: String, on url: URL) async throws -> Recipe {
+        let decoded = try await Lane.decode.run { () throws -> (Pixels, Double?) in
+            let full = try ImageDecoder.decode(url: url)
+            return (Pixels(image: try materialise(PerceptionProxy.downsample(full))), ExifReader.iso(url: url))
+        }
+        let proxy = decoded.0.image, iso = decoded.1
+        let perception = try await VisionPerceptionProvider().perceive(proxy)
+        let composed = try await Lane.render.run { () throws -> ComposedBox in
+            ComposedBox(try ShippedCandidates.compose(for: proxy, perception: perception, iso: iso,
+                                                      requestedStyleID: styleID))
+        }.value
+        guard let recipe = composed.chosen?.recipe else { throw PipelineError.render }
+        return recipe
+    }
+
     /// One look, re-rendered on the canvas with adjustments on top. On the render lane.
     static func renderAdjusted(_ recipe: Recipe, in composed: Composed) async throws -> CGImage {
         let canvas = composed.canvas, masks = composed.canvasMasks
