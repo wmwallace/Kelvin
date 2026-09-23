@@ -23,6 +23,14 @@ struct KelvinPhoneApp: App {
                     if let i = args.firstIndex(of: "-look"), i + 1 < args.count {
                         session.selectedID = args[i + 1]
                     }
+                    // `-adjust <light>,<warmth>,<contrast>` presets the sliders.
+                    if let i = args.firstIndex(of: "-adjust"), i + 1 < args.count {
+                        let v = args[i + 1].split(separator: ",").compactMap { Double($0) }
+                        if v.count == 3 {
+                            session.adjustments = Adjustments(light: v[0], warmth: v[1], contrast: v[2])
+                            await session.refreshAdjustedPreview()
+                        }
+                    }
                 }
                 #endif
         }
@@ -45,6 +53,7 @@ struct RootView: View {
     @Environment(EditSession.self) private var session
     @Environment(\.horizontalSizeClass) private var width
     @State private var pickerItem: PhotosPickerItem?
+    @State private var adjusting = false
 
     var body: some View {
         NavigationStack {
@@ -62,6 +71,10 @@ struct RootView: View {
         .sheet(item: Bindable(session).shareItem) { item in
             ShareSheet(url: item.url).ignoresSafeArea()
         }
+        .sheet(isPresented: $adjusting) { AdjustPanel() }
+        // The adjusted canvas follows both the sliders and the look they are applied to.
+        .onChange(of: session.adjustments) { Task { await session.refreshAdjustedPreview() } }
+        .onChange(of: session.selectedID) { Task { await session.refreshAdjustedPreview() } }
     }
 
     @ViewBuilder private var content: some View {
@@ -88,6 +101,11 @@ struct RootView: View {
             }
         }
         if session.composed != nil {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { adjusting = true } label: {
+                    Label("Adjust", systemImage: "slider.horizontal.3")
+                }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Button { Task { await session.saveToPhotos() } } label: {
@@ -190,7 +208,9 @@ struct LookPager: View {
             get: { session.selectedID ?? composed.openingID },
             set: { id in withAnimation(Motion.gated(reduceMotion)) { session.selectedID = id } })) {
             ForEach(composed.looks) { look in
-                Image(decorative: session.showingOriginal ? composed.original : look.preview, scale: 1)
+                Image(decorative: session.showingOriginal ? composed.original
+                                  : (look.id == session.selectedLook?.id ? session.adjustedPreview : nil) ?? look.preview,
+                      scale: 1)
                     .resizable()
                     .scaledToFit()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

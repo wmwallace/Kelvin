@@ -31,6 +31,29 @@ final class EditSession {
     private(set) var notice: String?
     private(set) var isSaving = false
     var shareItem: ShareItem?
+    /// Offsets on top of whichever look is chosen — see `Adjustments`. They follow the photograph
+    /// across a change of look, the way someone asking for "a bit brighter" means the photo.
+    var adjustments = Adjustments()
+    /// The chosen look re-rendered with `adjustments`, for the canvas. Nil when there are none.
+    private(set) var adjustedPreview: CGImage?
+    private var adjustToken = 0
+
+    /// The recipe that will be saved: the chosen look, with the adjustments on it.
+    var selectedRecipe: Recipe? { selectedLook.map { adjustments.applied(to: $0.recipe) } }
+
+    /// Re-render the chosen look with the current adjustments. Latest request wins: a drag makes
+    /// many, and only the last one's pixels are shown.
+    func refreshAdjustedPreview() async {
+        adjustToken += 1
+        let mine = adjustToken
+        guard let composed, let recipe = selectedRecipe, !adjustments.isNeutral else {
+            adjustedPreview = nil
+            return
+        }
+        let image = try? await Pipeline.renderAdjusted(recipe, in: composed)
+        guard mine == adjustToken else { return }
+        adjustedPreview = image
+    }
 
     struct ShareItem: Identifiable { let id = UUID(); let url: URL }
 
@@ -76,6 +99,8 @@ final class EditSession {
             guard request == mine else { return }
             selectedID = result.openingID
             showingOriginal = false
+            adjustments = Adjustments()
+            adjustedPreview = nil
             phase = .ready(result)
         } catch {
             guard request == mine else { return }
@@ -86,7 +111,8 @@ final class EditSession {
     // MARK: Keeping it
 
     func saveToPhotos() async {
-        guard let look = selectedLook, let source = composed?.source, !isSaving else { return }
+        guard let look = selectedLook, let recipe = selectedRecipe, let source = composed?.source,
+              !isSaving else { return }
         isSaving = true
         defer { isSaving = false }
         notice = nil
@@ -96,7 +122,7 @@ final class EditSession {
                 notice = "To save, allow \(Branding.displayName) to add photos in Settings"
                 return
             }
-            let file = try await Pipeline.export(look, from: source)
+            let file = try await Pipeline.export(recipe, from: source)
             try await PHPhotoLibrary.shared().performChanges {
                 PHAssetCreationRequest.forAsset().addResource(with: .photo, fileURL: file, options: nil)
             }
@@ -108,11 +134,11 @@ final class EditSession {
     }
 
     func share() async {
-        guard let look = selectedLook, let source = composed?.source, !isSaving else { return }
+        guard let recipe = selectedRecipe, let source = composed?.source, !isSaving else { return }
         isSaving = true
         defer { isSaving = false }
         do {
-            shareItem = ShareItem(url: try await Pipeline.export(look, from: source))
+            shareItem = ShareItem(url: try await Pipeline.export(recipe, from: source))
         } catch {
             notice = "Couldn't prepare the photo. \(error.localizedDescription)"
         }
