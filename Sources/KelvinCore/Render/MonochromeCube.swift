@@ -41,8 +41,11 @@ enum MonochromeCube {
                     if !bands.isEmpty {
                         let (h, s, _) = HSLCube.rgbToHSL(r, g, b)
                         // A near-grey pixel has no meaningful hue, so the filter shouldn't move it —
-                        // otherwise the mix would tint neutral walls and skies unpredictably.
-                        let colourfulness = min(1, s / 0.2)
+                        // otherwise the mix would tint neutral walls and skies unpredictably. The
+                        // guard is shared with `HSLCube`, whose doc explains the lattice-step factor
+                        // that keeps a near-black grey from being brightened through its cell's
+                        // off-axis corners.
+                        let colourfulness = HSLCube.colourfulness(r: r, g: g, b: b, saturation: s)
                         for band in bands {
                             let w = HSLCube.hueWeight(hueDegrees: h * 360, center: band.center)
                             guard w > 0 else { continue }

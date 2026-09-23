@@ -48,6 +48,31 @@ final class HSLRenderingTests: XCTestCase {
         XCTAssertLessThan(redDE, 2, "red must be left alone by a blue-only adjustment")
     }
 
+    /// A grey has no hue. `rgbToHSL` reports hue 0 for it, which is the red band's centre, so a
+    /// red lightness move used to reach every neutral in the frame at full weight: red L +100 lifted
+    /// pure black to mid grey. A band's claim on a pixel now fades with saturation, the guard
+    /// `MonochromeCube` shares. The near-black and near-white greys fall between cube lattice
+    /// points, where the leak came in through the cell's off-axis corners.
+    func testARedBandLeavesNeutralsAlone() throws {
+        for l in [100.0, -100.0] {
+            let r = recipe(hsl: ["red": HSLAdjustment(h: 40, s: 60, l: l)])
+            for v: UInt8 in [0, 4, 128, 250, 255] {
+                let grey = TestSupport.makeSolidImage(r: v, g: v, b: v, width: 8, height: 8)
+                let out = try ImageWriter.rgba8Bytes(Renderer.render(grey, with: r))
+                for c in 0..<3 {
+                    XCTAssertEqual(Int(out[c]), Int(v), accuracy: 1,
+                                   "red L \(l) moved the neutral \(v) (channel \(c) = \(out[c]))")
+                }
+            }
+        }
+    }
+
+    func testARedBandStillMovesARed() throws {
+        let red = TestSupport.makeSolidImage(r: 210, g: 40, b: 40)
+        let de = try deltaEToSource(red, recipe(hsl: ["red": HSLAdjustment(h: 0, s: 0, l: 100)]))
+        XCTAssertGreaterThan(de, 8, "a saturated red must still answer the red band")
+    }
+
     func testSaturationBoostIncreasesColorfulness() throws {
         // Boosting green saturation should change a green frame.
         let green = TestSupport.makeSolidImage(r: 60, g: 170, b: 60)

@@ -66,11 +66,19 @@ enum HSLCube {
     ///
     /// With the weights fixed, the three terms are a sum, a product and a sum, so the bands
     /// commute and the result no longer depends on their order at all.
-    static func adjusted(h: Double, s: Double, l: Double, bands: [Band]) -> (Double, Double, Double) {
+    ///
+    /// **A band's claim also fades with saturation.** A grey has no hue, and `rgbToHSL` reports hue
+    /// 0 for it — the red band's centre — so red lightness used to reach every neutral in the frame
+    /// at full weight: red L +100 lifted pure black to mid grey and −100 dropped white to it. The
+    /// lightness term is additive, so unlike the saturation term it does not vanish on its own at
+    /// s = 0. `makeData` passes `colourfulness(r:g:b:saturation:)`, the same guard `MonochromeCube`
+    /// applies, so the two panels agree on which pixels have a colour to speak of.
+    static func adjusted(h: Double, s: Double, l: Double, bands: [Band],
+                         colourfulness: Double = 1) -> (Double, Double, Double) {
         let originalHueDegrees = h * 360.0
         var h = h, s = s, l = l
         for band in bands {
-            let w = hueWeight(hueDegrees: originalHueDegrees, center: band.center)
+            let w = hueWeight(hueDegrees: originalHueDegrees, center: band.center) * colourfulness
             guard w > 0 else { continue }
             h += (band.adj.h / 100.0) * (maxHueShiftDegrees / 360.0) * w
             s *= 1.0 + (band.adj.s / 100.0) * w
@@ -95,7 +103,9 @@ enum HSLCube {
                 for ri in 0..<n {
                     let r = Double(ri) / Double(n - 1)
                     let (h0, s0, l0) = rgbToHSL(r, g, b)
-                    var (h, s, l) = adjusted(h: h0, s: s0, l: l0, bands: bands)
+                    var (h, s, l) = adjusted(
+                        h: h0, s: s0, l: l0, bands: bands,
+                        colourfulness: colourfulness(r: r, g: g, b: b, saturation: s0))
 
                     h = h.truncatingRemainder(dividingBy: 1.0); if h < 0 { h += 1 }
                     s = min(max(s, 0), 1)
@@ -112,6 +122,27 @@ enum HSLCube {
     }
 
     // MARK: - Hue weighting
+
+    /// HSL saturation at which a pixel counts as fully coloured for band membership. Below it a
+    /// band's influence falls linearly to nothing at grey. The value is `MonochromeCube`'s.
+    static let fullColourSaturation = 0.2
+
+    /// How much hue a cube node has to speak of: 0 on the grey axis, 1 once it is clearly coloured.
+    ///
+    /// Two factors, because saturation alone does not close the leak. The first is the saturation
+    /// ramp `MonochromeCube` has always used. The second exists because the cube is a lattice, and
+    /// a grey that falls between lattice points is interpolated from the eight corners of its cell
+    /// — six of which sit one step off the grey axis. HSL saturation calls those nodes coloured
+    /// (near black it calls them *fully* saturated: node (1, 0, 0)/31 has s = 1), so a red band
+    /// still reached a grey of 4/255 through its (1, 0, 0) corner and tinted it visibly red. A node
+    /// whose chroma is a single lattice step is quantisation, not colour, so membership is zero
+    /// there and reaches full strength by two steps. Real colours sit far above that.
+    static func colourfulness(r: Double, g: Double, b: Double, saturation s: Double) -> Double {
+        let step = 1.0 / Double(dimension - 1)
+        let chroma = max(r, g, b) - min(r, g, b)
+        let offAxis = min(1, max(0, (chroma - step) / step))
+        return min(1, max(0, s) / fullColourSaturation) * offAxis
+    }
 
     /// Linear falloff of a band's influence with circular hue distance.
     static func hueWeight(hueDegrees: Double, center: Double) -> Double {

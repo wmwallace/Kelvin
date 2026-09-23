@@ -110,8 +110,9 @@ public struct LookPreset: Sendable, Equatable, Identifiable {
     ///
     /// Scalar limbs are deltas (`apply(to:)`) — a look seasons the development rather than
     /// replacing it. The structured limbs are absolute: `hsl`, `mono` and `curve` each REPLACE
-    /// the recipe's own when the look carries one, and leave the recipe's alone when it doesn't.
-    /// The CLI's `--look` composes through this; the app applies the same limbs piecewise
+    /// the recipe's own when the look carries one, and leave the recipe's alone when it doesn't —
+    /// with one exception, a mono look's treatment of the candidate's colour grade, which
+    /// `curve(composedOnto:)` explains. The CLI's `--look` composes through this; the app applies the same limbs piecewise
     /// (`applyLook` / `updateActiveRecipe`) because its `hsl` becomes user-editable state after
     /// the look lands — the rule itself lives here.
     public func applied(to recipe: Recipe) -> Recipe {
@@ -119,8 +120,30 @@ public struct LookPreset: Sendable, Equatable, Identifiable {
         apply(to: &out.global)
         if let hsl { out.hsl = hsl }
         if let mono { out.blackAndWhite = mono }
-        if let curve { out.curve = curve }
+        out.curve = curve(composedOnto: recipe.curve)
         return out
+    }
+
+    /// The curve a recipe carries once this look is on it.
+    ///
+    /// A look with its own curve replaces the recipe's, as `curve` documents. A black-and-white
+    /// look WITHOUT one keeps the candidate's luma curve — contrast is tone, and tone survives a
+    /// conversion — but drops the candidate's red, green and blue curves. Those are a colour
+    /// grade (every non-Natural candidate carries one, `CandidateGeneration.toneCurve`'s `grade`),
+    /// and since the renderer runs per-channel curves on a mono recipe AFTER the conversion, so
+    /// that a look's toning curve tones the print, a surviving grade toned it too: Mono on
+    /// Dramatic printed warm highlights over teal shadows, which is neither a straight
+    /// conversion nor anything its blurb promises. A look that converts owns the print's colour.
+    ///
+    /// Decided here rather than in the renderer because only the composition knows whose curve is
+    /// whose. By the time a recipe reaches `Renderer` a toning curve and a leftover grade are the
+    /// same three arrays, and a hand-built mono recipe with per-channel curves must still tone.
+    /// Public so the app's piecewise composition can apply the same rule.
+    public func curve(composedOnto recipeCurve: Curve?) -> Curve? {
+        if let curve { return curve }
+        guard mono != nil, let recipeCurve else { return recipeCurve }
+        guard let luma = recipeCurve.luma else { return nil }
+        return Curve(luma: luma, red: nil, green: nil, blue: nil)
     }
 }
 
