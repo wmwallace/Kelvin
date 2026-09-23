@@ -3,9 +3,8 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
-/// An HDR companion for an edit, and the file that carries both — EXPERIMENTAL, off the shipping
-/// path, and behind `kelvin-cli hdr-probe` until a person has looked at the results on an HDR screen
-/// (see D28 in docs/DECISIONS.md, and CLAUDE.md: whether an edit looks good is not a table's call).
+/// An HDR companion for an edit, written as a HEIC's gain map (D28 — decided 23 September 2026, on
+/// the owner's look at samples on an HDR screen: "Images are good").
 ///
 /// **The idea.** Kelvin's renderer is display-referred: its tone curves end at white, so what it
 /// produces is an SDR photograph, and every recipe and every corpus number is about that photograph.
@@ -15,8 +14,8 @@ import UniformTypeIdentifiers
 /// how much brighter than white each highlight really was, and multiplying the edit by that ratio
 /// lifts exactly those highlights and leaves everything the edit decided below white as it is.
 ///
-/// Written as one HEIC: the SDR edit as the base image, which every viewer shows, plus a gain map
-/// that HDR displays apply (`kCIImageRepresentationHDRImage`). Nothing here changes a recipe.
+/// Written as one HEIC by `ImageWriter.write(hdr:)`: the SDR edit as the base image, which every
+/// viewer shows, plus a gain map that HDR displays apply. Nothing here changes a recipe.
 public enum HDRDelivery {
 
     /// How much of the RAW's extended range to release. Apple's scale: 0 is SDR, 1 is the full
@@ -101,20 +100,12 @@ public enum HDRDelivery {
             .cropped(to: sdrEdit.extent)
     }
 
-    public enum Error: Swift.Error { case encodeFailed }
-
-    /// One HEIC: the SDR edit as the base image every viewer shows, and a gain map from `hdr` that an
-    /// HDR display applies. Display P3 base, as a phone would write it.
-    public static func writeHEIC(sdr: CIImage, hdr: CIImage, to url: URL, quality: Double = 0.9) throws {
-        guard let p3 = CGColorSpace(name: CGColorSpace.displayP3) else { throw Error.encodeFailed }
-        if #available(macOS 15, iOS 18, *) {
-            try ImageWriter.exportContext.writeHEIFRepresentation(
-                of: sdr, to: url, format: .RGBA8, colorSpace: p3,
-                options: [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): quality,
-                          .hdrImage: hdr])
-        } else {
-            throw Error.encodeFailed
-        }
+    /// The HDR companion of a delivered edit, when the source is a RAW with headroom to give; nil
+    /// otherwise, and the export stays SDR. Hand the result to `ImageWriter.write(hdr:)`, which
+    /// writes it as the HEIC's gain map under the same metadata, size and colour-space rules as
+    /// every other export.
+    public static func companion(forEdit sdr: CIImage, from source: URL) -> CIImage? {
+        headroom(for: source).map { hdrCompanion(ofEdit: sdr, headroom: $0) }
     }
 
     /// Whether a file on disk carries an HDR gain map — for the probe, and for a test.

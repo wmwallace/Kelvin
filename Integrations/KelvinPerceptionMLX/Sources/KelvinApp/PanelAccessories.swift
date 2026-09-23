@@ -163,6 +163,16 @@ enum PanelAccessories {
                                 target: target, action: #selector(ExportTarget.locationChanged(_:)))
         location.state = state.stripLocationOnExport ? .on : .off
 
+        // HDR (D28): the RAW's own highlight headroom as the HEIC's gain map. Offered only where it
+        // can do something — enabled for HEIC, and said to be about RAW files, since a JPEG source
+        // has no headroom to give — rather than a checkbox that silently does nothing.
+        let hdr = NSButton(checkboxWithTitle: "HDR highlights from RAW files (HEIC)",
+                           target: target, action: #selector(ExportTarget.hdrChanged(_:)))
+        hdr.state = state.exportHDR ? .on : .off
+        hdr.toolTip = "On an HDR display, sunlit highlights glow brighter than white, from what the "
+            + "camera captured. Everywhere else the photo looks exactly as edited."
+        target.hdr = hdr
+
         target.quality = quality
         target.qualityLabel = qualityLabel
         target.refresh()
@@ -215,7 +225,8 @@ enum PanelAccessories {
              NSTextField(labelWithString: "Suffix:"), suffix],
             [NSGridCell.emptyContentView, namingExample,
              NSGridCell.emptyContentView, NSGridCell.emptyContentView],
-            [NSGridCell.emptyContentView, location, NSGridCell.emptyContentView, NSGridCell.emptyContentView]
+            [NSGridCell.emptyContentView, location, NSGridCell.emptyContentView, NSGridCell.emptyContentView],
+            [NSGridCell.emptyContentView, hdr, NSGridCell.emptyContentView, NSGridCell.emptyContentView]
         ]
         // WHICH ROWS SPAN THE FULL WIDTH, named rather than counted from an index.
         //
@@ -223,7 +234,7 @@ enum PanelAccessories {
         // middle silently merged a row that needed its four columns — the Suffix field collapsed to
         // a sliver and its label landed on top of the checkbox below. A two-column row and a
         // full-width row are different kinds of row; say which is which.
-        var mergedRows = Set([rows.count - 2, rows.count - 1])   // the example, and the checkbox
+        var mergedRows = Set([rows.count - 3, rows.count - 2, rows.count - 1])   // the example, and the two checkboxes
         if showScope {
             // The photographer's own word for this export. Only on the group panel: labelling a
             // batch is the whole use — one photo is already being given a name in the save field
@@ -337,6 +348,10 @@ enum PanelAccessories {
         @objc func locationChanged(_ sender: NSButton) {
             state?.stripLocationOnExport = (sender.state == .on)
         }
+        weak var hdr: NSButton?
+        @objc func hdrChanged(_ sender: NSButton) {
+            state?.exportHDR = (sender.state == .on)
+        }
         @objc func keepersChanged(_ sender: NSButton) {
             state?.exportKeepersOnly = (sender.state == .on)
         }
@@ -440,6 +455,7 @@ enum PanelAccessories {
             guard let state else { return }
             let lossy = state.exportFormat.isLossy
             quality?.isEnabled = lossy
+            hdr?.isEnabled = state.exportFormatId == "heic"
             qualityLabel?.stringValue = lossy ? "\(Int(state.exportQuality * 100))" : "—"
             qualityLabel?.textColor = lossy ? .labelColor : .tertiaryLabelColor
             // The format decides the extension, so the panel's type and the suggested name move

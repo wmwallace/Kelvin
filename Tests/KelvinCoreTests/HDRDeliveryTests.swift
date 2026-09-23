@@ -31,4 +31,22 @@ final class HDRDeliveryTests: XCTestCase {
         XCTAssertEqual(value(HDRDelivery.hdrCompanion(ofEdit: edit, headroom: unity)), 0.5, accuracy: 0.01)
         XCTAssertEqual(value(HDRDelivery.hdrCompanion(ofEdit: edit, headroom: double)), 1.0, accuracy: 0.01)
     }
+
+    /// The writer carries a companion as a gain map in a HEIC, and nowhere else.
+    func testAHEICWrittenWithACompanionCarriesAGainMap() throws {
+        let extent = CGRect(x: 0, y: 0, width: 64, height: 64)
+        let sdr = CIImage(color: CIColor(red: 0.8, green: 0.8, blue: 0.8)).cropped(to: extent)
+        let hdr = sdr.applyingFilter("CIColorMatrix", parameters: [
+            "inputRVector": CIVector(x: 3, y: 0, z: 0, w: 0),
+            "inputGVector": CIVector(x: 0, y: 3, z: 0, w: 0),
+            "inputBVector": CIVector(x: 0, y: 0, z: 3, w: 0)])
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let heic = dir.appendingPathComponent("a.heic"), jpeg = dir.appendingPathComponent("a.jpg")
+        try ImageWriter.write(sdr, to: heic, format: .heic(quality: 0.9), colorSpace: .displayP3, hdr: hdr)
+        try ImageWriter.write(sdr, to: jpeg, format: .jpeg(quality: 0.9), hdr: hdr)
+        XCTAssertTrue(HDRDelivery.hasGainMap(heic))
+        XCTAssertFalse(HDRDelivery.hasGainMap(jpeg), "a JPEG export stays SDR")
+    }
 }

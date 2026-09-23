@@ -74,3 +74,15 @@ final class DecodeOrientationTests: XCTestCase {
         XCTAssertEqual(properties[kCGImagePropertyPixelHeight] as? Int, 64)
     }
 }
+
+/// A failed open is explained to a person, not dumped as an error type.
+final class DecodeErrorWordingTests: XCTestCase {
+    func testAMissingFileSaysSoInWords() {
+        let url = URL(fileURLWithPath: "/nowhere/_DSC0001.ARW")
+        XCTAssertThrowsError(try ImageDecoder.decode(url: URL(fileURLWithPath: "/nowhere/missing.jpg"))) {
+            XCTAssertTrue($0.localizedDescription.contains("missing.jpg"), $0.localizedDescription)
+            XCTAssertFalse($0.localizedDescription.contains("KelvinCore"))
+        }
+        XCTAssertTrue(ImageDecoder.Error.rawDecodeFailed(url).localizedDescription.contains("_DSC0001.ARW"))
+    }
+}

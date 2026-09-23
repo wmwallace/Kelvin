@@ -892,7 +892,7 @@ case "hdr-probe":
         print(String(format: "peak gain %.2f · peak SDR %.3f · peak HDR %.3f", peak(headroom), peak(sdr), peak(hdr)))
         let out = URL(fileURLWithPath: outPath)
         let start = Date()
-        try HDRDelivery.writeHEIC(sdr: sdr, hdr: hdr, to: out)
+        try ImageWriter.write(sdr, to: out, format: .heic(quality: 0.9), colorSpace: .displayP3, hdr: hdr)
         print(String(format: "wrote %@ in %.1f s — gain map present: %@", out.lastPathComponent as NSString,
                      Date().timeIntervalSince(start), HDRDelivery.hasGainMap(out) ? "yes" : "NO"))
     } catch { fail("\(error)") }

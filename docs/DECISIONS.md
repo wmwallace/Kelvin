@@ -1482,7 +1482,7 @@ would stop being reproducible.
 
 ---
 
-## D28 — HDR export from the RAW's own headroom · **Proposed 23 September 2026 — needs eyes, not a table**
+## D28 — HDR export from the RAW's own headroom · **Decided 23 September 2026** (on the owner's look at samples on an HDR screen)
 
 **What.** An optional HDR export: one HEIC whose base image is the SDR edit every viewer shows, plus a
 gain map an HDR display applies (`HDRDelivery`, `kelvin-cli hdr-probe`). Nothing in the app calls it.
@@ -1503,6 +1503,13 @@ EDR decode tone-maps differently all the way down, so the unweighted ratio put a
 **Measured so far.** An overcast Cannon Beach frame has no headroom to give (decode peak 0.654 → 0.676
 at maximum EDR) and correctly gets no gain map. A sunlit Sunriver frame (`_DSC3965`) decodes to 3.57×
 white and gets highlights up to 4×. ~5 s per 60 MP frame.
+
+**Decided.** The owner looked at `_DSC3965` in Natural and Vivid on an HDR screen: "Images are
+good." It ships as an export option — the Mac's export panel ("HDR highlights from RAW files",
+on by default, enabled for HEIC), and the iPhone's Save and Apply to More (always HEIC). A non-RAW
+source, or a RAW with no headroom, writes an ordinary SDR file; every viewer without HDR sees the
+edit exactly as chosen. Written by `ImageWriter.write(hdr:)`, so the export's metadata, size and
+colour-space rules and its atomic write all apply unchanged.
 
 **What decides it.** Whether the result looks like the photograph on an HDR screen — the owner's eye,
 on samples sent 23 September — not a ΔE, since the references are SDR. Open questions for that look:

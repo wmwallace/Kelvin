@@ -231,9 +231,13 @@ public enum ImageWriter {
     public static func write(_ image: CIImage, to url: URL, format: Format? = nil,
                             metadata: MetadataPolicy = .asShot,
                             size: Size = .fullResolution,
-                            colorSpace: ColorSpace = .sRGB) throws {
+                            colorSpace: ColorSpace = .sRGB,
+                            hdr: CIImage? = nil) throws {
         let fmt = format ?? Format.inferred(from: url)
         var image = metadata == .asShot ? image : scrubbed(image)
+        // The HDR companion (D28) rides only in a HEIC, as its gain map; every other format is SDR
+        // by construction, so it is dropped rather than half-honoured.
+        var hdr = hdr
 
         // Resample BEFORE encoding, and with Lanczos — the difference between a downscale that
         // keeps detail and one that aliases fences and hair into moiré. `CILanczosScaleTransform`
@@ -244,6 +248,8 @@ public enum ImageWriter {
                                               parameters: [kCIInputScaleKey: factor,
                                                            kCIInputAspectRatioKey: 1.0])
             image = scaled.settingProperties(image.properties)
+            hdr = hdr?.applyingFilter("CILanczosScaleTransform",
+                                      parameters: [kCIInputScaleKey: factor, kCIInputAspectRatioKey: 1.0])
         }
 
         let space = colorSpace.cgColorSpace
@@ -288,12 +294,14 @@ public enum ImageWriter {
             case .heic(let quality):
                 let qualityKey = CIImageRepresentationOption(
                     rawValue: kCGImageDestinationLossyCompressionQuality as String)
+                var options: [CIImageRepresentationOption: Any] = [qualityKey: max(0, min(1, quality))]
+                if let hdr, #available(macOS 15, iOS 18, *) { options[.hdrImage] = hdr }
                 try exportContext.writeHEIFRepresentation(
                     of: image,
                     to: partial,
                     format: .RGBA8,
                     colorSpace: space,
-                    options: [qualityKey: max(0, min(1, quality))]
+                    options: options
                 )
             }
             // `replaceItemAt` rather than `moveItem`: the destination may already exist (an export
