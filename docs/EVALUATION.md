@@ -613,6 +613,27 @@ contrast range, direction, intent, count, placement, notes — with fixed consta
 frames to the corrective subject lift, and on 24 re-read Cannon Beach frames the subject mask
 appeared on 11 and the result is visibly better on 6 of 8 inspected.
 
+## Vision replaces the model, measured (D27, 22 September 2026)
+
+The section above left one question open: could the two fields that matter come from a detector
+instead of a model? `kelvin-cli vision-label` writes a `VisionPerceptionProvider` read for every
+entry, so the same corpus is scored under each read by swapping its perception folder. Engine 0.7.0,
+both corpora rebuilt that day:
+
+| read | paired engine-default | vs model (better/worse) | degradation engine-default | vs model |
+|---|---|---|---|---|
+| model | 7.355 | — | 7.044 | — |
+| constant | 7.426 | 34 / 43 | 6.406 | 37 / 17 |
+| **Vision** | **7.272** | **51 / 26** | 6.678 | 37 / 17 |
+| Vision + scene | 7.372 | 30 / 47 | 6.561 | 38 / 16 |
+
+Paired-bootstrap 95% CIs against the model: Vision −0.083 [−0.139, −0.023] on the pairs,
+−0.365 [−0.720, −0.092] on the degradations — the only read better on both with an interval that
+excludes zero. The read takes ~0.1 s (77 frames in 7 s, decode included) against 4.5–6 s.
+
+**Re-run it before changing the provider's mapping**: `vision-label --in-dir <corpus>/source
+--out-dir <arm>/perception`, symlink `source/` and `reference/`, copy `manifest.json`, `eval`.
+
 ## A read that changes is not an edit that changes
 
 ⚠️ **Before blaming a prompt change for a quality complaint, measure whether it reached the

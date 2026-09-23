@@ -3,11 +3,10 @@
 #
 #   scripts/package-app.sh [--debug] [out-dir]
 #
-# Local development build (ad-hoc signed, no notarisation, no weights required):
+# Local development build (ad-hoc signed, no notarisation):
 #   scripts/package-app.sh
 #
-# Release build (self-contained, signed, notarised, stapled, plus a signed disk image):
-#   make stage-model
+# Release build (signed, notarised, stapled, plus a signed disk image):
 #   KELVIN_SIGN_IDENTITY="Developer ID Application: … (TEAMID)" \
 #   KELVIN_NOTARY_PROFILE=kelvin-notary \
 #     scripts/package-app.sh
@@ -18,9 +17,13 @@
 #   KELVIN_VERSION         CFBundleShortVersionString (default 0.1.0)
 #   KELVIN_DMG=0           skip building the disk image
 #
-# Measured on a release build with the weights inside: app 1.7 GB, dmg 1.4 GB, ~1 min to build the
-# image, and the notary service takes roughly fifteen minutes per submission at that size. There are
+# Measured while the weights shipped inside (before D27): app 1.7 GB, dmg 1.4 GB, ~1 min to build
+# the image, and roughly fifteen minutes per notary submission at that size. There are
 # TWO submissions — the app and then the image — and the ordering is deliberate; see the dmg section.
+#
+# HISTORY, kept because it is the reason for a habit: while the app linked MLX (until D27) its bundle
+# died on the first read because MLX could not find its metallib outside Contents/Resources. The app
+# no longer links MLX, but resource bundles still belong in Contents/Resources, not next to the binary.
 #
 # THE LAUNCH FAILURE IS FIXED, AND IT WAS NEITHER OF THE THINGS THIS COMMENT USED TO BLAME.
 #
@@ -111,49 +114,16 @@ APP="$OUT/$NAME.app"
 echo "▸ Assembling $APP"
 rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BUILD/kelvin-app" "$APP/Contents/MacOS/"
-# INTO Contents/Resources, NOT Contents/MacOS — see the header. MLX searches each bundle's
-# `resourceURL` for default.metallib, and SwiftPM's `Bundle.module` accessors search
-# `Bundle.main.resourceURL`. Both mean Contents/Resources inside a .app. Putting these next to the
-# executable is what `swift run` wants and is silently fatal in a bundle.
-if ! cp -R "$BUILD"/*.bundle "$APP/Contents/Resources/" 2>/dev/null; then
-  echo "package-app.sh: no SwiftPM resource bundles found in $BUILD" >&2
-  echo "  the app cannot load MLX's metallib without them and will die on first perceive()" >&2
+# INTO Contents/Resources, NOT Contents/MacOS: SwiftPM's `Bundle.module` accessors search
+# `Bundle.main.resourceURL`, which is Contents/Resources inside a .app. Since D27 the app links no
+# MLX, so there may be no resource bundles at all — copy whatever SwiftPM produced, and require none.
+cp -R "$BUILD"/*.bundle "$APP/Contents/Resources/" 2>/dev/null || true
+# NO WEIGHTS SHIP, AND NONE ARE FETCHED (D27, superseding D-model-4). Scenes are read by Apple's
+# Vision framework, which is part of macOS. If a `PerceptionModel` directory ever appears in the
+# bundle again, something has re-linked the retired model path — refuse rather than ship 1.7 GB.
+if [ -d "$APP/Contents/Resources/PerceptionModel" ]; then
+  echo "package-app.sh: the bundle contains PerceptionModel/ — the model was retired in D27" >&2
   exit 1
-fi
-# Fail loudly rather than shipping a bundle that dies three seconds after a user opens a photo.
-if [ ! -f "$APP/Contents/Resources/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ]; then
-  echo "package-app.sh: default.metallib is not where MLX looks for it" >&2
-  exit 1
-fi
-
-# THE PERCEPTION WEIGHTS SHIP INSIDE THE APP. One artifact, no first-run download, no third party,
-# and — the reason that actually decided it — the model is pinned to the release rather than to
-# whatever a remote repository points at today. `ModelConfiguration(id:)` resolves revision "main",
-# so a re-quantisation upstream would silently change perception behaviour for new users of an
-# already-shipped build. Weights that travel with the binary cannot do that.
-#
-# `MLXPerceptionProvider.bundledModelDirectory` looks exactly here, and finding it means no network
-# call is ever made — `loadModelContainer` only constructs a Downloader for the `.id` case.
-#
-# Staged by `make stage-model`, which refuses to stage weights whose LICENSE is absent, because
-# shipping them is redistribution. Kept out of git: 1.6 GB does not belong in every clone.
-MODEL_SRC="$ROOT/Vendor/PerceptionModel"
-if [ -d "$MODEL_SRC" ] && [ -f "$MODEL_SRC/config.json" ]; then
-  echo "▸ Bundling perception weights ($(du -sh "$MODEL_SRC" | cut -f1))…"
-  # -c asks for APFS clonefile: copy-on-write, so this is instant and costs no extra disk until
-  # codesign touches something. Falls back to a real copy on filesystems without it.
-  cp -Rc "$MODEL_SRC" "$APP/Contents/Resources/PerceptionModel" 2>/dev/null || \
-    cp -R "$MODEL_SRC" "$APP/Contents/Resources/PerceptionModel"
-elif [ "${KELVIN_SIGN_IDENTITY:--}" != "-" ]; then
-  # A RELEASE BUILD MUST BE SELF-CONTAINED. Without this guard, forgetting `make stage-model` would
-  # produce a signed, notarised app that looks correct, ships, and then reaches for Hugging Face on
-  # a user's machine — the exact behaviour this design exists to remove, discovered by a stranger.
-  echo "package-app.sh: no staged weights at $MODEL_SRC, and this is a signed build." >&2
-  echo "  Run 'make stage-model' first. A release must not depend on a download." >&2
-  exit 1
-else
-  echo "▸ No staged weights — this build will fetch them at runtime (dev builds only)."
-  echo "  Run 'make stage-model' to bundle them."
 fi
 # The .icns is still named for the product on disk; renaming the app means renaming that file
 # too. One `git mv`, and the rest of this script follows the constant.

@@ -65,7 +65,10 @@ let package = Package(
         .executableTarget(
             name: "KelvinApp",
             dependencies: [
-                "KelvinPerceptionMLX",
+                // Not KelvinPerceptionMLX: the app reads scenes with Apple's Vision framework
+                // (D27), so it links no MLX, carries no weights and compiles no Metal kernels.
+                // The MLX provider stays in this package for `kelvin-perceive`, as a research
+                // instrument the corpus can still be labelled with.
                 .product(name: "KelvinCore", package: "Kelvin"),
                 .product(name: "Sparkle", package: "Sparkle")
             ]

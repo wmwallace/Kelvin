@@ -7,7 +7,6 @@ import CryptoKit
 import UniformTypeIdentifiers
 import Metal
 import KelvinCore
-import KelvinPerceptionMLX
 import os
 
 // MARK: - Design system: "an instrument for light"
@@ -675,7 +674,7 @@ final class AppState {
     var zoom = 1.0
     var pan = CGSize.zero
     // The real on-device VLM. An actor, so the model loads once and is reused across photos.
-    private let perceptionProvider = MLXPerceptionProvider()
+    private let perceptionProvider = SceneReader()
 
     /// Used when the model can't run (not yet downloaded, offline). Low confidence keeps the
     /// engine on its conservative, measurement-only path rather than committing to a scene.
@@ -2637,12 +2636,6 @@ final class AppState {
         }
     }
 
-    /// Load the perception model in the background at launch, so the first photograph does not pay
-    /// for it. See `MLXPerceptionProvider.preload`.
-    func warmPerception() async {
-        await perceptionProvider.preload()
-    }
-
     /// What the model said it saw, for the panel — the categorical read on one line, and its own
     /// sentence beneath.
     ///
@@ -2671,7 +2664,6 @@ final class AppState {
 
     /// Whether any photograph has been read since launch. Only ever used to tell the truth about
     /// how long the first one takes.
-    @ObservationIgnored private var hasReadAPhoto = false
 
     /// The current edit, in the form that goes to disk. Internal rather than private so the
     /// round-trip test can save exactly what the app saves.
@@ -3392,16 +3384,11 @@ final class AppState {
             let perceptionProxy = decoded.perceptionProxy
             let proxy = decoded.proxy
 
-            // The FIRST read of a session is not like the others: 1.6 GB of weights load before
-            // anything is looked at, which is fifteen seconds where a message identical to the
-            // two-second reads that follow makes a working app look like a hung one. Say which one
-            // this is. The flag flips once, so the long sentence never becomes wallpaper.
-            statusMessage = hasReadAPhoto
-                ? "Reading the scene…"
-                : "Loading the perception model — about 15 seconds, once per launch…"
-            // Real perception: Qwen2.5-VL reads the 768px proxy. First call loads the model (a few
-            // seconds once cached); if it can't run, fall back to a conservative read so the
-            // app still produces candidates from the measured statistics.
+            // Apple's Vision framework reads the 768 px proxy (D27) — a tenth of a second, with
+            // nothing to load first, which is why the first read of a session no longer needs a
+            // sentence of its own. If it cannot run, fall back to a conservative read so the app
+            // still produces candidates from the measured statistics.
+            statusMessage = "Reading the scene…"
             let perceptionRead: Perception
             if let cached = PerceptionStore.load(for: url, modelId: perceptionProvider.activeModelID) {
                 // ALREADY READ, IN AN EARLIER SESSION. A read is a pure function of the pixels, so
@@ -3440,14 +3427,13 @@ final class AppState {
                     return
                 } catch {
                     perceptionRead = Self.conservativeRead
-                    statusMessage = "Couldn't run the perception model — using a conservative read"
+                    statusMessage = "Couldn't read the scene — using a conservative read"
                 }
             }
             guard imageURL == url else { return }
             self.perception = perceptionRead
             Self.lifecycle.notice("perceived \(url.lastPathComponent, privacy: .public) at \(Int(Date().timeIntervalSince(openedAt) * 1000)) ms — \(self.statusMessage, privacy: .public)")
 
-            hasReadAPhoto = true
             statusMessage = "Measuring…"
             // Also off the main thread: the statistics pass, Vision's person/sky segmentation and
             // the dust scan each render the proxy, and together they were the second-biggest block

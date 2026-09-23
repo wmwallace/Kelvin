@@ -104,10 +104,10 @@ final class DocumentOpenDelegate: NSObject, NSApplicationDelegate {
             let clean = await state.awaitQuiescenceForQuit()
             hatch.cancel()
             if clean {
-                Self.log.notice("quit: model and GPU lanes idle, terminating")
+                Self.log.notice("quit: scene reader and GPU lanes idle, terminating")
                 sender.reply(toApplicationShouldTerminate: true)
             } else {
-                Self.log.fault("quit: the model or a render was still busy after the grace period — leaving through _exit")
+                Self.log.fault("quit: a scene read or a render was still busy after the grace period — leaving through _exit")
                 _exit(0)
             }
         }
@@ -174,10 +174,6 @@ struct KelvinApp: App {
                         .notice("window up — \(BuildIdentity.isDevelopmentBuild ? "development" : "installed", privacy: .public) build")
                     // Off unless KELVIN_TRACE_HITCHES is set. See Diagnostics.swift.
                     HitchMonitor.shared.start()
-                    // Load the model while the window sits on the empty state, rather than charging
-                    // fifteen seconds to whichever photograph is opened first. Background priority:
-                    // this must never compete with decoding a photo somebody just dropped.
-                    Task(priority: .background) { await appState.warmPerception() }
                     // Keep the thumbnail/header cache inside its budget. At launch and nowhere else:
                     // it walks a directory listing, so putting it on the path that READS an entry
                     // would make a large cache slow down the thing it exists to speed up.
