@@ -174,6 +174,9 @@ struct CandidateViewModel: Identifiable {
     let label: String
     let baseRecipe: Recipe
     let previewImage: NSImage
+    /// What this look does to THIS photograph, in words, relative to Natural — `CandidateDescription`,
+    /// the same sentence the iPhone shows. Empty until the set is known (it is a comparison).
+    var summary: String = ""
 }
 
 // MARK: - App state (pipeline logic unchanged; presentation reimagined)
@@ -2642,7 +2645,9 @@ final class AppState {
     /// when everything else on this screen genuinely is one.
     var sceneSummary: (headline: String, note: String?)? {
         guard let p = perception else { return nil }
-        var parts: [String] = [p.scene.rawValue]
+        // `.other` is not said: it is the constant the Vision read leaves the scene at (D27), so on
+        // every photograph it would be the same word, and a word that never changes says nothing.
+        var parts: [String] = p.scene == .other ? [] : [p.scene.rawValue]
         if let light = ExportNaming.descriptor(for: p.lighting.condition) {
             parts.append(light.replacingOccurrences(of: "-", with: " "))
         }
@@ -2657,11 +2662,9 @@ final class AppState {
             parts.append(p.problems.map(\.rawValue).joined(separator: ", "))
         }
         let note = p.notes?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if parts.isEmpty { parts.append("no single subject") }
         return (parts.joined(separator: " · "), (note?.isEmpty == false) ? note : nil)
     }
-
-    /// Whether any photograph has been read since launch. Only ever used to tell the truth about
-    /// how long the first one takes.
 
     /// The current edit, in the form that goes to disk. Internal rather than private so the
     /// round-trip test can save exactly what the app saves.
@@ -3688,6 +3691,8 @@ final class AppState {
             let resolution = CandidateCurator.resolve(from: scored,
                                                       requested: wanted ?? suggested, count: 4)
             let curated = resolution.curated
+            let naturalRecipe = recipes.first { $0.id == CandidateStyle.natural.id }
+                ?? curated.first?.recipe ?? .neutral
             self.candidates = curated.compactMap { item in
                 let key = item.recipe.id ?? ""
                 guard let image = previews[key] else { return nil }
@@ -3695,7 +3700,8 @@ final class AppState {
                     id: key,
                     label: item.recipe.label ?? key,
                     baseRecipe: item.recipe,
-                    previewImage: image)
+                    previewImage: image,
+                    summary: CandidateDescription.sentence(for: item.recipe, relativeTo: naturalRecipe))
             }
             let models = self.candidates
             // This is what makes applying a look to a folder mean anything: the style was chosen
@@ -6722,6 +6728,7 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .keyboardShortcut("p", modifiers: [.command, .option])
                 .help(panelCollapsed ? "Show the edit panel (⌥⌘P)" : "Hide the edit panel (⌥⌘P)")
+                .accessibilityLabel(panelCollapsed ? "Show the edit panel" : "Hide the edit panel")
 
                 // ⌘, has always worked and the menu item has always been there, but there was no
                 // way to DISCOVER either from inside the window — and this app hides its title bar,
@@ -6741,6 +6748,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Request a feature")
+                .accessibilityLabel("Request a feature")
 
                 SettingsLink {
                     Image(systemName: "gearshape")
@@ -6751,6 +6759,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Settings (⌘,)")
+                .accessibilityLabel("Settings")
             }
         }
         .padding(.horizontal, 20)
@@ -7088,6 +7097,7 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .padding(14)
                 .help("Show the edit panel (⌥⌘P)")
+                .accessibilityLabel("Show the edit panel")
             }
         }
     }
@@ -7405,10 +7415,12 @@ struct ContentView: View {
                     Button(action: { appState.setZoom(appState.zoom - 0.5); zoomStart = appState.zoom }) {
                         Image(systemName: "minus.magnifyingglass").foregroundColor(Theme.inkDim)
                     }.buttonStyle(.plain)
+                    .help("Zoom out").accessibilityLabel("Zoom out")
                     Text("\(Int(appState.zoom * 100))%").font(Theme.mono(10)).foregroundColor(Theme.inkDim).frame(width: 40)
                     Button(action: { appState.setZoom(appState.zoom + 0.5); zoomStart = appState.zoom }) {
                         Image(systemName: "plus.magnifyingglass").foregroundColor(Theme.inkDim)
                     }.buttonStyle(.plain)
+                    .help("Zoom in").accessibilityLabel("Zoom in")
                     if appState.zoom > 1.01 {
                         Button(action: { appState.resetZoom(); zoomStart = 1 }) {
                             Text("Fit").font(Theme.ui(10, .semibold)).foregroundColor(Theme.glow)
@@ -8609,10 +8621,14 @@ struct CandidateRow: View {
                         .font(Theme.ui(14, .semibold))
                         .foregroundColor(isSelected ? Theme.ink : Theme.inkDim)
                         .lineLimit(1)
-                    Text(signature)
-                        .font(Theme.mono(10)).foregroundColor(Theme.inkFaint)
+                    // WORDS FIRST, NUMBERS ON HOVER. "Softer contrast, quieter colour" is what the
+                    // look does to this photograph; "−16 contrast · −5 vibrance" is how, and it is
+                    // the professional's affordance rather than this app's (CLAUDE.md, the audience).
+                    Text(candidate.summary.isEmpty ? signature : candidate.summary)
+                        .font(Theme.ui(11)).foregroundColor(Theme.inkFaint)
                         .lineLimit(1)
                         .truncationMode(.tail)
+                        .help(signature)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 VStack(alignment: .trailing, spacing: 5) {
@@ -8649,9 +8665,10 @@ struct CandidateRow: View {
         // The row is a thumbnail plus two lines of numbers, so unlabelled it announces as an image
         // and a shrug. Spoken, it is the style, then what actually separates it from the others.
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(signature.isEmpty
-                            ? "\(candidate.label), no adjustments"
-                            : "\(candidate.label), \(signature)")
+        .accessibilityLabel(candidate.summary.isEmpty
+                            ? (signature.isEmpty ? "\(candidate.label), no adjustments"
+                                                 : "\(candidate.label), \(signature)")
+                            : "\(candidate.label), \(candidate.summary)")
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
         // Picking a candidate is the one act this whole app is built around, and the selection
         // moves between rows — so the border and fill hand over rather than cutting. Colour and
@@ -9277,6 +9294,12 @@ struct ToneSlider: View {
                     // both vary at once would leave neither reliable.
                     .tint(Theme.glow)
                     .controlSize(.small)
+                    // NAMED FOR VOICEOVER. The visible label is a separate `Text` above the
+                    // control, so VoiceOver met some fifty panel sliders called "slider" with a bare
+                    // number — the whole edit panel was unusable without sight. The label is the
+                    // row's name; the value is the same readout the eye gets, units and sign included.
+                    .accessibilityLabel(label)
+                    .accessibilityValue(value == neutral ? "\(readout), unchanged" : readout)
                     // Live: re-render on every value change during the drag, not just on release.
                     .onChange(of: value) { onChange() }
                 ToneRail(identity: identity)
@@ -9704,12 +9727,14 @@ struct UserMaskEditor: View {
                 }
                 .buttonStyle(.plain).disabled(!canMoveUp)
                 .help("Move this mask up the stack")
+                    .accessibilityLabel("Move mask up")
                 Button(action: onMoveDown) {
                     Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
                         .foregroundColor(canMoveDown ? Theme.inkDim : Theme.inkFaint.opacity(0.4))
                 }
                 .buttonStyle(.plain).disabled(!canMoveDown)
                 .help("Move this mask down the stack")
+                    .accessibilityLabel("Move mask down")
                 // Keep this tuning: the mask's settings become a named preset in the add menu.
                 // Absent on brush and per-person masks — strokes and people belong to one
                 // photograph, and a preset that silently dropped them would be a lie.
@@ -9720,10 +9745,13 @@ struct UserMaskEditor: View {
                     }
                     .buttonStyle(.plain)
                     .help("Save these settings as a preset")
+                    .accessibilityLabel("Save as preset")
                 }
                 Button(action: onDelete) {
                     Image(systemName: "trash").font(.system(size: 11)).foregroundColor(Theme.inkDim)
                 }.buttonStyle(.plain)
+                .help("Delete this mask")
+                .accessibilityLabel("Delete mask")
             }
 
             if needsPersonButHasNone || needsSkyButHasNone {
@@ -9989,6 +10017,7 @@ struct MaskControl: View {
                 }
                 .buttonStyle(.plain)
                 .help(isSelected ? "Hide this mask's overlay" : "Show where this mask falls")
+                .accessibilityLabel(isSelected ? "Hide overlay" : "Show overlay")
             }
 
             if isOn {
