@@ -233,7 +233,12 @@ silently: a heal spot written with `feather: 50` clamps to `1.0` and comes back 
 | `sharpen`, `nr_luma`, `nr_color` | 0 … 100 | 0 |
 | `feather` | 0 … 100 | 0 |
 
-Clamp on deserialization. Never trust a recipe from disk.
+Clamp on deserialization. Never trust a recipe from disk. A mask's `adjustments` clamp to
+the same ranges as the global fields they share a name with; a key the build does not render
+is kept as written.
+
+A `schema_version` newer than the build understands is refused with an error rather than
+decoded with its unknown fields silently dropped. Absent means the current version.
 
 ---
 
