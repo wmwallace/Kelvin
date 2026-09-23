@@ -22,7 +22,11 @@ public enum RecipeEngine {
     /// 0.7.0 (22 Sep 2026): the first bump since D20. The candidate path's own changes since then
     /// (the opener, the range stretch) moved numbers too and reached the cache only through
     /// `tuningSignature`; this one is also where D20's face cap first reaches the app.
-    public static let version = "0.7.0"
+    ///
+    /// 0.7.1 (23 Sep 2026): a dark picture is not an underexposed one. Exposure stops at the
+    /// frame's white-point headroom when most of it lives in the shadows, and `pointPlacement`
+    /// sizes the whites after the exposure. See EVALUATION.md, "A night frame lifted twice".
+    public static let version = "0.7.1"
 
     /// Below this confidence the engine drops all *stylistic* moves (contrast shaping,
     /// vibrance, point placement) and keeps only *corrective* ones justified purely by
@@ -102,6 +106,8 @@ public enum RecipeEngine {
             "maskFloor:\(SkyMask.brightFloor)",
             "maskRamp:\(SkyMask.brightRamp)",
             "whiteTarget:\(whitePointTarget)",
+            "whitesAfterEV:\(whitesSeeExposure ? "on" : "off")",
+            "evHeadroom:\(exposureRespectsHeadroom ? "on" : "off")",
             "salientLift:\(SalientLift.scale)",
             "wbEstimator:\(estimator.rawValue)",
             "wbEdgeP:\(ImageStatistics.edgeMinkowskiP)",
@@ -166,6 +172,14 @@ public enum RecipeEngine {
     public static let whitePointTarget: Double =
         ProcessInfo.processInfo.environment["KELVIN_WHITE_TARGET"]
             .flatMap(Double.init).map { min(1.0, max(0.60, $0)) } ?? 0.88
+
+    /// Whether `exposure` bounds a lift by the frame's white-point headroom. See there.
+    public static let exposureRespectsHeadroom: Bool =
+        ProcessInfo.processInfo.environment["KELVIN_EXPOSURE_HEADROOM"] != "0"
+
+    /// Whether `pointPlacement` sizes the white lift after the recipe's exposure. See there.
+    public static let whitesSeeExposure: Bool =
+        ProcessInfo.processInfo.environment["KELVIN_WHITES_AFTER_EXPOSURE"] != "0"
 
     /// The style's graduated-ND lever over a sky, and the one part of the engine whose numbers
     /// are a **taste** call rather than a measurement.
@@ -277,7 +291,7 @@ public enum RecipeEngine {
         var curve: Curve? = nil
         if confident {
             g.contrast = contrast(p, s)
-            var (whites, blacks) = pointPlacement(p, s)
+            var (whites, blacks) = pointPlacement(p, s, exposureEV: g.exposureEV)
             whites = (whites * (1 - stretch.load)).rounded() + 0   // + 0: −0 → 0
             blacks = (blacks * (1 - stretch.load)).rounded() + 0
             g.whites = whites
@@ -711,7 +725,26 @@ public enum RecipeEngine {
 
         // Gentle pull (0.6), and a deadband so tiny corrections don't happen. Global exposure is
         // a blunt instrument (the real subject fix is a later mask), so cap the swing.
-        let ev = log2(target / median) * 0.6
+        var ev = log2(target / median) * 0.6
+        // A DARK PICTURE IS NOT AN UNDEREXPOSED ONE. The median says how much of the frame is
+        // dark, not whether it was exposed wrong: a firelit night frame (`_DSC0497`, Family at
+        // Jacks Parents — median 0.031, white point 0.609, two thirds of it below 0.08) asked for
+        // +2.3 EV, got the +1 cap, and its lit faces clipped in the red on every look past Natural:
+        // 14% and 11% of each face at or above 250 on Vivid, 0% with the lift removed. So when the
+        // picture LIVES in the dark, the lift stops where its brightest real content reaches the
+        // white target — the exposure that restores its white point, and no more.
+        //
+        // Gated on `shadowMass` because an ordinary underexposed frame needs the full pull: bounded
+        // everywhere, the rule cost the degradation corpus's underexposed arms +2.1 and +2.5 ΔE.
+        // Measured: every frame of either corpus has shadowMass ≤ 0.24; the dusk-to-night half of
+        // that shoot runs 0.47–0.75. The ramp sits in the empty space between. Read off the
+        // histogram, so it is the same for every subject and every skin. `KELVIN_EXPOSURE_HEADROOM=0`
+        // removes it for an A/B.
+        if exposureRespectsHeadroom, ev > 0, s.highlightClip < 0.02, s.whitePoint > 0.05 {
+            let lowKey = clamp((s.shadowMass - 0.30) / 0.15, to: 0...1)
+            let headroom = max(0, log2(whitePointTarget / s.whitePoint))
+            if ev > headroom { ev -= (ev - headroom) * lowKey }
+        }
         if abs(ev) < 0.12 { return 0 }
         return roundedClamp(ev, to: -1.0...1.0, step: 0.01)
     }
@@ -930,8 +963,17 @@ public enum RecipeEngine {
     /// Nudge whites/blacks to occupy the tonal range without clipping. Conservative — the
     /// M1 renderer does not yet apply these, but they round-trip and will be correct when it
     /// does, and they make the recipe diff meaningful today.
+    ///
+    /// `exposureEV` is the lift the recipe has already decided on, and the white deficit is sized
+    /// on the white point it leaves behind — the rule `RangeStretch.placement` already follows, for
+    /// the same reason. Found on a firelit night frame (`_DSC0497`, Family at Jacks Parents): +1 EV
+    /// took its white point from the source's reading to twice that, and then whites +30 lifted
+    /// toward white a second time from the SOURCE's shortfall, so every look past Natural blew the
+    /// faces out. Only a LIFT is counted: a frame exposure pulled down is being protected, and
+    /// lifting its whites back to compensate would undo the protection. `KELVIN_WHITES_AFTER_EXPOSURE=0`
+    /// restores the old sizing for an A/B.
     public static func pointPlacement(
-        _ p: Perception, _ s: ImageStatistics
+        _ p: Perception, _ s: ImageStatistics, exposureEV: Double = 0
     ) -> (whites: Double, blacks: Double) {
         guard p.intent != .archival, p.intent != .productAccurate else { return (0, 0) }
 
@@ -949,7 +991,9 @@ public enum RecipeEngine {
             // `whitePointTarget` rather than a literal: at the old 0.965 this expression returned its
             // +28 cap for any frame below p99.5 0.832, which is 27 of 38 real finished photographs —
             // so it measured nothing. See the constant for the calibration.
-            whites = min(28, max(0, (whitePointTarget - s.whitePoint) * 210)) * rangeGate
+            let lifted = whitesSeeExposure
+                ? min(1, s.whitePoint * pow(2, max(0, exposureEV))) : s.whitePoint
+            whites = min(28, max(0, (whitePointTarget - lifted) * 210)) * rangeGate
         }
         if s.shadowClip < 0.02 {
             // Ease off when a large part of the picture LIVES in the shadows.
