@@ -192,25 +192,29 @@ if first == "bench-export" {
                 let iso = ExifReader.iso(url: url)
                 let generated = clock(&t.engine) {
                     RecipeEngine.candidates(perception: perception, statistics: stats,
-                                            subjectLuma: measured.subjectLuma,
-                                            skyLuma: measured.skyLuma,
-                                            subjectOrigin: measured.subjectOrigin, iso: iso,
+                                            masks: measured.summary, iso: iso,
                                             focus: FocusMeasure.engineReading(for: proxy))
                 }
                 recipe = clock(&t.curate) { () -> Recipe in
+                    // ONE face detection on the ungraded proxy, metered per candidate — the app's
+                    // sequence (`AppState.adaptedRecipe`). `score(rendered:)` detects inside each
+                    // render instead, which the app documents as the canvas and the export
+                    // resolving different candidates; and this loop SAVES into the app's store.
+                    let faces = FaceSkin.detect(in: proxy)
                     var scored: [CandidateCurator.Scored] = []
                     for candidate in generated {
                         let preview = Renderer.render(proxy, with: candidate, maskBitmaps: measured.bitmaps)
-                        guard let score = AestheticEvaluator.score(rendered: preview) else { continue }
+                        guard let stats = try? ImageStatistics.compute(preview) else { continue }
+                        let score = AestheticEvaluator.score(stats: stats,
+                                                             face: FaceSkin.meter(in: preview, faces: faces))
                         scored.append(.init(recipe: candidate, score: score))
                     }
                     if let chosen = CandidateCurator.resolve(from: scored, requested: style.id).chosen {
                         return chosen.recipe
                     }
                     return RecipeEngine.candidate(perception: perception, statistics: stats, style: style,
-                                                  subjectLuma: measured.subjectLuma,
-                                                  skyLuma: measured.skyLuma,
-                                                  subjectOrigin: measured.subjectOrigin, iso: iso)
+                                                  masks: measured.summary, iso: iso,
+                                                  focus: FocusMeasure.engineReading(for: proxy))
                 }
                 // `--no-cache` means the benchmark neither reads nor WRITES the app's store. This
                 // store is shared with the app — what it holds is what a user's export renders — so
@@ -344,26 +348,28 @@ if first == "bench-export" {
         let stats = try ImageStatistics.compute(proxy)
         let masks = LocalMasks.measure(in: proxy)
         let generated = RecipeEngine.candidates(perception: perception, statistics: stats,
-                                                subjectLuma: masks.subjectLuma,
-                                                skyLuma: masks.skyLuma, iso: iso,
+                                                masks: masks.summary, iso: iso,
                                                 focus: FocusMeasure.engineReading(for: proxy))
+        // Faces detected once and metered per candidate, as both shipped paths do.
+        let detected = FaceSkin.detect(in: proxy)
         var scored: [CandidateCurator.Scored] = []
         for candidate in generated {
             let preview = Renderer.render(proxy, with: candidate, maskBitmaps: masks.bitmaps)
-            guard let score = AestheticEvaluator.score(rendered: preview) else { continue }
-            scored.append(.init(recipe: candidate, score: score))
+            guard let stats = try? ImageStatistics.compute(preview) else { continue }
+            scored.append(.init(recipe: candidate,
+                                score: AestheticEvaluator.score(stats: stats,
+                                                                face: FaceSkin.meter(in: preview, faces: detected))))
         }
         let r = CandidateCurator.resolve(from: scored, requested: style.id)
         let fallback = RecipeEngine.candidate(perception: perception, statistics: stats,
-                                              style: style, subjectLuma: masks.subjectLuma,
-                                              skyLuma: masks.skyLuma, iso: iso)
-        // WHY a frame flips, not just that it did. `AestheticEvaluator.score(rendered:)` is
-        // statistics — which are sampled to 96x96 and so barely care about resolution — PLUS
-        // `FaceSkin.read`, which is Vision. If the two arms disagree it is almost certainly Vision
+                                              style: style, masks: masks.summary, iso: iso,
+                                              focus: FocusMeasure.engineReading(for: proxy))
+        // WHY a frame flips, not just that it did. A candidate's score is statistics — sampled to
+        // 96x96, so they barely care about resolution — PLUS the faces Vision found on the proxy. If the two arms disagree it is almost certainly Vision
         // seeing a different number of faces at a different input size, and that swings the skin
         // term, which swings the quality floor, which decides curation. Reporting the face count
         // and the requested style's score says whether that is what happened.
-        let faces = FaceSkin.read(in: proxy).faceCount
+        let faces = detected.count
         let requestedScore = scored.first { $0.recipe.id == style.id }?.score.overall
         return (r.chosen?.recipe ?? fallback, r.honouredRequest,
                 r.curated.map { $0.recipe.id ?? "?" }, faces, requestedScore, masks.subjectLuma)
@@ -587,7 +593,7 @@ if first == "bench-export" {
         if let iso { note(String(format: "ISO %.0f → noise-reduction sized from sensor gain", iso)) }
         let candidates = RecipeEngine.candidates(
             perception: perception, statistics: stats,
-            subjectLuma: measured.subjectLuma, skyLuma: measured.skyLuma, iso: iso,
+            masks: measured.summary, iso: iso,
             perceptionHash: PerceptionIO.hash(perception),
             generatedAt: ISO8601DateFormatter().string(from: Date()),
             focus: FocusMeasure.engineReading(for: image)

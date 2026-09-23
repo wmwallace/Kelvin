@@ -41,8 +41,7 @@ final class SessionSwitchTests: XCTestCase {
             url: photo, imageId: "id", fullResCI: image, proxyCI: image,
             originalPreviewImage: nil, perception: nil, candidates: [],
             openedInByRule: nil,
-            proxyMaskBitmaps: [:], subjectInstances: [], subjectLuma: nil,
-            subjectOrigin: nil, skyLuma: nil, healSpots: [],
+            proxyMaskBitmaps: [:], subjectInstances: [], localMeasure: .none, healSpots: [],
             capture: CaptureInfo(), activeLookId: nil,
             maskAdjustments: [:], maskFeather: [:], maskTightness: [:], maskInvert: [:],
             selectedCandidateId: nil, edit: .neutral, editBaseline: .neutral,
@@ -76,6 +75,28 @@ final class SessionSwitchTests: XCTestCase {
                        "the stashed session must still hold p's mask, not the cleared panel")
         XCTAssertTrue(s.editedURLs.contains(p),
                       "p is still edited — the cleared panel is not evidence that it is not")
+    }
+
+    /// The same window, reached through the sliders rather than a stash. A nudge while the next
+    /// photograph decodes (or after it failed to) scheduled a commit whose owner was still the
+    /// photograph just left — and the commit filed the cleared panel under it, which `persistEdit`
+    /// reads as "untouched" and answers by deleting the saved edit.
+    func testASliderNudgeDuringTheClearedWindowLeavesThePreviousEditOnDisk() throws {
+        let p = url("p.ARW")
+        addTeardownBlock { EditStore.remove(for: p) }
+        let s = loaded(p)
+        s.userMasks = [UserMaskVM(kind: .brush)]
+        EditStore.save(s.currentSavedEdit(), for: p)
+        s.clearPerPhotoState()
+
+        s.edit.exposureEV = 0.3
+        s.onEdit()
+        let settled = expectation(description: "the coalesced commit window has passed")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { settled.fulfill() }
+        wait(for: [settled], timeout: 2)
+
+        let onDisk = try XCTUnwrap(EditStore.load(for: p), "the previous photograph's edit was deleted")
+        XCTAssertFalse(onDisk.userMasks.isEmpty, "and not overwritten with the cleared panel")
     }
 
     /// The flag is a statement about the window, not about the photograph: once a decode lands or a

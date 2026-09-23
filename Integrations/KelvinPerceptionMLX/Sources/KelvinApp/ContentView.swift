@@ -188,11 +188,11 @@ final class AppState {
     // Subject mask at proxy resolution (for live previews) and the measured subject brightness.
     /// Proxy-resolution subject/sky bitmaps for live previews (keyed "subject"/"sky").
     @ObservationIgnored private var proxyMaskBitmaps: [String: CIImage] = [:]
-    @ObservationIgnored private var subjectLuma: Double?
-    /// What produced this frame's subject mask. Passed to the engine so a person lift is only
-    /// applied to a mask that actually found a person — see `RecipeEngine.subjectMask`.
-    @ObservationIgnored private var subjectOrigin: SubjectMask.Origin?
-    @ObservationIgnored private var skyLuma: Double?
+    /// The frame's measured subject/sky brightness, what produced the subject mask, and whether the
+    /// subject reading is metered skin — everything the engine reads from `LocalMasks`, held as ONE
+    /// value. It used to be three loose fields, and the fourth (`subjectLumaIsSkin`) was never
+    /// copied across, so D20's face-lift cap reached the harness and not this app.
+    @ObservationIgnored private var localMeasure: LocalMasks.Summary = .none
     var imageId: String = ""
     var perception: Perception?
     var candidates: [CandidateViewModel] = []
@@ -425,11 +425,7 @@ final class AppState {
     private func rekeyInstanceMasks() {
         let saved = userMasks.enumerated().filter { $0.element.boundInstanceId != nil }
         guard !saved.isEmpty, !subjectInstances.isEmpty else { return }
-        let references = saved.compactMap { entry -> SubjectInstances.Reference? in
-            guard let id = entry.element.instanceId, let box = entry.element.instanceBox else { return nil }
-            return SubjectInstances.Reference(id: id, kind: entry.element.instanceKind ?? .object,
-                                              boundingBox: box)
-        }
+        let references = Self.instanceReferences(in: saved.map(\.element))
         guard !references.isEmpty else { return }
 
         let matched = SubjectInstances.reidentify(subjectInstances, as: references)
@@ -2701,7 +2697,10 @@ final class AppState {
     /// they undid.
     private func persistEdit(for url: URL) {
         if isTouched { EditStore.save(currentSavedEdit(), for: url) }
-        else { EditStore.remove(for: url) }
+        // Untouched is "no edit" only when nothing is parked. Work left on another candidate is
+        // still this photograph's work — `SavedEdit` holds one look, so the file keeps the last one
+        // saved rather than being deleted because the look on screen happens to be fresh.
+        else if candidateWork.isEmpty { EditStore.remove(for: url) }
     }
 
     /// Has this photograph been edited at all — the ONE definition, used everywhere.
@@ -2785,6 +2784,8 @@ final class AppState {
     /// reads as untouched, deleting its saved edit off disk. `dismiss` already defends against
     /// exactly this by nil-ing `loadedURL` first; this covers every other route into the window.
     @ObservationIgnored var perPhotoStateIsCleared = false
+    /// Why the open photograph has no candidates, when the answer is "it could not be read".
+    var loadFailure: String?
 
     /// Capture the current photo's state before leaving it.
     func stashCurrentSession() {
@@ -2799,7 +2800,7 @@ final class AppState {
             candidates: candidates, openedInByRule: openedInByRule,
             proxyMaskBitmaps: proxyMaskBitmaps,
             subjectInstances: subjectInstances,
-            subjectLuma: subjectLuma, subjectOrigin: subjectOrigin, skyLuma: skyLuma,
+            localMeasure: localMeasure,
             healSpots: healSpots,
             capture: capture, activeLookId: activeLookId,
             maskAdjustments: maskAdjustments, maskFeather: maskFeather,
@@ -2828,11 +2829,15 @@ final class AppState {
         activeCraftIssues = []; lastCraftReading = nil; exhaustedFixes = []
         userMasks = []; paintingMaskId = nil; selectedMask = nil; pickingInstance = false
         subjectInstances = []; highlightedInstanceId = nil
-        proxyMaskBitmaps = [:]; brushCache = [:]; subjectOrigin = nil
+        proxyMaskBitmaps = [:]; brushCache = [:]; localMeasure = .none
         healSpots = []; healToolActive = false
         baseMasks = []; maskEnabled = [:]; maskStrength = [:]
         maskAdjustments = [:]; maskFeather = [:]; maskTightness = [:]; maskInvert = [:]
         hsl = [:]; straighten = 0; activeLookId = nil
+        // The sliders too. Left standing, the panel showed the outgoing photograph's numbers under
+        // the incoming one's name for the whole decode, and a nudge in that window started from them.
+        edit = .neutral; editBaseline = .neutral
+        candidateWork = [:]; loadFailure = nil
         showingOriginal = false; showingRepairSpots = false; hoveringRepairControls = false
         // The grid is four renders of the photograph being left behind, and the comparison it
         // offers is not a comparison of the one arriving.
@@ -2862,7 +2867,7 @@ final class AppState {
         proxyMaskBitmaps = s.proxyMaskBitmaps
         subjectInstances = s.subjectInstances
         highlightedInstanceId = nil
-        subjectLuma = s.subjectLuma; skyLuma = s.skyLuma; subjectOrigin = s.subjectOrigin
+        localMeasure = s.localMeasure
         healSpots = s.healSpots
         // Restored, not left standing. Every one of these was previously carried over from
         // whichever photo happened to be open before.
@@ -3526,9 +3531,7 @@ final class AppState {
             self.proxyMaskBitmaps = measurement.masks.bitmaps
                 .mapValues { Self.scaleMask($0, to: proxy.extent) }
                 .merging(measurement.instances.reduce(into: [:]) { $0[$1.id] = $1.mask }) { a, _ in a }
-            self.subjectLuma = measurement.masks.subjectLuma
-            self.subjectOrigin = measurement.masks.subjectOrigin
-            self.skyLuma = measurement.masks.skyLuma
+            self.localMeasure = measurement.masks.summary
             // NOT scaled: the candidates are scored on the 768 px image these were measured on, so
             // that the score the curator sees is the score the export's curator sees.
             let proxyMasks = measurement.masks.bitmaps
@@ -3539,8 +3542,7 @@ final class AppState {
             // Clean candidates straight from the engine — no cross-image "profile". The way to
             // reuse an edit is to pick/tune one photo, then Batch apply that exact look.
             let recipes = RecipeEngine.candidates(perception: perceptionRead, statistics: stats,
-                                                  subjectLuma: self.subjectLuma, skyLuma: self.skyLuma,
-                                                  subjectOrigin: self.subjectOrigin,
+                                                  masks: self.localMeasure,
                                                   iso: ExifReader.iso(url: url),
                                                   focus: measurement.engineFocus)
 
@@ -3764,6 +3766,9 @@ final class AppState {
             // method already guards the same way; the catch was the one that didn't.
             guard imageURL == url else { return }
             statusMessage = "Couldn't read that photo — \(error.localizedDescription)"
+            // Said where the photographer is looking, too. The sidebar's "Reading the scene…"
+            // spinner waits for candidates, and a photo that never decoded never gets any.
+            loadFailure = "Couldn't read this photo. \(error.localizedDescription)"
         }
         guard imageURL == url else { return }
         isProcessing = false
@@ -3793,8 +3798,67 @@ final class AppState {
         updateActiveRecipe()
         resetHistory()          // the chosen candidate is the new base for undo
         // NOTE: selecting/browsing candidates does NOT record a pick — only a deliberate
-        // choice (export) does. Recording on every selection floods the store with fake
-        // preferences and corrupts the learned profile.
+        // choice (export) does. The pick log has no reader since D18, but a row per click would
+        // still make it a record of browsing rather than of choosing.
+    }
+
+    /// The work done on one candidate, parked while the photographer looks at another.
+    struct CandidateWork {
+        var edit: GlobalAdjustments
+        var straighten: Double
+        var hsl: [String: HSLAdjustment]
+        var activeLookId: String?
+        var maskEnabled: [String: Bool]
+        var maskStrength: [String: Double]
+        var maskAdjustments: [String: [String: Double]]
+        var maskFeather: [String: Double]
+        var maskInvert: [String: Bool]
+        var maskTightness: [String: Double]
+    }
+    /// Per candidate, for the photograph that is open. Cleared with the rest of its state.
+    @ObservationIgnored var candidateWork: [String: CandidateWork] = [:]
+
+    /// The photographer choosing a look — a click on a tile, a number key, a pick in compare.
+    ///
+    /// `selectCandidate` puts a candidate up fresh, which is right when the APP chooses (opening a
+    /// photo, applying the shoot's look) and wrong when a person does: every hand edit went with it,
+    /// and the undo history was reset in the same call, so a stray "1" during a cull, or a click on
+    /// the tile already selected, lost slider work with no way back. Two rules here instead:
+    ///
+    ///   • The tile you are already on is not a request to start over. Nothing happens.
+    ///   • Leaving a candidate parks its work, and coming back to it brings the work back. So
+    ///     trying Soft and returning to Natural is a comparison, not a reset.
+    func pickCandidate(id: String) {
+        guard id != selectedCandidateId, candidates.contains(where: { $0.id == id }) else { return }
+        if let current = selectedCandidateId, isCandidateWorkTouched {
+            candidateWork[current] = CandidateWork(
+                edit: edit, straighten: straighten, hsl: hsl, activeLookId: activeLookId,
+                maskEnabled: maskEnabled, maskStrength: maskStrength,
+                maskAdjustments: maskAdjustments, maskFeather: maskFeather,
+                maskInvert: maskInvert, maskTightness: maskTightness)
+        }
+        selectCandidate(id: id)
+        if let parked = candidateWork.removeValue(forKey: id) {
+            edit = parked.edit; straighten = parked.straighten; hsl = parked.hsl
+            activeLookId = parked.activeLookId
+            maskEnabled = parked.maskEnabled; maskStrength = parked.maskStrength
+            maskAdjustments = parked.maskAdjustments; maskFeather = parked.maskFeather
+            maskInvert = parked.maskInvert; maskTightness = parked.maskTightness
+            updateActiveRecipe()
+            resetHistory()
+            statusMessage = "Back to your edits on this look"
+        }
+    }
+
+    /// Whether the candidate on screen carries work beyond what `selectCandidate` would put up.
+    /// Narrower than `isTouched`, which also counts hand-drawn masks and heals — those belong to the
+    /// photograph and survive a candidate switch, so they are not the candidate's to park.
+    private var isCandidateWorkTouched: Bool {
+        edit != editBaseline || straighten != 0 || !hsl.isEmpty || activeLookId != nil
+            || !maskAdjustments.isEmpty || !maskFeather.isEmpty
+            || !maskInvert.isEmpty || !maskTightness.isEmpty
+            || maskEnabled != Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, true) })
+            || maskStrength != Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, $0.opacity * 100) })
     }
 
     /// Revert every manual edit back to the candidate as Kelvin generated it.
@@ -3812,7 +3876,7 @@ final class AppState {
 
     func selectCandidateIndex(_ index: Int) {
         guard index >= 0, index < candidates.count else { return }
-        selectCandidate(id: candidates[index].id)
+        pickCandidate(id: candidates[index].id)
         // Choosing ends the comparison. A number key pressed while comparing is the same decision a
         // click on a tile is, and leaving the grid up afterwards would make the app look like it
         // had not heard.
@@ -3856,7 +3920,7 @@ final class AppState {
 
     /// The pick, made from the compare view — which is the reason the view exists.
     func pickFromCompare(id: String) {
-        selectCandidate(id: id)
+        pickCandidate(id: id)
         comparing = false
     }
 
@@ -4283,7 +4347,13 @@ final class AppState {
         // (see its doc); it moves only when a decode lands or a cached session is restored.
         let owner = loadedURL
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
-            guard let self, self.commitToken == t, self.loadedURL == owner else { return }
+            // AND NOT WHILE THE PANEL BELONGS TO NOBODY. `clearPerPhotoState` bumps the token, which
+            // cancels a commit already pending — but a slider nudged AFTER the clear, while the next
+            // decode runs (or after it failed), scheduled a fresh one with `loadedURL` still naming
+            // the photograph just left. It then filed the empty panel under that photograph and
+            // `persistEdit` read "untouched" as "delete the saved edit".
+            guard let self, self.commitToken == t, self.loadedURL == owner,
+                  !self.perPhotoStateIsCleared else { return }
             if let prev = self.committed, prev != self.snapshot() {
                 self.undoStack.append(prev)
                 if self.undoStack.count > 60 { self.undoStack.removeFirst() }
@@ -4316,7 +4386,10 @@ final class AppState {
         }
         committed = snapshot()
         refreshUndoState()
-        if let url = imageURL {
+        // `loadedURL`, not `imageURL`, and never while the panel is cleared — the same ownership
+        // rule as `scheduleCommit`. `imageURL` moves the instant a switch starts, so a discrete
+        // click landing mid-switch filed the outgoing photograph's panel under the incoming one.
+        if !perPhotoStateIsCleared, let url = loadedURL {
             if isTouched { editedURLs.insert(url) } else { editedURLs.remove(url) }
             persistEdit(for: url)
         }
@@ -5690,7 +5763,8 @@ final class AppState {
                 ext: exportFormat.fileExtension,
                 exists: { allocated.contains($0) || FileManager.default.fileExists(atPath: $0.path) })
             allocated.insert(out)
-            jobs.append(RenderJob(recipe: recipe, source: url, out: out, wasAdapted: wasAdapted))
+            jobs.append(RenderJob(recipe: recipe, source: url, out: out, wasAdapted: wasAdapted,
+                                  instanceReferences: Self.instanceReferences(in: saved?.userMasks ?? [])))
         }
 
         // Leftovers of a write cut off before its rename — a quit through `_exit` mid-frame, a
@@ -5727,16 +5801,17 @@ final class AppState {
         // milliseconds, so eight completions is already a minute and a half of evidence — and a
         // long window would keep quoting the cold first frames deep into a warm run.
         var eta = ProgressETA(window: 8)
-        await withTaskGroup(of: (ok: Bool, adapted: Bool).self) { group in
+        var missingSubjects = 0
+        await withTaskGroup(of: (result: BatchFrameResult, adapted: Bool).self) { group in
             var next = 0
             func addJob() {
                 guard next < jobs.count else { return }
                 let job = jobs[next]
                 next += 1
                 group.addTask {
-                    let ok = await Self.renderAndWrite(job, format: format, metadata: metadata,
-                                                       size: size, colorSpace: space)
-                    return (ok, job.wasAdapted)
+                    let result = await Self.renderAndWrite(job, format: format, metadata: metadata,
+                                                           size: size, colorSpace: space)
+                    return (result, job.wasAdapted)
                 }
             }
             for _ in 0..<lanes { addJob() }
@@ -5744,10 +5819,14 @@ final class AppState {
             while let result = await group.next() {
                 completed += 1
                 eta.recordCompletion()
-                if result.ok {
+                switch result.result {
+                case .written, .writtenMissingSubjects:
                     written += 1
                     if result.adapted { adaptedWritten += 1 }
-                } else { failed += 1 }
+                    if result.result == .writtenMissingSubjects { missingSubjects += 1 }
+                case .failed:
+                    failed += 1
+                }
                 // Stopped: the frame that was being written has finished (its file is whole —
                 // ImageWriter renames into place), and no further one starts.
                 if Task.isCancelled { group.cancelAll(); break }
@@ -5787,6 +5866,10 @@ final class AppState {
                 + "\(written - adaptedWritten) from your edits"
         }
         if failed > 0 { message += " · \(failed) failed" }
+        if missingSubjects > 0 {
+            message += " · \(missingSubjects) without a subject edit — the person or object it was "
+                + "drawn on could not be found again at full size"
+        }
         if unreadable > 0 { message += " · \(unreadable) unreadable — open those photos once to re-save" }
         if !needsReopening.isEmpty {
             message += " · \(needsReopening.count) saved before this version — open each once to include it"
@@ -5875,11 +5958,9 @@ final class AppState {
             // its own proxy rather than inherited from whatever was open when the look was chosen.
             let m = LocalMasks.measure(in: work.proxy)
             let iso = ExifReader.iso(url: url)
+            let focus = FocusMeasure.engineReading(for: work.proxy)
             let recipes = RecipeEngine.candidates(perception: perception, statistics: stats,
-                                                  subjectLuma: m.subjectLuma, skyLuma: m.skyLuma,
-                                                  subjectOrigin: m.subjectOrigin,
-                                                  iso: iso,
-                                                  focus: FocusMeasure.engineReading(for: work.proxy))
+                                                  masks: m.summary, iso: iso, focus: focus)
             // The whole set has to be built and scored, not just the one that was asked for.
             // Curation is not a per-candidate verdict: a style is dropped by the quality floor, OR
             // by being too close to one already chosen, OR by the four-slot cap — and the last two
@@ -5908,8 +5989,7 @@ final class AppState {
             // the requested style directly rather than failing the export: the photographer asked
             // for this look, and the curator having nothing to say is not a reason to skip a file.
             return RecipeEngine.candidate(perception: perception, statistics: stats, style: style,
-                                          subjectLuma: m.subjectLuma, skyLuma: m.skyLuma,
-                                          subjectOrigin: m.subjectOrigin, iso: iso)
+                                          masks: m.summary, iso: iso, focus: focus)
         }
         ResolvedRecipeStore.save(resolved, for: url, styleId: style.id, modelId: modelIdForCache)
         return resolved
@@ -5932,6 +6012,11 @@ final class AppState {
         /// summary can say which half of the count was adapted. Carried on the job because the
         /// answer is decided at planning time and read after the work finishes on another thread.
         var wasAdapted = false
+        /// The subjects this frame's hand-drawn masks are bound to, as saved. Vision's instance ids
+        /// do not survive a second detection pass, so a full-resolution export has to find each
+        /// subject again by where it was — the single-photo export always did; the batch did not,
+        /// and wrote every per-subject edit as nothing under an "Exported N" that said all was well.
+        var instanceReferences: [SubjectInstances.Reference] = []
     }
 
     /// One frame: decode, measure, render, write.
@@ -5943,25 +6028,54 @@ final class AppState {
                                            format: ImageWriter.Format,
                                            metadata: ImageWriter.MetadataPolicy,
                                            size: ImageWriter.Size,
-                                           colorSpace: ImageWriter.ColorSpace) async -> Bool {
+                                           colorSpace: ImageWriter.ColorSpace) async -> BatchFrameResult {
         // Three lanes in sequence — decode, Vision, write — each awaited. The task-group slot this
         // runs in bounds how many frames are in flight; the lanes are what keep the work off the
         // cooperative pool. See `Offload`.
         guard let decoded = try? await Offload.run(.decode, { () throws -> ImageBox in
             ImageBox(image: try ImageDecoder.decode(url: job.source))
-        }) else { return false }
+        }) else { return .failed }
         let needsMasks = job.recipe.masks?.isEmpty == false
-        let bitmaps = needsMasks
-            ? await Offload.run(.vision) { MaskBox(bitmaps: LocalMasks.measure(in: decoded.image).bitmaps) }
-            : MaskBox(bitmaps: [:])
+        let references = job.instanceReferences
+        // The same measurement `renderCurrentPhoto` makes: the frame's own subject/sky, then each
+        // bound subject found again at this resolution. See `RenderJob.instanceReferences`.
+        let measured = needsMasks
+            ? await Offload.run(.vision) { () -> ExportMasks in
+                var bitmaps = LocalMasks.measure(in: decoded.image).bitmaps
+                var lost: [String] = []
+                if !references.isEmpty {
+                    let matched = SubjectInstances.reidentify(
+                        SubjectInstances.detect(in: decoded.image), as: references)
+                    bitmaps.merge(matched.bitmaps) { _, fresh in fresh }
+                    lost = matched.unmatched
+                }
+                return ExportMasks(bitmaps: bitmaps, lost: lost)
+            }
+            : ExportMasks(bitmaps: [:], lost: [])
         do {
             try await Offload.run(.export) {
-                let rendered = Renderer.render(decoded.image, with: job.recipe, maskBitmaps: bitmaps.bitmaps)
+                let rendered = Renderer.render(decoded.image, with: job.recipe, maskBitmaps: measured.bitmaps)
                 try ImageWriter.write(rendered, to: job.out, format: format, metadata: metadata,
                                       size: size, colorSpace: colorSpace)
             }
-            return true
-        } catch { return false }
+            return measured.lost.isEmpty ? .written : .writtenMissingSubjects
+        } catch { return .failed }
+    }
+
+    /// How one batch frame went. "Written" alone is not enough: a frame whose per-subject mask
+    /// could not be found again at full resolution is a file, and not the file that was edited.
+    enum BatchFrameResult: Sendable { case written, writtenMissingSubjects, failed }
+
+    /// Who each bound mask was bound to, in the form `SubjectInstances.reidentify` matches against.
+    /// One definition, shared by reopening and by both exports, for the reason `boundInstanceId`
+    /// gives: a copy of this that tested the kind instead is how a mask gets left out.
+    nonisolated static func instanceReferences(in masks: [UserMaskVM]) -> [SubjectInstances.Reference] {
+        masks.compactMap { mask in
+            guard mask.boundInstanceId != nil, let id = mask.instanceId,
+                  let box = mask.instanceBox else { return nil }
+            return SubjectInstances.Reference(id: id, kind: mask.instanceKind ?? .object,
+                                              boundingBox: box)
+        }
     }
 
     /// Mask bitmaps crossing a lane boundary. Same promise as `ImageBox`.
@@ -6041,7 +6155,7 @@ final class AppState {
     /// Whether the subject mask came from person segmentation rather than the salient-object
     /// fallback. The difference is invisible in the mask and decisive in the copy: a card that says
     /// "the detected person" over a mask of a rock is how somebody ends up lifting a rock.
-    var subjectIsPerson: Bool { subjectOrigin == .person }
+    var subjectIsPerson: Bool { localMeasure.subjectOrigin == .person }
     var hasSky: Bool { proxyMaskBitmaps["sky"] != nil }
 
     /// A binding for the white-balance slider (absolute Kelvin; nil → as-shot, which is 6500).
@@ -7887,7 +8001,11 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.bottom, 4)
                 }
-                if appState.candidates.isEmpty {
+                if let failure = appState.loadFailure {
+                    Label(failure, systemImage: "exclamationmark.triangle")
+                        .font(Theme.mono(10)).foregroundColor(Theme.inkDim)
+                        .padding(.vertical, 6)
+                } else if appState.candidates.isEmpty {
                     // Say what's happening instead of leaving a hole. The photo is already on
                     // screen, so this is the only part still pending.
                     HStack(spacing: 8) {
@@ -7901,7 +8019,7 @@ struct ContentView: View {
                     ForEach(appState.candidates) { candidate in
                         CandidateRow(candidate: candidate,
                                      isSelected: candidate.id == appState.selectedCandidateId) {
-                            appState.selectCandidate(id: candidate.id)
+                            appState.pickCandidate(id: candidate.id)
                         }
                     }
                 }

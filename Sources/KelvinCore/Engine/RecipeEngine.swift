@@ -18,7 +18,11 @@ import Foundation
 public enum RecipeEngine {
     /// Engine version, recorded in provenance so a recipe on disk can be traced to the rules
     /// that made it. Bump on any change that moves the numbers.
-    public static let version = "0.6.0"
+    ///
+    /// 0.7.0 (22 Sep 2026): the first bump since D20. The candidate path's own changes since then
+    /// (the opener, the range stretch) moved numbers too and reached the cache only through
+    /// `tuningSignature`; this one is also where D20's face cap first reaches the app.
+    public static let version = "0.7.0"
 
     /// Below this confidence the engine drops all *stylistic* moves (contrast shaping,
     /// vibrance, point placement) and keeps only *corrective* ones justified purely by
@@ -111,7 +115,10 @@ public enum RecipeEngine {
             // this signature. Constant while disabled, so floor sweeps with the rule off cannot
             // thrash the cache.
             "opener:\(OpeningRule.signature())",
-            "clarityFocus:\(FocusMeasure.engineDampingEnabled ? "on" : "off")"
+            "clarityFocus:\(FocusMeasure.engineDampingEnabled ? "on" : "off")",
+            // The measurement proxy's edge moves every statistic and every mask luma, so a
+            // `KELVIN_PROXY_EDGE` sweep would otherwise be served the previous arm's recipes.
+            "proxyEdge:\(PerceptionProxy.defaultMaxEdge)"
         ].joined(separator: ";")
     }
 

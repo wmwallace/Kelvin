@@ -1045,7 +1045,7 @@ case "bench-load":
                                               contrastRange: .normal),
                 problems: [], intent: .natural, confidence: 0.3)
             return RecipeEngine.candidates(perception: perception, statistics: stats,
-                                    subjectLuma: nil, skyLuma: nil, iso: ExifReader.iso(url: url),
+                                    masks: .none, iso: ExifReader.iso(url: url),
                                     focus: FocusMeasure.engineReading(for: proxy))
         }
         print("    (\(recipes.count) candidates)")
@@ -2321,8 +2321,7 @@ case "sky-metrics":
         let measured = LocalMasks.measure(in: image)
         let recipes = RecipeEngine.candidates(
             perception: perception, statistics: stats,
-            subjectLuma: measured.subjectLuma, skyLuma: measured.skyLuma,
-            subjectOrigin: measured.subjectOrigin,
+            masks: measured.summary,
             iso: ExifReader.iso(url: file),
             perceptionHash: PerceptionIO.hash(perception),
             generatedAt: ISO8601DateFormatter().string(from: Date()),
