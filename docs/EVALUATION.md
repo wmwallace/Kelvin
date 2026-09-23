@@ -673,6 +673,56 @@ in display space, which is nearer to perceived brightness, and the encoded ratio
 less than the physics would — which is what photographers' edits do. Shipped as it was; the
 comments that called it physics now say what it is. Do not "fix" it again without the corpus.
 
+## A night frame lifted twice (23 September 2026)
+
+Reported by the owner as "some of the edits now look absolutely terrible", on a firelit night
+sequence (`2023-07-29 Family at Jacks Parents`, `_DSC0479`–`_DSC0507`). On `_DSC0497` every look
+past Natural blew the faces out: skin glowing orange, foreheads white.
+
+**Not a 0.9 regression.** The 0.8.2 engine, given the same scene read, emits the identical recipe
+and renders identical pixels (mean difference 0.0 per channel on every look). The shoot had never
+been opened before, and even the old model's `night` read would not have saved it: its 0.30 target
+also hits the +1 EV cap from a median of 0.031.
+
+**`kelvin-cli`-style ablation of Vivid** — face pixels at or above 250 in the red:
+
+| Vivid with… | face 1 | face 2 |
+|---|---|---|
+| as shipped (+1 EV, whites +30) | 15% | 11% |
+| exposure 0 | 0% | 0% |
+| whites 0 | 11% | 3% |
+| contrast 0 | 12% | 4% |
+
+Two rules, both measured from the histogram:
+
+1. **Whites are sized after the exposure** (`pointPlacement(exposureEV:)`). The principle was
+   already written for the range stretch (D26) and the endpoint lever had been missed: +1 EV took
+   the white point from 0.609 to 1.2, and whites then lifted again from the source's shortfall.
+   Only a lift counts; a frame pulled down is being protected.
+2. **A dark picture is lifted only to its headroom.** When `shadowMass` (fraction below 0.08 luma)
+   is high, exposure stops where the white point reaches `whitePointTarget`. Bounded everywhere, the
+   rule cost the degradation corpus's underexposed arms +2.1 and +2.5 ΔE, so it is ramped on
+   `shadowMass` 0.30 → 0.45: every frame of both corpora is at or below 0.24, the dusk-to-night half
+   of that shoot runs 0.47–0.75.
+
+Corpus check (Vision reads, mean ΔE, lower is closer):
+
+| | shipped | both rules |
+|---|---|---|
+| pairs, opening look | 7.27 | 7.25 |
+| pairs, every look | — | all improve (Vivid 8.94 → 8.87, Warm 8.75 → 8.67) |
+| degrade, opening look | 6.68 | 6.68 |
+| degrade, styled looks | — | all improve (Vivid 8.96 → 8.78, Warm 8.21 → 8.05); Soft 6.77 → 6.79 |
+
+Worst single frame: `_DSC6550-2__underexposed` on Soft, +1.41, from the whites rule (the headroom
+gate does not fire there). After: `_DSC0497` faces 4% / 0% on Vivid, 0% / 0% on Natural.
+`KELVIN_EXPOSURE_HEADROOM=0` and `KELVIN_WHITES_AFTER_EXPOSURE=0` restore the old behaviour; both
+are in `tuningSignature`.
+
+**The trap that cost a run:** an A/B driven by `E="A=0 B=0"; env $E …` in zsh sets one variable
+named `A` to `"0 B=0"` — zsh does not word-split — so the "off" arm ran on. Two corpora scored
+identically on and off; identical is a symptom, not a result. Spell the variables out.
+
 ## A read that changes is not an edit that changes
 
 ⚠️ **Before blaming a prompt change for a quality complaint, measure whether it reached the

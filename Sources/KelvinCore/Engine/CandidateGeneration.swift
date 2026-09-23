@@ -103,7 +103,7 @@ public extension RecipeEngine {
         g.clarity = roundedClamp(local.clarity * style.curveScale, to: 0...30, step: 1)
         g.texture = roundedClamp(local.texture * style.curveScale, to: 0...20, step: 1)
 
-        var points = styledPoints(p, s, style)
+        var points = styledPoints(p, s, style, exposureEV: g.exposureEV)
         // `+ 0` turns the −0 a fully-damped negative lever rounds to back into a plain 0.
         points.whites = (points.whites * (1 - stretch.load)).rounded() + 0
         points.blacks = (points.blacks * (1 - stretch.load)).rounded() + 0
@@ -188,9 +188,9 @@ public extension RecipeEngine {
     }
 
     static func styledPoints(
-        _ p: Perception, _ s: ImageStatistics, _ style: CandidateStyle
+        _ p: Perception, _ s: ImageStatistics, _ style: CandidateStyle, exposureEV: Double = 0
     ) -> (whites: Double, blacks: Double) {
-        let base = pointPlacement(p, s)
+        let base = pointPlacement(p, s, exposureEV: exposureEV)
         return (
             roundedClamp(base.whites + style.whitesBias, to: 0...30, step: 1),
             roundedClamp(base.blacks + style.blacksBias, to: -30...0, step: 1)
