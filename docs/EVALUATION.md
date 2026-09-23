@@ -634,6 +634,14 @@ excludes zero. The read takes ~0.1 s (77 frames in 7 s, decode included) against
 **Re-run it before changing the provider's mapping**: `vision-label --in-dir <corpus>/source
 --out-dir <arm>/perception`, symlink `source/` and `reference/`, copy `manifest.json`, `eval`.
 
+## The soft-focus arm (D25, 22 September 2026)
+
+`corpus-degrade --arms soft` builds two blur degradations as a corpus of their own, so the six-way
+degradation corpus stays comparable with every earlier report. Clarity damping on vs off: 14 of 18
+frames change, every style is slightly worse with it (+0.007 to +0.015 ΔE), the opener cannot move,
+and the sharp corpora do not change at all. Read D25 for why this instrument cannot settle the look
+question it was built for.
+
 ## A read that changes is not an edit that changes
 
 ⚠️ **Before blaming a prompt change for a quality complaint, measure whether it reached the

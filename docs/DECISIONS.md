@@ -1330,6 +1330,19 @@ Cost is not the gate; it is a rounding error. What still gates the default is th
 the sentence above: nothing in either corpus is soft, so "does the damping help" cannot be
 measured until a blur degradation exists. The switch stays off for that reason alone.
 
+**Measured 22 September 2026, and it stays off.** The blur arm now exists
+(`kelvin-cli corpus-degrade --arms soft`: `soft-focus` at 0.25% and `missed-focus` at 0.6% of the
+short edge, 9 photographs × 2 = 18 entries, Vision-read). With `KELVIN_CLARITY_FOCUS=1` the damping
+fired on 14 of 18 and made **every style slightly worse** — +0.007 (Soft) to +0.015 (Airy) ΔE,
+never better on more than 4 frames of any style, worst +0.039. The opener (Natural) cannot move:
+it is corrective and carries no clarity to damp. Both sharp corpora are untouched, as they should be.
+
+The caveat, stated so nobody over-reads it: the reference is the SHARP original, so an instrument
+scoring distance to it rewards adding local contrast back to a blurred frame. It measures "does
+damping bring the frame closer to what was in focus" (no), and cannot measure what D19 lost the
+flag for, "does clarity make a soft frame look crunchy". That is a look question — pictures, not a
+table — and it has not been asked. Until it is, off; the code costs nothing while off.
+
 ## D26 — A levels-style range stretch for flat frames · **Decided 28 August 2026** (schema addition; the owner approved the day's decisions in bulk)
 
 **The gap this closes is already measured and recorded** (D-tone-1, "a real gap, recorded not
