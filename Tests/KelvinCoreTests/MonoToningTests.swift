@@ -57,4 +57,39 @@ final class MonoToningTests: XCTestCase {
         let out = try ImageStatistics.compute(Renderer.render(patch(), with: selenium))
         XCTAssertLessThan(out.chromaB, -0.5, "selenium must read cool (negative b*) on a grey patch")
     }
+
+    /// Every non-Natural candidate carries a colour grade in its per-channel curves (warm
+    /// highlights, teal shadows). Once per-channel curves on a mono recipe began to run after the
+    /// conversion, that grade survived onto the print: Mono on Dramatic came out split-toned. A
+    /// look that converts to black and white owns the print's colour, so the candidate's grade
+    /// must not reach it — only the look's own toning, if it has one.
+    func testMonoOnAGradedCandidateIsANeutralPrint() throws {
+        var graded = recipe(mono: false, blueLift: false)
+        graded.curve = Curve(luma: [[0, 0], [64, 56], [192, 200], [255, 255]],
+                             red: [[0, 0], [72, 64], [176, 188], [255, 255]],
+                             green: nil,
+                             blue: [[0, 12], [72, 84], [176, 164], [255, 244]])
+        let mono = try XCTUnwrap(LookPreset.named("mono")).applied(to: graded)
+        for v in [0.2, 0.5, 0.8] {
+            let grey = CIImage(color: CIColor(red: v, green: v, blue: v))
+                .cropped(to: CGRect(x: 0, y: 0, width: 8, height: 8))
+            let px = try ImageWriter.rgba8Bytes(Renderer.render(grey, with: mono))
+            let seen = "\(px[0]) \(px[1]) \(px[2])"
+            XCTAssertEqual(Int(px[0]), Int(px[1]), accuracy: 1, "grey \(v) printed tinted: \(seen)")
+            XCTAssertEqual(Int(px[1]), Int(px[2]), accuracy: 1, "grey \(v) printed tinted: \(seen)")
+        }
+        XCTAssertEqual(mono.curve?.luma, graded.curve?.luma,
+                       "the candidate's tone curve is not a colour opinion and stays")
+    }
+
+    /// Selenium carries its own toning curve, and it must still tone a graded candidate's print —
+    /// the look's curve replaces the candidate's grade rather than being dropped with it.
+    func testSeleniumStillTonesAGradedCandidate() throws {
+        var graded = recipe(mono: false, blueLift: false)
+        graded.curve = Curve(luma: nil, red: [[0, 0], [128, 150], [255, 255]], green: nil, blue: nil)
+        let selenium = try XCTUnwrap(LookPreset.named("selenium")).applied(to: graded)
+        let out = try ImageStatistics.compute(Renderer.render(patch(), with: selenium))
+        XCTAssertLessThan(out.chromaB, -0.5, "selenium must read cool on a graded candidate")
+        XCTAssertNil(selenium.curve?.red, "the candidate's warm red grade must not survive")
+    }
 }
