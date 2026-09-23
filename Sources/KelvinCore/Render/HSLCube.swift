@@ -30,7 +30,7 @@ enum HSLCube {
     private static let maxLightnessShift = 0.5
 
     /// One band's centre and its adjustment, resolved from the recipe's name-keyed map.
-    struct Band: Equatable {
+    struct Band: Hashable, Sendable {
         let name: String
         let center: Double
         let adj: HSLAdjustment
@@ -92,7 +92,15 @@ enum HSLCube {
     static func makeData(from hsl: [String: HSLAdjustment]) -> Data? {
         let bands = bands(from: hsl)
         guard !bands.isEmpty else { return nil }
+        // Keyed by the resolved bands rather than the raw map, so aliases and neutral entries
+        // that `bands(from:)` normalises away do not make two identical tables look different.
+        return cache.data(for: bands, build: build)
+    }
 
+    /// Recently built tables (see `CubeCache`).
+    static let cache = CubeCache<[Band]>(capacity: 8)
+
+    private static func build(_ bands: [Band]) -> Data? {
         let n = dimension
         var cube = [Float](repeating: 0, count: n * n * n * 4)
         var i = 0

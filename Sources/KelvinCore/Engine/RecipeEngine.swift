@@ -442,7 +442,8 @@ public enum RecipeEngine {
         guard outdoor, let luma = skyLuma else { return nil }
 
         // Blown: the sky is near-white or the frame is clipping highlights. Veiled: a bright-ish
-        // sky sitting over a lifted black point, or the model called haze — the fog signature.
+        // sky sitting over a lifted black point — the fog signature, measured rather than claimed
+        // (the model's `haze` flag stopped counting with D19).
         let blown = luma > 0.82 || s.highlightClip > 0.03
         let veiled = luma > 0.55 && s.blackPoint > 0.12
 
@@ -1293,9 +1294,10 @@ public enum RecipeEngine {
 
     /// Noise reduction and a little output sharpening — the finishing pass the renderer applies.
     ///
-    /// NR is driven by the `noise` flag (and lifted for scenes prone to high ISO: night and
-    /// indoor). We have no per-image noise estimate yet, so the amount is a conservative hint,
-    /// not a measurement — kept small and honest.
+    /// NR is driven by the sensor's ISO when the EXIF carries it, and otherwise lifted only for
+    /// scenes prone to high ISO (night and indoor). The model's `noise` flag no longer counts
+    /// (D19). We have no per-image noise estimate yet, so the amount is a conservative hint, not a
+    /// measurement — kept small and honest.
     ///
     /// Output sharpening is scene-appropriate: detail scenes (landscape, macro) want a touch of
     /// crispness; a portrait wants **none** — crunchy skin is the tell of an amateur edit, and

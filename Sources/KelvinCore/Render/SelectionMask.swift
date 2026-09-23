@@ -10,6 +10,14 @@ public enum SelectionMask {
     public static let dimension = 32
 
     public static func makeData(_ sel: MaskSelection) -> Data? {
+        cache.data(for: sel, build: build)
+    }
+
+    /// Recently built tables (see `CubeCache`). Larger than the others because a single recipe
+    /// can carry several selections at once — a skin refinement, a colour mask, a luminance mask.
+    static let cache = CubeCache<MaskSelection>(capacity: 16)
+
+    private static func build(_ sel: MaskSelection) -> Data? {
         let n = dimension
         var cube = [Float](repeating: 0, count: n * n * n * 4)
         var i = 0

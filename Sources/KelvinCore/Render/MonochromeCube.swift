@@ -22,6 +22,13 @@ enum MonochromeCube {
     /// Returns nil only if the cube can't be built — an all-zero mix is still a real conversion
     /// (plain luminance B&W), so it must produce a cube.
     static func makeData(_ mix: BlackAndWhiteMix) -> Data? {
+        cache.data(for: mix, build: build)
+    }
+
+    /// Recently built tables (see `CubeCache`).
+    static let cache = CubeCache<BlackAndWhiteMix>(capacity: 8)
+
+    private static func build(_ mix: BlackAndWhiteMix) -> Data? {
         let bands: [(center: Double, amount: Double)] = mix.bands.compactMap { name, amount in
             guard let center = HSLCube.bandCenter[name.lowercased()], amount != 0 else { return nil }
             return (center, amount)

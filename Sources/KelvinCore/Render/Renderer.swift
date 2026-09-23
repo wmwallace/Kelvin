@@ -3,10 +3,10 @@ import CoreImage
 
 /// Render: buffer + recipe → buffer. Pure. No I/O, no UI, no model (ARCHITECTURE.md).
 ///
-/// Applies, in this order: heal → white balance → exposure → highlight/shadow → whites/blacks →
-/// contrast/saturation → dehaze → clarity → vibrance → luma curve → per-channel RGB curves
-/// (colour grade) → per-colour HSL → black & white → masked local adjustments → detail (NR +
-/// sharpen) → geometry (straighten + crop). Every schema field is now rendered. One exception,
+/// Applies, in this order: heal → white balance → exposure fusion → exposure → highlight/shadow →
+/// whites/blacks → range stretch → contrast/saturation → dehaze → clarity → vibrance → luma curve
+/// → per-channel RGB curves (colour grade) → per-colour HSL → black & white → masked local
+/// adjustments → detail (NR + sharpen) → geometry (straighten + crop). Every schema field is now rendered. One exception,
 /// deliberate: on a recipe with a black-and-white conversion, the per-channel curves run AFTER
 /// the conversion, where they tone the print instead of re-weighting it.
 ///
@@ -24,9 +24,9 @@ public enum Renderer {
     /// property here is that the slider behaves the same in both directions.
     static let highlightLiftGain = 0.16
 
-    /// Order of operations is fixed here in code, not implied by JSON key order (invariant #5):
-    /// white balance → exposure → highlight/shadow → whites/blacks → contrast/saturation →
-    /// clarity → vibrance → curve. (Curve precedes HSL in the schema; HSL is a later milestone.)
+    /// Order of operations is fixed here in code, not implied by JSON key order (invariant #5).
+    /// The full order, HSL, black and white, masks, detail and geometry included, is in the type's
+    /// documentation above and in docs/RECIPE-SCHEMA.md.
     public static func render(_ image: CIImage, with recipe: Recipe) -> CIImage {
         render(image, with: recipe, maskBitmaps: [:])
     }

@@ -154,7 +154,8 @@ public enum AestheticEvaluator {
         if s.shadowMass > 0.18 { issues.append(.shadowDetailLost) }
 
         // --- Colour cast: a gentle warmth is flattering; a strong global tint is a WB error.
-        // chromaA/chromaB are Lab-ish; magnitude ~>18 is a visible cast.
+        // chromaA/chromaB are Lab-ish. The penalty starts at 10 and is full by 32; an issue is
+        // flagged past 22, where the cast is unmistakable rather than merely visible.
         let castMag = (s.chromaA * s.chromaA + s.chromaB * s.chromaB).squareRoot()
         let colorCast = penalty(castMag, free: 10, bad: 32)
         if castMag > 22 { issues.append(.colorCast) }

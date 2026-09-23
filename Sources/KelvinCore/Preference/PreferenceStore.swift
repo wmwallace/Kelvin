@@ -2,9 +2,10 @@ import Foundation
 
 /// Milestone 6: preference store conforming to docs/RECIPE-SCHEMA.md Stage 3.
 ///
-/// Every time the user picks among candidates, that is a labelled comparison.
-/// "Semantic understanding of a single photo produces several candidate parametric recipes;
-/// the user's pick becomes training signal." (CLAUDE.md differentiator).
+/// Every time the user picks among candidates, that is a labelled comparison, and this records
+/// it. Since D18 it is a log with no reader: preference learning was dropped, on measurements
+/// showing a learned global style prior was worth nothing, and the per-frame opener is computed
+/// from the photograph instead. The log is kept because it is cheap and cannot be recreated.
 public struct PreferencePick: Codable, Equatable, Sendable {
     public var schemaVersion: Int
     public var imageId: String
@@ -74,8 +75,7 @@ public actor PreferenceStore {
         // whether the handle opened. `try?` on the open would erase the difference between
         // "no log yet" and "the log is there but unwritable" — a read-only mode left behind
         // by a restore, or descriptor exhaustion — and the create path *replaces* the file.
-        // This log is append-forever training signal that cannot be recomputed from the
-        // originals, so a failed open must cost one pick and throw, not the whole history.
+        // This log is append-forever and cannot be recomputed from the originals, so a failed open must cost one pick and throw, not the whole history.
         // The gap between the existence check and the open is harmless: `record` is actor
         // isolated and is the only writer.
         if !fm.fileExists(atPath: logFileURL.path) {
@@ -94,7 +94,7 @@ public actor PreferenceStore {
     ///
     /// A line that will not decode is skipped, not fatal. The append in `record` is not
     /// atomic, so a crash mid-write can leave one truncated line — and this log is
-    /// append-forever training signal, so one bad line must never make years of picks
+    /// append-forever and irreplaceable, so one bad line must never make years of picks
     /// unreadable. The skip count is returned to the caller's judgment via
     /// `loadAllReport` below; this convenience keeps the original signature.
     public func loadAll() throws -> [PreferencePick] {
