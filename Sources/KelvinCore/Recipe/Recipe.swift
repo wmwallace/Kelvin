@@ -3,9 +3,8 @@ import Foundation
 /// A parametric, non-destructive edit — the unit of work in the app (docs/DECISIONS.md D4).
 /// Serializes to a JSON sidecar. Matches docs/RECIPE-SCHEMA.md Stage 2.
 ///
-/// Milestone 1 renders `global` only. `curve`, `hsl`, `masks`, `detail`, and `geometry`
-/// are modelled and round-trip through JSON from commit one (schema is versioned from the
-/// start), but the renderer does not yet apply them. See `Renderer`.
+/// Every field is rendered; `Renderer` documents the order. The schema has been versioned from
+/// commit one.
 public struct Recipe: Codable, Equatable, Sendable {
     /// Versioned from commit one. Every serialized recipe carries this (CLAUDE.md).
     public var schemaVersion: Int
@@ -246,7 +245,9 @@ public struct GlobalAdjustments: Codable, Equatable, Sendable {
     public var isNeutral: Bool { self == .neutral }
 }
 
-/// Tone curves as control-point lists in 0…255 space. Not applied by the M1 renderer.
+/// Tone curves as control-point lists in 0…255 space. The luma curve and the per-channel curves
+/// are both rendered; on a black-and-white recipe the per-channel curves run after the conversion
+/// and tone the print (see `Renderer`).
 public struct Curve: Codable, Equatable, Sendable {
     public var luma: [[Double]]?
     public var red: [[Double]]?
@@ -263,7 +264,7 @@ public struct Curve: Codable, Equatable, Sendable {
 /// `bands` maps a hue band (`red`/`orange`/…/`magenta`) to −100…100: how much pixels of that hue
 /// are darkened or lightened in the grey result. Absent or all-zero still converts to grey, using
 /// the plain luminance mix.
-public struct BlackAndWhiteMix: Codable, Equatable, Sendable {
+public struct BlackAndWhiteMix: Codable, Hashable, Sendable {
     public var bands: [String: Double]
 
     public init(bands: [String: Double] = [:]) { self.bands = bands }
@@ -278,7 +279,7 @@ public struct BlackAndWhiteMix: Codable, Equatable, Sendable {
 }
 
 /// Per-color HSL adjustment. Each channel clamps to −100…100.
-public struct HSLAdjustment: Codable, Equatable, Sendable {
+public struct HSLAdjustment: Codable, Hashable, Sendable {
     public var h: Double
     public var s: Double
     public var l: Double
@@ -298,8 +299,8 @@ public struct HSLAdjustment: Codable, Equatable, Sendable {
 }
 
 /// A masked local adjustment. Masks are references (type + params), never bitmaps
-/// (invariant #6). Adjustments are kept as a keyed map for M1 since the renderer does not
-/// yet apply masks; the typed local-adjustment struct lands with mask rendering.
+/// (invariant #6). Adjustments are a keyed map whose keys are `adjustmentKeys`, clamped on decode
+/// to the global ranges they share a name with.
 public struct Mask: Codable, Equatable, Sendable {
 
     /// Every local adjustment the renderer honours inside a mask, in the order a photographer
@@ -494,7 +495,7 @@ public struct RegionSeed: Codable, Equatable, Sendable {
 /// A selection generated from the image itself: pixels within a colour (hue) or luminance range.
 /// `center`, `range`, `softness` are all normalised 0…1 (hue is 0…1 around the wheel). Parametric,
 /// so it serialises as numbers; the renderer bakes it into a colour cube.
-public struct MaskSelection: Codable, Equatable, Sendable {
+public struct MaskSelection: Codable, Hashable, Sendable {
     public enum Kind: String, Codable, Sendable { case color, luminance }
     public var kind: Kind
     public var center: Double
@@ -632,7 +633,9 @@ public struct Detail: Codable, Equatable, Sendable {
     }
 }
 
-/// Crop/rotate/lens-correction. Not applied by the M1 renderer.
+/// Straighten and crop, applied by the renderer last (see `Renderer.applyGeometry`).
+/// `lensCorrection` is carried but not read: the vendor's lens profile is applied at RAW decode
+/// for every file that has one (`ImageDecoder`).
 public struct Geometry: Codable, Equatable, Sendable {
     public var rotateDeg: Double
     public var crop: CropRect?

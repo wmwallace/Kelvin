@@ -1,9 +1,10 @@
 import Foundation
 
 /// Milestone 5: candidate generation. One image yields several fully-formed recipes that are
-/// *meaningfully different* looks, so the picker offers a real choice — and the pick becomes
-/// training signal (CLAUDE.md's one-sentence differentiator; docs/EVALUATION.md's
-/// candidate-divergence success criterion).
+/// *meaningfully different* looks, so the picker offers a real choice, and the chosen one carries
+/// across the shoot (CLAUDE.md's one-sentence differentiator; docs/EVALUATION.md's
+/// candidate-divergence success criterion). The pick is no longer training signal: D18 dropped
+/// preference learning.
 ///
 /// Two rules shape the design:
 ///

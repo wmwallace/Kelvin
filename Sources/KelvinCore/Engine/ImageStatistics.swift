@@ -4,10 +4,10 @@ import CoreImage
 /// Deterministic, measured statistics for one image — the *magnitude* half of the engine.
 ///
 /// This is load-bearing for non-negotiable #1 (CLAUDE.md): the model never emits numbers.
-/// Perception says *what* is wrong (categorical); this says *how much* (measured from the
-/// pixels). The engine multiplies the two. A hallucinated "underexposed" from the model is
-/// harmless if the histogram says the image is already bright — the magnitude comes from
-/// here, not from the judgment.
+/// Since D19 it carries more than the magnitude: the engine no longer reads the model's defect
+/// claims (`problems[]`) at all, so whether a frame is clipped, crushed or cast is decided here,
+/// from the pixels, as well as by how much. What the model still contributes is the categorical
+/// read — scene, subject, lighting, intent — never a verdict on the histogram.
 ///
 /// All luma/level values are in 0…1. Chroma is mean CIELAB (a, b), the same space the eval
 /// harness measures white balance in, so "reduce the cast" and "score the cast" agree.
@@ -373,8 +373,8 @@ public struct ImageStatistics: Equatable, Sendable {
             }
         }
 
-        // The least chromatic slice, averaged. `partialSort` would do, but the sample is 96×96 and
-        // this runs once per statistics pass, so a full sort is not worth optimising.
+        // The least chromatic slice, averaged. Found by walking a chroma histogram to the cutoff
+        // below, not by sorting the sample.
         //
         // ⚠️ **ITERATIVE REFINEMENT WAS TRIED AND MEASURED AND DOES NOT WORK — do not re-propose it.**
         // A single pass under-reads a genuine global cast (the corpus's `warm-cast` row costs +1.77),
