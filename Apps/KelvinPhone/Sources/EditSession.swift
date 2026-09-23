@@ -37,6 +37,24 @@ final class EditSession {
     /// The chosen look re-rendered with `adjustments`, for the canvas. Nil when there are none.
     private(set) var adjustedPreview: CGImage?
     private var adjustToken = 0
+    /// Which photograph the choices are filed under — the Photos identifier, or the file's path for
+    /// a photo opened some other way. Nil until a photo is open.
+    private(set) var photoKey: String?
+
+    /// True when the open photograph came back with a choice made on an earlier visit, so the canvas
+    /// can say so instead of looking like the engine's own pick.
+    private(set) var restoredEdit = false
+
+    /// File the current choice under the open photograph. Choosing the engine's own opener with no
+    /// adjustments is not an edit, and removes any saved one — the next visit opens fresh.
+    func persistChoice() {
+        guard let photoKey, let composed, let id = selectedID else { return }
+        if id == composed.openingID && adjustments.isNeutral {
+            PhoneEditStore.remove(for: photoKey)
+        } else {
+            PhoneEditStore.save(PhoneEdit(styleId: id, adjustments: adjustments), for: photoKey)
+        }
+    }
 
     /// The recipe that will be saved: the chosen look, with the adjustments on it.
     var selectedRecipe: Recipe? { selectedLook.map { adjustments.applied(to: $0.recipe) } }
@@ -71,7 +89,7 @@ final class EditSession {
     // MARK: Opening
 
     func open(_ item: PhotosPickerItem) async {
-        await open { () async throws -> URL in
+        await open(key: item.itemIdentifier) { () async throws -> URL in
             guard let picked = try await item.loadTransferable(type: PickedPhoto.self) else {
                 throw OpenError.unreadable
             }
@@ -82,10 +100,10 @@ final class EditSession {
     /// Open a file directly. Debug builds take `-open <path>` at launch so the simulator can be
     /// driven — and screenshotted — without a finger on the photo picker.
     func open(file url: URL) async {
-        await open { url }
+        await open(key: url.path) { url }
     }
 
-    private func open(_ resolve: () async throws -> URL) async {
+    private func open(key: String?, _ resolve: () async throws -> URL) async {
         request += 1
         let mine = request
         notice = nil
@@ -97,10 +115,21 @@ final class EditSession {
                 self.phase = .working(stage)
             }
             guard request == mine else { return }
-            selectedID = result.openingID
             showingOriginal = false
-            adjustments = Adjustments()
             adjustedPreview = nil
+            photoKey = key
+            // What was chosen last time, if this photograph was opened before and that look is
+            // still among the ones offered; otherwise the engine's own opener, fresh.
+            if let key, let saved = PhoneEditStore.load(for: key),
+               result.looks.contains(where: { $0.id == saved.styleId }) {
+                selectedID = saved.styleId
+                adjustments = saved.adjustments
+                restoredEdit = true
+            } else {
+                selectedID = result.openingID
+                adjustments = Adjustments()
+                restoredEdit = false
+            }
             phase = .ready(result)
         } catch {
             guard request == mine else { return }
