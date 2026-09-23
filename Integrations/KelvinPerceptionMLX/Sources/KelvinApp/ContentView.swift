@@ -5936,43 +5936,23 @@ final class AppState {
         }
         let work = DecodedForExport(image: decoded.image, proxy: decoded.proxy)
         let resolved = try await Offload.run(.vision) { () throws -> Recipe in
-            let stats = try ImageStatistics.compute(work.proxy)
-            // Per-photo subject + sky masks — each frame gets its own local decisions, measured on
-            // its own proxy rather than inherited from whatever was open when the look was chosen.
-            let m = LocalMasks.measure(in: work.proxy)
+            // THE HARNESS'S OWN COMPOSITION, not a copy of it. This closure used to spell out
+            // `ShippedCandidates.compose` by hand — statistics, masks, candidates, one face pass,
+            // scores, curation — and it was one of four copies that had already drifted (the face
+            // cap reached only the harness's). Calling `compose` makes what a batch exports, by
+            // construction, what the corpus measures. The whole set is still built and scored:
+            // curation is not a per-candidate verdict, so resolving the requested style needs the
+            // rest of the pool in hand.
             let iso = ExifReader.iso(url: url)
-            let focus = FocusMeasure.engineReading(for: work.proxy)
-            let recipes = RecipeEngine.candidates(perception: perception, statistics: stats,
-                                                  masks: m.summary, iso: iso, focus: focus)
-            // The whole set has to be built and scored, not just the one that was asked for.
-            // Curation is not a per-candidate verdict: a style is dropped by the quality floor, OR
-            // by being too close to one already chosen, OR by the four-slot cap — and the last two
-            // are answerable only with the rest of the pool in hand. Rendering the requested style
-            // alone and checking its score would agree with the canvas most of the time, which is
-            // the worst kind of nearly-right.
-            // ONE face detection for the whole set, on the UNGRADED proxy — byte for byte the
-            // canvas's sequence (see `buildCandidates`). `score(rendered:)` detects inside each
-            // candidate's own render instead, so a look dark enough to lose the face Vision found
-            // on the plain proxy scored its skin against a different face set than its rivals did:
-            // the two curators could then resolve different recipes for the same photograph, which
-            // is the canvas showing one picture and the export writing another. It also ran Vision
-            // once per candidate — 626 ms apiece on a three-face proxy — to answer the same question.
-            let faces = FaceSkin.detect(in: work.proxy)
-            var scored: [CandidateCurator.Scored] = []
-            for recipe in recipes {
-                let rendered = Renderer.render(work.proxy, with: recipe, maskBitmaps: m.bitmaps)
-                guard let renderedStats = try? ImageStatistics.compute(rendered) else { continue }
-                let score = AestheticEvaluator.score(stats: renderedStats,
-                                                     face: FaceSkin.meter(in: rendered, faces: faces))
-                scored.append(.init(recipe: recipe, score: score))
-            }
-            let resolution = CandidateCurator.resolve(from: scored, requested: style.id, count: 4)
-            if let chosen = resolution.chosen { return chosen.recipe }
+            let composed = try ShippedCandidates.compose(for: work.proxy, perception: perception,
+                                                         iso: iso, requestedStyleID: style.id)
+            if let chosen = composed.chosen { return chosen.recipe }
             // Nothing scored at all — a frame the evaluator could not read. Fall back to building
             // the requested style directly rather than failing the export: the photographer asked
             // for this look, and the curator having nothing to say is not a reason to skip a file.
-            return RecipeEngine.candidate(perception: perception, statistics: stats, style: style,
-                                          masks: m.summary, iso: iso, focus: focus)
+            return RecipeEngine.candidate(perception: perception, statistics: composed.statistics,
+                                          style: style, masks: composed.masks.summary, iso: iso,
+                                          focus: FocusMeasure.engineReading(for: composed.measuredOn))
         }
         ResolvedRecipeStore.save(resolved, for: url, styleId: style.id, modelId: modelIdForCache)
         return resolved
