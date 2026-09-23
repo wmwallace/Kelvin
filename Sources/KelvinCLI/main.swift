@@ -459,8 +459,11 @@ case "corpus-degrade":
         let photos = try BatchApply.imageFiles(in: URL(fileURLWithPath: inDir, isDirectory: true))
         guard !photos.isEmpty else { fail("no images in \(inDir)") }
         let longEdge = value(for: "--long-edge", in: rest).flatMap(Int.init)
+        // `--arms soft` builds the soft-focus arm alone (D25), as its own corpus beside the standard one.
+        let arms = value(for: "--arms", in: rest) == "soft" ? DegradationCorpus.soft : DegradationCorpus.standard
         let manifest = try DegradationCorpus.build(
             goodPhotos: photos,
+            degradations: arms,
             outputDir: URL(fileURLWithPath: outDir, isDirectory: true),
             longEdge: longEdge
         )
@@ -470,7 +473,7 @@ case "corpus-degrade":
                 + "unless you need\n      full-resolution pixels.")
         }
         let photoCount = Set(manifest.entries.map { $0.id.components(separatedBy: "__").first ?? $0.id }).count
-        print("Built degradation corpus: \(photoCount) photo(s) × \(DegradationCorpus.standard.count) "
+        print("Built degradation corpus: \(photoCount) photo(s) × \(arms.count) "
             + "degradations = \(manifest.entries.count) entries in \(outDir)")
         print("Next: kelvin-perceive label --in-dir \(outDir)/source --out-dir \(outDir)/perception")
         print("Then: \(tool) eval --corpus \(outDir)")

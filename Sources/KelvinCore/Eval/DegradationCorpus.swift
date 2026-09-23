@@ -1,4 +1,5 @@
 import Foundation
+@preconcurrency import CoreImage
 
 /// Builds a **commercial-clean** evaluation corpus from good photographs, with no dependence on
 /// licence-encumbered expert edits (FiveK/PPR10K are non-commercial-research only).
@@ -17,7 +18,22 @@ public enum DegradationCorpus {
     public struct Degradation: Sendable {
         public let id: String
         public let recipe: Recipe
-        public init(id: String, recipe: Recipe) { self.id = id; self.recipe = recipe }
+        /// A Gaussian blur, as a fraction of the frame's shorter edge, applied after `recipe`. Soft
+        /// focus is not something a recipe can express — the renderer sharpens, it does not blur —
+        /// and a fraction rather than pixels keeps the defect the same at every `longEdge`.
+        public let blurFraction: Double
+        public init(id: String, recipe: Recipe, blurFraction: Double = 0) {
+            self.id = id; self.recipe = recipe; self.blurFraction = blurFraction
+        }
+
+        func apply(to good: CIImage) -> CIImage {
+            let degraded = Renderer.render(good, with: recipe)
+            guard blurFraction > 0 else { return degraded }
+            let radius = blurFraction * Double(min(good.extent.width, good.extent.height))
+            return degraded.clampedToExtent()
+                .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: radius])
+                .cropped(to: good.extent)
+        }
     }
 
     private static func make(_ mutate: (inout GlobalAdjustments) -> Void) -> Recipe {
@@ -37,6 +53,17 @@ public enum DegradationCorpus {
         Degradation(id: "cool-cast",    recipe: make { $0.temperatureK = 8800 }),
         Degradation(id: "flat",         recipe: make { $0.contrast = -70; $0.saturation = -20 }),
         Degradation(id: "dull",         recipe: make { $0.saturation = -45 })
+    ]
+
+    /// The soft-focus arm, kept OUT of `standard` so the six-way corpus stays comparable with every
+    /// report already written against it. It exists for one decision: D25's clarity damping is off
+    /// because "does the damping help?" could not be measured while nothing in either corpus was
+    /// soft. Two strengths — a missed focus and a badly missed one — so a rule that helps the mild
+    /// case and ruins the strong one cannot hide in a single average. 0.0025 of the short edge is
+    /// ~2.7 px at a 1600 px long edge.
+    public static let soft: [Degradation] = [
+        Degradation(id: "soft-focus", recipe: make { _ in }, blurFraction: 0.0025),
+        Degradation(id: "missed-focus", recipe: make { _ in }, blurFraction: 0.006)
     ]
 
     public enum Error: Swift.Error, CustomStringConvertible {
@@ -114,7 +141,7 @@ public enum DegradationCorpus {
             try ImageWriter.write(good, to: outputDir.appendingPathComponent(refRel), format: .png)
 
             for degradation in degradations {
-                let degraded = Renderer.render(good, with: degradation.recipe)
+                let degraded = degradation.apply(to: good)
                 let sourceStem = "\(stem)__\(degradation.id)"
                 let sourceRel = "source/\(sourceStem).png"
                 try ImageWriter.write(degraded, to: outputDir.appendingPathComponent(sourceRel), format: .png)
