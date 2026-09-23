@@ -18,7 +18,7 @@ struct AdjustPanel: View {
                     .font(.headline)
                     .foregroundStyle(Theme.ink)
                 Spacer()
-                Button("Reset") { session.adjustments = Adjustments() }
+                Button("Reset") { session.adjustments = LookAdjustments() }
                     .disabled(session.adjustments.isNeutral)
                 Button("Done") { dismiss() }
                     .fontWeight(.semibold)

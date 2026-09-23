@@ -15,12 +15,12 @@ struct PhoneEdit: Codable, Equatable {
     var warmth: Double
     var contrast: Double
 
-    init(styleId: String, adjustments: Adjustments) {
+    init(styleId: String, adjustments: LookAdjustments) {
         self.styleId = styleId
         light = adjustments.light; warmth = adjustments.warmth; contrast = adjustments.contrast
     }
 
-    var adjustments: Adjustments { Adjustments(light: light, warmth: warmth, contrast: contrast) }
+    var adjustments: LookAdjustments { LookAdjustments(light: light, warmth: warmth, contrast: contrast) }
 }
 
 enum PhoneEditStore {
