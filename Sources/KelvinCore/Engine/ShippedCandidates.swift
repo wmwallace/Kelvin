@@ -146,13 +146,10 @@ public enum ShippedCandidates {
         let recipes = RecipeEngine.candidates(
             perception: perception,
             statistics: stats,
-            subjectLuma: masks.subjectLuma,
-            skyLuma: masks.skyLuma,
-            subjectOrigin: masks.subjectOrigin,
+            masks: masks.summary,
             iso: iso,
             perceptionHash: perceptionHash,
             generatedAt: generatedAt,
-            subjectLumaIsSkin: masks.subjectLumaIsSkin,
             // Nil unless KELVIN_CLARITY_FOCUS is on; measured on the same proxy as `stats`, like
             // every other path that generates candidates — see `FocusMeasure.engineReading`.
             focus: FocusMeasure.engineReading(for: measureOn)
