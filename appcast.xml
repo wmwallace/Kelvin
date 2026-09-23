@@ -15,6 +15,139 @@
     <link>https://usekelvin.app</link>
     <description>Updates for Kelvin, the on-device photo editor for Mac.</description>
     <item>
+      <title>Kelvin 0.9.1 &#8212; photos in iCloud open without the wait, and night frames keep their faces</title>
+      <pubDate>Wed, 23 Sep 2026 12:33:45 -0700</pubDate>
+      <sparkle:version>374</sparkle:version>
+      <sparkle:shortVersionString>0.9.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <link>https://github.com/wmwallace/Kelvin/releases/tag/v0.9.1</link>
+      <description><![CDATA[
+        <style>
+          /* Kelvin update notes. Self-contained: no external fonts, images or scripts — Sparkle
+             renders this offline, mid-install, in a narrow pane. */
+          :root {
+            color-scheme: light dark;
+            --ink: #1c1a17;
+            --dim: #6b6660;
+            --faint: #928c84;
+            --bg: #faf8f5;
+            --rule: rgba(0,0,0,0.10);
+            --glow: #b4661a;
+          }
+          @media (prefers-color-scheme: dark) {
+            :root {
+              --ink: #e8e3dc;
+              --dim: #9a938a;
+              --faint: #6f6862;
+              --bg: #131211;
+              --rule: rgba(255,255,255,0.11);
+              --glow: #e9a44c;
+            }
+          }
+          body {
+            margin: 0;
+            padding: 18px 20px 26px;
+            background: var(--bg);
+            color: var(--ink);
+            font: 13px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+            -webkit-font-smoothing: antialiased;
+          }
+          /* The blackbody rail: amber through daylight to blue, which is what the app is named after
+             and the one piece of decoration here that means something. It separates sections the way
+             the temperature rail runs under the canvas in the app itself. */
+          .rail {
+            height: 2px;
+            border: 0;
+            margin: 20px 0 16px;
+            background: linear-gradient(90deg, #e9a44c 0%, #f2ead9 42%, #cfd8e6 68%, #7fa2cc 100%);
+            opacity: 0.85;
+          }
+          .lede {
+            margin: 0;
+            font-size: 15px;
+            line-height: 1.45;
+            letter-spacing: -0.005em;
+          }
+          .version {
+            font: 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--faint);
+            margin: 0 0 9px;
+          }
+          /* Mono, tracked, uppercase — the same label treatment the app uses over its own panel
+             sections, so the notes read in the app's voice rather than a changelog's. */
+          h2 {
+            font: 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+            color: var(--glow);
+            margin: 22px 0 7px;
+          }
+          h2:first-of-type { margin-top: 0; }
+          p { margin: 0 0 9px; }
+          p.note { color: var(--dim); }
+          ul { margin: 0 0 9px; padding-left: 17px; }
+          li { margin-bottom: 4px; }
+          strong { font-weight: 600; }
+          .limit {
+            border-left: 2px solid var(--rule);
+            padding-left: 11px;
+            margin: 12px 0 0;
+            color: var(--dim);
+          }
+          .closing {
+            margin-top: 22px;
+            padding-top: 14px;
+            border-top: 1px solid var(--rule);
+            color: var(--faint);
+            font-size: 12px;
+          }
+        </style>
+        <p class="version">Kelvin 0.9.1</p>
+        <p class="lede">Two fixes, both reported on a real shoot: photos kept in iCloud no longer hold
+        up the one you opened, and night and firelit frames keep their faces.</p>
+        <hr class="rail">
+        <h2>Photos in iCloud</h2>
+        <p>With &ldquo;Optimize Mac Storage&rdquo; on, macOS keeps some originals only in iCloud, and
+        the first read of one downloads the whole file &mdash; 40 to 90&nbsp;seconds for a 60&nbsp;MB
+        RAW. Kelvin reads a photo&rsquo;s neighbours ahead of time and used to start those downloads in
+        the same queue as the photo on screen, which then waited a minute or more. Now only the photo
+        you open or export is downloaded, and the canvas says &ldquo;Downloading from iCloud&hellip;&rdquo;
+        while it comes down. The rest of the shoot stays where macOS put it; its thumbnails come from
+        iCloud without downloading the originals.</p>
+        <h2>Night frames</h2>
+        <p>A frame that is dark by nature &mdash; people around a fire &mdash; was brightened as if it
+        were underexposed, then brightened again at the top end, and faces clipped on every look past
+        Natural. Kelvin now tells a dark picture from an underexposed one by how much of it sits in
+        deep shadow, and stops brightening once the frame&rsquo;s own brightest content reaches white.
+        On the reported frame, clipped skin on Vivid fell from 15% and 11% of the two faces to 4% and 0%.</p>
+        <p class="note">Edits you already saved keep their values; pick a night frame&rsquo;s look again
+        to get the new one.</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/wmwallace/Kelvin/releases/download/v0.9.1/Kelvin-0.9.1.dmg"
+        sparkle:edSignature="yx+uve7eHWShj/xeAzFdDtrSZN5c8vo1wddRF3nJVbi1b1lzWAax2lgpJnDmh7WFZ4WKWGiD+ui1hLO4puH/AA=="
+        length="5081236"
+        type="application/octet-stream"/>
+      <!-- Deltas from 0.9.0 and 0.8.2. Anything older takes the 5 MB image, which costs less than
+           the patches it would need. -->
+      <sparkle:deltas>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.9.1/Kelvin-0.9.1-from-371.delta"
+          sparkle:deltaFrom="371"
+          sparkle:edSignature="Kbsw5OvcValqjgBMGbyFEZysuRreloc5fpKrdaD3XSvYD6q0ut2/hqp+wX34IuNDwwkvCTiXfSSBfBsUQyqKDQ=="
+          length="390242"
+          type="application/octet-stream"/>
+        <enclosure
+          url="https://github.com/wmwallace/Kelvin/releases/download/v0.9.1/Kelvin-0.9.1-from-334.delta"
+          sparkle:deltaFrom="334"
+          sparkle:edSignature="tVXXtTD83CSdN2lCVE7yGkLrgGgfB2dIZ1QwynQ0RYaunEeqSzHgALzSdud11a//Lr7lUufG+J7mXKF2jHeYAQ=="
+          length="805306"
+          type="application/octet-stream"/>
+      </sparkle:deltas>
+    </item>
+    <item>
       <title>Kelvin 0.9 &#8212; a 13 MB app, looks read in a tenth of a second, and edits that stop getting lost</title>
       <pubDate>Wed, 23 Sep 2026 09:08:44 -0700</pubDate>
       <sparkle:version>371</sparkle:version>
