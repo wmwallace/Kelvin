@@ -170,6 +170,9 @@ Getting this wrong costs bandwidth, not installs.
 In order, because several of these are irreversible:
 
 1. `make test` green, and the version decided (see the version scheme above).
+   Then `scripts/look-gate.sh` green: every look a photograph opens in or is offered, rendered on
+   your own frames and compared with the last accepted run — the defects the corpus cannot see
+   (flat red faces, a blown sky, a cyan lake) fail it. `--accept` only after looking at why it moved.
 2. `scripts/package-app.sh` with `KELVIN_SIGN_IDENTITY`, `KELVIN_NOTARY_PROFILE` and
    `KELVIN_VERSION` set. Two notarisation waits.
 3. Run the first-run checks below on the DMG, not just the app.
