@@ -72,9 +72,13 @@ public extension LocalMasks {
     /// background, plus each bound subject found again by where it was — all measured on ONE
     /// `deliveryImage`, and placed over the full frame. The single-photo export and the batch both
     /// call this, so the two cannot measure a frame differently again.
+    ///
+    /// `segmenting` is the recipe's masks: each tapped object (`Mask.segment`, D32) is segmented
+    /// again from its taps on the same image, since the renderer skips one it is handed no bitmap
+    /// for. One whose taps come back empty is reported in `unmatched`, like a lost subject.
     static func measureForDelivery(in full: CIImage,
                                    reidentifying references: [SubjectInstances.Reference],
-                                   mattes: CameraMattes.Found? = nil) -> Delivery {
+                                   segmenting masks: [Mask] = []) -> Delivery {
         let small = deliveryImage(full)
         var bitmaps = measure(in: small, mattes: mattes).bitmaps
         var unmatched: [String] = []
@@ -83,6 +87,9 @@ public extension LocalMasks {
             bitmaps.merge(matched.bitmaps) { _, fresh in fresh }
             unmatched = matched.unmatched
         }
+        let objects = ObjectSegmentation.bitmaps(for: masks, in: small, placedOver: small.extent)
+        bitmaps.merge(objects.bitmaps) { _, fresh in fresh }
+        unmatched += objects.failed
         return Delivery(bitmaps: bitmaps.mapValues { scale($0, to: full.extent) }, unmatched: unmatched)
     }
 }

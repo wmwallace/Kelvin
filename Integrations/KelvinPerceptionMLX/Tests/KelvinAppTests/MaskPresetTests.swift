@@ -39,7 +39,8 @@ final class MaskPresetTests: XCTestCase {
         // person, and a wand needs the point it was seeded from. A wand preset is the tempting one
         // — a tolerance looks portable — but the seed is a coordinate on one frame, so it would
         // land on whatever happens to sit there in the next photograph and report success.
-        let photoBound: Set<UserMaskVM.Kind> = [.brush, .instance, .wand]
+        // A selected object is bound the same way: its taps are coordinates on one frame.
+        let photoBound: Set<UserMaskVM.Kind> = [.brush, .instance, .wand, .object]
         for kind in photoBound { XCTAssertFalse(MaskPreset.isCapturable(kind)) }
         for kind in UserMaskVM.Kind.allCases where !photoBound.contains(kind) {
             XCTAssertTrue(MaskPreset.isCapturable(kind), "\(kind) has nothing photo-bound in it")

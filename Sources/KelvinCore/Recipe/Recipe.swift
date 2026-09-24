@@ -355,6 +355,19 @@ public struct Mask: Codable, Equatable, Sendable {
     /// look right on screen and be missing from the exported file.
     public var region: RegionSeed?
 
+    /// An object picked by tapping it — Apple's iterative segmentation (Vision, macOS 27 / iOS 27).
+    /// The wand's object-aware sibling: the wand takes whatever colour is contiguous with the click
+    /// and leaks wherever the thing touches something the same colour (off one sea stack along the
+    /// surf into Haystack Rock), this takes the OBJECT under the click, and further taps add to it or
+    /// carve pieces off it.
+    ///
+    /// **The taps, never the bitmap** (RECIPE-SCHEMA #6, D32). Unlike every other source the renderer
+    /// cannot make this one itself — the request is asynchronous and may need a model download — so
+    /// the caller regenerates it from these taps on the image it is rendering and supplies it under
+    /// the mask's `id`. Without that bitmap the mask renders nothing: it never falls back to a type
+    /// key or to another source. Absent on every mask written before it existed.
+    public var segment: SegmentSeed?
+
     /// Narrows whatever region the source produced to pixels that ALSO fall in a colour or
     /// luminance range. The mask's one modifier of substance, alongside `invert`.
     ///
@@ -376,12 +389,14 @@ public struct Mask: Codable, Equatable, Sendable {
         id: String, type: String, source: String?, invert: Bool,
         feather: Double, opacity: Double, adjustments: [String: Double],
         shape: MaskShape? = nil, stamps: [BrushStamp]? = nil, selection: MaskSelection? = nil,
-        tightness: Double? = nil, refine: MaskSelection? = nil, region: RegionSeed? = nil
+        tightness: Double? = nil, refine: MaskSelection? = nil, region: RegionSeed? = nil,
+        segment: SegmentSeed? = nil
     ) {
         self.id = id; self.type = type; self.source = source; self.invert = invert
         self.feather = feather; self.opacity = opacity; self.adjustments = adjustments
         self.shape = shape; self.stamps = stamps; self.selection = selection
         self.tightness = tightness; self.refine = refine; self.region = region
+        self.segment = segment
     }
 
     /// The colour range that stands for human skin across complexions — hue, never brightness,
@@ -419,6 +434,7 @@ public struct Mask: Codable, Equatable, Sendable {
         stamps = try c.decodeIfPresent([BrushStamp].self, forKey: .stamps)
         selection = try c.decodeIfPresent(MaskSelection.self, forKey: .selection)
         region = try c.decodeIfPresent(RegionSeed.self, forKey: .region)
+        segment = try c.decodeIfPresent(SegmentSeed.self, forKey: .segment)
         refine = try c.decodeIfPresent(MaskSelection.self, forKey: .refine)
         tightness = try c.clampedOptionalDouble(.tightness, in: Ranges.unsigned100)
 
@@ -455,8 +471,52 @@ public struct Mask: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case id, type, source, invert, feather, opacity, adjustments, shape, stamps, selection
-        case tightness, refine, region
+        case tightness, refine, region, segment
     }
+}
+
+/// The taps an object mask is made from — `Mask.segment`, stored as the numbers needed to make it
+/// again (D32). `ObjectSegmentation` turns them into pixels.
+///
+/// Two lists rather than one ordered stroke, because the request itself is not ordered: it takes a
+/// seed, then any number of points in and out, and was measured to give the same mask whichever
+/// order they arrive in (0.04% mean difference on `_DSC6390`, three taps each way). The first
+/// `include` is the seed.
+public struct SegmentSeed: Codable, Hashable, Sendable {
+    /// A tap, normalised, **top-left origin** like `RegionSeed` and every other point in a recipe.
+    /// Vision's points are bottom-left; `ObjectSegmentation.visionPoint` is the one conversion.
+    public struct Point: Codable, Hashable, Sendable {
+        public var x: Double
+        public var y: Double
+        public init(x: Double, y: Double) { self.x = x; self.y = y }
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            x = clamp(try c.decodeIfPresent(Double.self, forKey: .x) ?? 0.5, to: 0...1)
+            y = clamp(try c.decodeIfPresent(Double.self, forKey: .y) ?? 0.5, to: 0...1)
+        }
+        enum CodingKeys: String, CodingKey { case x, y }
+    }
+
+    /// Taps on the object. The first is the seed; empty selects nothing.
+    public var include: [Point]
+    /// Taps on what the selection took and should not have (⌥-click).
+    public var exclude: [Point]
+
+    /// More taps than anyone makes by hand. A cap because a recipe from disk is never trusted, and
+    /// each tap is work for Vision on every regeneration.
+    public static let maxPoints = 32
+
+    public init(include: [Point], exclude: [Point] = []) {
+        self.include = include; self.exclude = exclude
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        include = Array((try c.decodeIfPresent([Point].self, forKey: .include) ?? []).prefix(Self.maxPoints))
+        exclude = Array((try c.decodeIfPresent([Point].self, forKey: .exclude) ?? []).prefix(Self.maxPoints))
+    }
+
+    enum CodingKeys: String, CodingKey { case include, exclude }
 }
 
 /// Where a flood-fill mask starts and how far it is allowed to spread — the magic wand, stored the

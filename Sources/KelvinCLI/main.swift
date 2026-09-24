@@ -44,6 +44,8 @@ func printUsage() {
       \(tool) wb-probe --in-dir <dir> [--reference-dir <dir>] [--cost]
       \(tool) instances --in <image>
       \(tool) grow --in <image> --at <x,y> [--tolerance <t>] [--softness <s>] [--out-dir <dir>]
+      \(tool) segment --in <image> --at <x,y>[;x,y…] [--exclude <x,y>[;x,y…]] [--edge <px>]
+                    [--out-dir <dir>]
       \(tool) pick-probe --report <report.json> --corpus <dir> [--pair a,b] [--min-margin <dE>]
       \(tool) opener-probe --report <report.json> --corpus <dir> [--style <id>]
                      [--regions <r,r,…>] [--masses <m,m,…>]
@@ -105,6 +107,16 @@ func printUsage() {
       inside one object and a jump once it bursts out into the sky. Ship a number from the flat
       part. LOOK at the preview before believing the table — the same warning `sky-metrics
       --dump-dir` carries, and for the same reason.
+
+    segment options (tap-to-segment — Apple's iterative segmentation, macOS 27; D32):
+      --in         One photograph. Required.
+      --at         Taps on the object, normalised 0…1, TOP-LEFT origin, `;`-separated. The first is
+                   the seed. Required. e.g. --at 0.53,0.55 or --at "0.53,0.55;0.76,0.62"
+      --exclude    Taps on what the selection took and should not have (the app's ⌥-click).
+      --edge       Long edge the photograph is segmented at (default 1200, the canvas proxy's size;
+                   the export uses 2048).
+      --out-dir    Write segment-mask.png and segment-preview.png (the object pulled down 1.5 EV,
+                   the same preview `grow` writes, so the two can be compared at the same point).
 
     mask-coverage options:
       --in-dir   Directory of photographs to measure. Required.
@@ -240,9 +252,14 @@ case "render":
         let recipe = try RecipeIO.load(from: recipeURL)   // clamps on decode
         // Supply subject/sky bitmaps so any local masks the recipe references are applied; the
         // renderer ignores masks it has no bitmap for, so measuring unconditionally is safe.
-        let measured = LocalMasks.measure(in: image)
+        // Tapped objects too (D32): the renderer cannot segment them itself, so they are made
+        // here from their taps, or the file would silently lack them.
+        let objects = ObjectSegmentation.bitmaps(for: recipe.masks ?? [], in: image,
+                                                 placedOver: image.extent)
+        for id in objects.failed { print("warning: object mask \(id) selected nothing here — rendered without it") }
+        let bitmaps = LocalMasks.measure(in: image).bitmaps.merging(objects.bitmaps) { _, tapped in tapped }
         func render(_ r: Recipe, to url: URL) throws {
-            let rendered = Renderer.render(image, with: r, maskBitmaps: measured.bitmaps)
+            let rendered = Renderer.render(image, with: r, maskBitmaps: bitmaps)
             try ImageWriter.write(rendered, to: url)
             print("Wrote \(url.path)")
         }
@@ -708,6 +725,77 @@ case "grow":
                                   format: .png)
         }
         if let outDir { print("wrote a mask and a preview per tolerance to \(outDir.path)") }
+    } catch { fail("\(error)") }
+
+case "segment":
+    // The wand's object-aware sibling, on a real photograph. Run `grow` at the same point to see the
+    // difference: the wand takes the contiguous colour and leaks where the object touches its own
+    // colour; this asks Vision for the object.
+    do {
+        let rest = Array(arguments.dropFirst())
+        guard let inPath = value(for: "--in", in: rest) else { fail("segment requires --in") }
+        func taps(_ flag: String) -> [SegmentSeed.Point] {
+            guard let raw = value(for: flag, in: rest) else { return [] }
+            return raw.split(separator: ";").map { pair in
+                let p = pair.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+                guard p.count == 2 else { fail("\(flag) takes x,y pairs, e.g. \(flag) 0.53,0.55;0.76,0.62") }
+                return SegmentSeed.Point(x: p[0], y: p[1])
+            }
+        }
+        let seed = SegmentSeed(include: taps("--at"), exclude: taps("--exclude"))
+        guard !seed.include.isEmpty else {
+            fail("segment requires --at <x,y> — normalised 0…1, TOP-LEFT origin, e.g. --at 0.53,0.55")
+        }
+        guard ObjectSegmentation.isSupported else {
+            fail("tap-to-segment needs macOS 27 and a build made with its SDK (Xcode 27)")
+        }
+        let edge = value(for: "--edge", in: rest).flatMap(Int.init) ?? 1200
+
+        let url = URL(fileURLWithPath: inPath)
+        let full = try ImageDecoder.decode(url: url)
+        // Segmented on a materialised proxy, the way the app does it — never the 60 MP frame.
+        let small = PerceptionProxy.downsample(full, maxEdge: edge)
+        guard let cg = CIContext().createCGImage(small, from: small.extent) else {
+            fail("could not render the proxy")
+        }
+        let image = CIImage(cgImage: cg)
+        print(String(format: "%@  %.0f×%.0f  %d in, %d out (top-left origin)",
+                     url.lastPathComponent as NSString, image.extent.width, image.extent.height,
+                     seed.include.count, seed.exclude.count))
+
+        var start = Date()
+        print("readiness: \(ObjectSegmentation.readiness())")
+        try ObjectSegmentation.prepare()
+        print(String(format: "prepare (download if needed, model load): %.2f s", Date().timeIntervalSince(start)))
+        start = Date()
+        guard let mask = ObjectSegmentation.mask(for: seed, in: image) else {
+            fail("Vision found nothing at those taps")
+        }
+        print(String(format: "segment: %.2f s", Date().timeIntervalSince(start)))
+        if let data = try? ImageWriter.rgba8Sampled(mask, width: 128, height: 128) {
+            var sum = 0.0
+            data.withUnsafeBytes { raw in
+                let p = raw.bindMemory(to: UInt8.self)
+                for i in stride(from: 0, to: data.count, by: 4) { sum += Double(p[i]) / 255 }
+            }
+            print(String(format: "coverage: %.3f", sum / Double(data.count / 4)))
+        }
+
+        if let dir = value(for: "--out-dir", in: rest) {
+            let outDir = URL(fileURLWithPath: dir, isDirectory: true)
+            try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+            try ImageWriter.write(mask, to: outDir.appendingPathComponent("segment-mask.png"), format: .png)
+            // Through the renderer as a recipe mask, the path an edit takes: the same feather and
+            // pull-down `grow` previews with, so the two pictures differ only in the selection.
+            var recipe = Recipe.neutral
+            recipe.masks = [Mask(id: "object", type: "object", source: "tap-segment",
+                                 invert: false, feather: 8, opacity: 1.0,
+                                 adjustments: ["exposure_ev": -1.5], segment: seed)]
+            let preview = Renderer.render(image, with: recipe, maskBitmaps: ["object": mask])
+            try ImageWriter.write(preview, to: outDir.appendingPathComponent("segment-preview.png"),
+                                  format: .png)
+            print("wrote segment-mask.png and segment-preview.png to \(outDir.path)")
+        }
     } catch { fail("\(error)") }
 
 case "mask":

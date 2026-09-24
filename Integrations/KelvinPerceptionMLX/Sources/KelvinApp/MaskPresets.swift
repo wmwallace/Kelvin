@@ -69,8 +69,11 @@ struct MaskPreset: Codable, Identifiable, Equatable {
     /// same coordinate on the next one lands on whatever happens to be there — so a "Darken the sea
     /// stack" preset would apply itself to a patch of sky and report success. A preset that is
     /// silently wrong is worse than one that is unavailable.
+    ///
+    /// A selected object (`.object`) is the same case as the wand, with more coordinates: its taps
+    /// name a thing on this frame, and on the next they would name whatever stands there.
     static func isCapturable(_ kind: UserMaskVM.Kind) -> Bool {
-        kind != .brush && kind != .instance && kind != .wand
+        kind != .brush && kind != .instance && kind != .wand && kind != .object
     }
 
     // MARK: Built-ins

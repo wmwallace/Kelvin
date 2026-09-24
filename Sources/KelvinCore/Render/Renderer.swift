@@ -425,6 +425,13 @@ public enum Renderer {
                 bitmap = maskBitmaps[mask.id]
                     ?? RegionGrow.mask(in: image, seed: CGPoint(x: seed.x, y: seed.y),
                                        tolerance: seed.tolerance, softness: seed.softness)
+            } else if mask.segment != nil {
+                // A TAPPED OBJECT (D32): the one source this function cannot make, because Vision's
+                // request is asynchronous and this is not. The caller regenerates it from the taps
+                // on the image being rendered (`ObjectSegmentation`) and hands it over by id. With
+                // no bitmap it is skipped — never `maskBitmaps[mask.type]`, which would put some
+                // other mask's region under this one's adjustments.
+                bitmap = maskBitmaps[mask.id]
             } else {
                 bitmap = maskBitmaps[mask.id] ?? maskBitmaps[mask.type]
             }
