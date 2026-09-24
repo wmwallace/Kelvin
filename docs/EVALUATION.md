@@ -1025,3 +1025,33 @@ carry on and with `KELVIN_RESULT_MATCH=0`): every other frame came out +10–12 
 the hero identical, and no frame clipped more — the firelit ones less (`_DSC0484` 0.75% → 0.00%,
 `_DSC0507` 0.47% → 0.00%), because the lift is reached with each frame's own levers under the clipping
 allowance rather than as a fixed exposure.
+
+## A sky lifted into clipping, and four style levers (24 September 2026)
+
+Reported on the Skagit tulip shoot (`/Volumes/Photos/library/2025/2025-04-12/_DSC5069.ARW`,
+`_DSC5067.ARW`): Natural lifted a dark foreground +0.59 / +0.74 EV and blew 12–16% of the frame —
+cloud — and the Fix button did nothing (its −26 highlights step was refused whole past the automatic
+ceiling, and the app discarded the loop's outcome). Three changes:
+
+- **`SkyGuard` (engine 0.7.4):** each candidate is rendered at compose, the clipping it ADDED inside the
+  sky mask is measured, and the sky mask's exposure is bisected until that is under 0.5% of the frame.
+  Natural on the two frames: 13.9% → 3.9% and 15.6% → 6.7% newly clipped; Soft 10.3% → 3.4%,
+  19.7% → 4.9%. The foreground keeps its lift.
+- **Fix:** blown highlights go to the sky mask first; the global step is sized from what is reachable
+  and takes back part of the lift once recovery is spent (`_DSC5069` 12.2% → 2.8% in one click); every
+  outcome is said on the status line. `kelvin-cli fix-probe` runs the app's loop on a photograph.
+- **Style levers** (audit findings): dehaze yields to the stretch (lavender `_DSC0203` Natural
+  flat-clip 7.4% → 4.0%); a style's whites bias obeys the clip gate; style and look temperature shifts
+  are mired steps (identical at 6500 K); Fix's colour-cast step is sized from `castChroma`.
+
+Paired corpus (77 frames, Vision reads), mean ΔE per look, same binary with the switches:
+
+| | opener | Soft | Vivid | Dramatic | Airy | Rich | Warm | Cool |
+|---|---|---|---|---|---|---|---|---|
+| before the style levers (67a712c) | 7.24 | 7.01 | 8.86 | 9.57 | 8.24 | 8.51 | 8.66 | 7.72 |
+| style levers | 7.24 | 7.01 | 8.84 | 9.55 | 8.22 | 8.50 | 8.65 | 7.71 |
+| `KELVIN_SKY_GUARD=0` | 7.24 | 7.02 | 8.84 | 9.55 | 8.60 | 8.50 | 8.65 | 7.71 |
+| sky guard and lights both off | 7.25 | 7.02 | 8.85 | 9.56 | 8.61 | 8.51 | 8.66 | 7.71 |
+
+Nothing moves the wrong way. The sky guard is worth 0.38 on Airy — the look the library audit found
+clipping on 27% of frames — and the lights hold is worth 0.01 where it fires. `hiClip!` stays 0.
