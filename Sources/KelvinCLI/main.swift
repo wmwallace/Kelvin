@@ -50,6 +50,8 @@ func printUsage() {
       \(tool) look-audit --in <image> [--perception <p.json>] | --list <frames.tsv>
                      [--out <audit.jsonl>] [--edge <n>] [--dump-dir <dir>] [--looks <id,id,…>]
                      [--ablate]
+      \(tool) match-probe --corpus <paired corpus> [--heroes <n>] [--out <rows.jsonl>]
+                     [--dump-dir <dir>]
 
     look-audit options (every look on real frames, measured for damage a photographer would see):
       --in          One photograph. Or:
@@ -3007,6 +3009,264 @@ case "opener-probe":
         print("frame by 3 is not a calibration, it is D19 again. Then confirm the chosen floors")
         print("end to end with KELVIN_OPENER=\(style) through `eval`, where curation still gets")
         print("its veto, and hold them out per docs/EVALUATION.md before shipping them.")
+    } catch {
+        fail("\(error)")
+    }
+
+case "match-probe":
+    // DOES CARRYING A HERO'S RESULT BEAT CARRYING ITS STYLE — scored against what the photographer
+    // actually did to the rest of the shoot. See `ResultMatch`.
+    //
+    // A paired corpus is the one instrument that can answer this, because it holds whole shoots a
+    // photographer finished by hand. Take one finished frame as the hero; measure what the finish
+    // did to it relative to Kelvin's Natural (`ResultMatch.intent(…finishedPicture:)` — the heroes
+    // are Lightroom exports, so the intent is read off pixels); carry that onto every other frame of
+    // the same shoot; score each against its OWN finished export. Several heroes per shoot, so one
+    // lucky or unrepresentative frame cannot decide it.
+    //
+    // Four arms per frame, all mean CIEDE2000 to the frame's reference on the harness's grid:
+    //   natural   the style alone — what a shoot look carries today
+    //   delta     + the hero's intent as a CHANGE ("what the edit did"), solved per frame
+    //   absolute  + the hero's finished outcome as a TARGET ("what the edit looks like")
+    //   oracle    + this frame's OWN intent — the ceiling these levers can reach at all
+    do {
+        let rest = Array(arguments.dropFirst())
+        guard let root = value(for: "--corpus", in: rest) else { fail("match-probe requires --corpus") }
+        let corpus = try Corpus.load(root: URL(fileURLWithPath: root, isDirectory: true))
+        let heroCount = value(for: "--heroes", in: rest).flatMap(Int.init) ?? 6
+        let dumpDir = value(for: "--dump-dir", in: rest).map { URL(fileURLWithPath: $0, isDirectory: true) }
+        if let dumpDir { try FileManager.default.createDirectory(at: dumpDir, withIntermediateDirectories: true) }
+        var out: FileHandle?
+        if let outPath = value(for: "--out", in: rest) {
+            FileManager.default.createFile(atPath: outPath, contents: nil)
+            out = try FileHandle(forWritingTo: URL(fileURLWithPath: outPath))
+        }
+
+        struct Frame {
+            let id: String
+            let group: String
+            let proxy: CIImage
+            let reference: CIImage
+            let natural: Recipe
+            let masks: [String: CIImage]
+            let regions: ResultMatch.Regions
+            let referenceSample: Data
+        }
+        func group(of id: String) -> String {
+            guard let dash = id.lastIndex(of: "-") else { return id }
+            return String(id[..<dash])
+        }
+        let decodeContext = CIContext(options: [.cacheIntermediates: false])
+        func materialise(_ image: CIImage) -> CIImage {
+            decodeContext.createCGImage(image, from: image.extent).map { CIImage(cgImage: $0) } ?? image
+        }
+
+        var frames: [Frame] = []
+        for entry in corpus.manifest.entries {
+            guard let refURL = corpus.referenceURLs(for: entry).first else { continue }
+            let source = try ImageDecoder.decode(url: corpus.sourceURL(for: entry))
+            let proxy = materialise(PerceptionProxy.downsample(source))
+            // The reference framed exactly as the proxy is: the corpus rejected crops, so this is a
+            // resize, not a reframe.
+            let refFull = try ImageDecoder.decode(url: refURL)
+            let reference = materialise(
+                refFull.transformed(by: CGAffineTransform(scaleX: proxy.extent.width / refFull.extent.width,
+                                                          y: proxy.extent.height / refFull.extent.height))
+                    .transformed(by: CGAffineTransform(translationX: -refFull.extent.origin.x, y: -refFull.extent.origin.y))
+                    .cropped(to: proxy.extent))
+            let perception = VisionPerceptionProvider.read(proxy)
+            let composed = try ShippedCandidates.compose(for: proxy, perception: perception, iso: nil)
+            guard let natural = composed.candidate(styleID: CandidateStyle.natural.id)?.recipe else { continue }
+            let masks = composed.masks.bitmaps
+            frames.append(Frame(id: entry.id, group: group(of: entry.id), proxy: proxy, reference: reference,
+                                natural: natural, masks: masks,
+                                regions: ResultMatch.Regions.sampling(masks, over: proxy.extent),
+                                referenceSample: try ImageMetrics.sample(reference)))
+            print("read \(entry.id)")
+        }
+
+        func score(_ f: Frame, _ recipe: Recipe) throws -> (dE: Double, clip: Double) {
+            let rendered = Renderer.render(f.proxy, with: recipe, maskBitmaps: f.masks)
+            let sample = try ImageMetrics.sample(rendered)
+            return (ImageMetrics.meanDeltaE2000(sample, f.referenceSample), ImageMetrics.clipping(sample).highlights)
+        }
+        /// A frame's outcome under its Natural, and the reference's, on the same neutral pixels.
+        func outcomes(_ f: Frame) -> (reference: ResultMatch.Outcome, natural: ResultMatch.Outcome)? {
+            let natural = Renderer.render(f.proxy, with: f.natural, maskBitmaps: f.masks)
+            return ResultMatch.measure(f.reference, reference: natural, regions: f.regions)
+        }
+        func absoluteIntent(hero: ResultMatch.Outcome, frame: ResultMatch.Outcome, heroIntent: ResultMatch.Intent) -> ResultMatch.Intent {
+            var i = ResultMatch.intent(finished: hero, baseline: frame)
+            i.addedClip = heroIntent.addedClip
+            return i
+        }
+
+        var totals: [String: [String: [Double]]] = [:]    // group → arm → per-frame ΔE
+        var clipTotals: [String: [String: [Double]]] = [:]
+        let groups = Dictionary(grouping: frames, by: \.group)
+        for (name, members) in groups.sorted(by: { $0.key < $1.key }) where members.count >= 3 {
+            let sorted = members.sorted { $0.id < $1.id }
+            let step = max(1, sorted.count / heroCount)
+            let heroes = stride(from: step / 2, to: sorted.count, by: step).prefix(heroCount).map { sorted[$0] }
+            var measured: [String: (reference: ResultMatch.Outcome, natural: ResultMatch.Outcome)] = [:]
+            for f in sorted { measured[f.id] = outcomes(f) }
+            print("\n\(name): \(sorted.count) frames, heroes \(heroes.map(\.id).joined(separator: ", "))")
+            if rest.contains("--intents-only") {
+                // Each frame's OWN intent — what the photographer did to it relative to Natural. The
+                // spread of these within a shoot is what decides whether any one hero's can stand in
+                // for the rest.
+                for f in sorted {
+                    guard let m = measured[f.id] else { continue }
+                    let i = ResultMatch.intent(finished: m.reference, baseline: m.natural)
+                    print(String(format: "  intent %@ L %+6.2f spread %+6.2f warm %+6.2f tint %+6.2f colour %+6.2f subj %+6.2f sky %+6.2f",
+                                 f.id, i.lightness, i.spread, i.warmth, i.tint, i.colourfulness,
+                                 i.subjectSeparation, i.skyDepth))
+                }
+                continue
+            }
+            if rest.contains("--shoot-wide") {
+                // DOES THE MECHANISM CARRY A GENUINELY SHOOT-WIDE INTENT — and does it beat copying
+                // sliders? The intent carried is the mean of every OTHER frame's own intent (leave one
+                // out), which is the consistent part of the photographer's finish, with the per-frame
+                // corrections averaged away. Arms:
+                //   match   ResultMatch.apply on this frame
+                //   slider  the same intent solved on a hero, and the hero's SLIDER CHANGE copied here
+                //           — the D13-rejected carry, and what the iPhone did with LookAdjustments
+                //   half    one hero's own intent at half strength (shrinkage)
+                let intents: [String: ResultMatch.Intent] = sorted.reduce(into: [:]) { acc, f in
+                    if let m = measured[f.id] { acc[f.id] = ResultMatch.intent(finished: m.reference, baseline: m.natural) }
+                }
+                func meanIntent(excluding id: String) -> ResultMatch.Intent {
+                    let others = intents.filter { $0.key != id }.map(\.value)
+                    var i = ResultMatch.Intent()
+                    let n = Double(max(1, others.count))
+                    i.lightness = others.map(\.lightness).reduce(0, +) / n
+                    i.spread = others.map(\.spread).reduce(0, +) / n
+                    i.warmth = others.map(\.warmth).reduce(0, +) / n
+                    i.tint = others.map(\.tint).reduce(0, +) / n
+                    i.colourfulness = others.map(\.colourfulness).reduce(0, +) / n
+                    i.subjectSeparation = others.map(\.subjectSeparation).reduce(0, +) / n
+                    i.skyDepth = others.map(\.skyDepth).reduce(0, +) / n
+                    i.addedClip = others.map(\.addedClip).reduce(0, +) / n
+                    return i
+                }
+                func scaled(_ i: ResultMatch.Intent, _ k: Double) -> ResultMatch.Intent {
+                    var o = i
+                    o.lightness *= k; o.spread *= k; o.warmth *= k; o.tint *= k
+                    o.colourfulness *= k; o.subjectSeparation *= k; o.skyDepth *= k
+                    return o
+                }
+                /// The slider change a solve made on one frame, added to another frame's recipe.
+                func copySliders(from solved: Recipe, over natural: Recipe, onto target: Recipe) -> Recipe {
+                    var r = target
+                    let a = solved.global, b = natural.global
+                    r.global.exposureEV += a.exposureEV - b.exposureEV
+                    r.global.contrast = max(-100, min(100, r.global.contrast + a.contrast - b.contrast))
+                    r.global.vibrance = max(-100, min(100, r.global.vibrance + a.vibrance - b.vibrance))
+                    r.global.tint += a.tint - b.tint
+                    let dm = 1_000_000 / (a.temperatureK ?? 6500) - 1_000_000 / (b.temperatureK ?? 6500)
+                    if dm != 0 {
+                        let m = 1_000_000 / (r.global.temperatureK ?? 6500) + dm
+                        r.global.temperatureK = min(Ranges.temperatureK.upperBound, max(Ranges.temperatureK.lowerBound, 1_000_000 / m))
+                    }
+                    for m in solved.masks ?? [] {
+                        let before = natural.masks?.first { $0.id == m.id }?.adjustments["exposure_ev"] ?? 0
+                        let d = (m.adjustments["exposure_ev"] ?? 0) - before
+                        guard d != 0 else { continue }
+                        if let i = r.masks?.firstIndex(where: { $0.id == m.id }) {
+                            r.masks?[i].adjustments["exposure_ev", default: 0] += d
+                        } else {
+                            var copy = m; copy.adjustments = ["exposure_ev": d]
+                            r.masks = (r.masks ?? []) + [copy]
+                        }
+                    }
+                    return r
+                }
+                for f in sorted {
+                    let base = try score(f, f.natural)
+                    let mi = meanIntent(excluding: f.id)
+                    let match = try score(f, ResultMatch.apply(mi, to: f.natural, proxy: f.proxy, maskBitmaps: f.masks))
+                    var slider: [Double] = [], half: [Double] = []
+                    for h in heroes where h.id != f.id {
+                        let solvedOnHero = ResultMatch.apply(mi, to: h.natural, proxy: h.proxy, maskBitmaps: h.masks)
+                        slider.append(try score(f, copySliders(from: solvedOnHero, over: h.natural, onto: f.natural)).dE)
+                        if let hi = intents[h.id] {
+                            half.append(try score(f, ResultMatch.apply(scaled(hi, 0.5), to: f.natural, proxy: f.proxy, maskBitmaps: f.masks)).dE)
+                        }
+                    }
+                    let ms = slider.reduce(0, +) / Double(max(1, slider.count))
+                    let mh = half.reduce(0, +) / Double(max(1, half.count))
+                    totals[name, default: [:]]["natural", default: []].append(base.dE)
+                    totals[name, default: [:]]["match", default: []].append(match.dE)
+                    totals[name, default: [:]]["slider", default: []].append(ms)
+                    totals[name, default: [:]]["half", default: []].append(mh)
+                    print(String(format: "  %@  natural %5.2f  match %5.2f  slider %5.2f  half-hero %5.2f",
+                                 f.id, base.dE, match.dE, ms, mh))
+                }
+                continue
+            }
+            for f in sorted {
+                guard let own = measured[f.id] else { continue }
+                let base = try score(f, f.natural)
+                let oracleIntent = ResultMatch.intent(finished: own.reference, baseline: own.natural)
+                let oracle = try score(f, ResultMatch.apply(oracleIntent, to: f.natural, proxy: f.proxy, maskBitmaps: f.masks))
+                var delta: [Double] = [], absolute: [Double] = [], deltaClip: [Double] = [], absClip: [Double] = []
+                for h in heroes where h.id != f.id {
+                    guard let hm = measured[h.id] else { continue }
+                    let hi = ResultMatch.intent(finished: hm.reference, baseline: hm.natural)
+                    let d = try score(f, ResultMatch.apply(hi, to: f.natural, proxy: f.proxy, maskBitmaps: f.masks))
+                    let a = try score(f, ResultMatch.apply(absoluteIntent(hero: hm.reference, frame: own.natural, heroIntent: hi),
+                                                          to: f.natural, proxy: f.proxy, maskBitmaps: f.masks))
+                    delta.append(d.dE); absolute.append(a.dE); deltaClip.append(d.clip); absClip.append(a.clip)
+                    if let out {
+                        let row: [String: Any] = ["frame": f.id, "hero": h.id, "natural": base.dE, "delta": d.dE,
+                                                  "absolute": a.dE, "oracle": oracle.dE, "clipNatural": base.clip,
+                                                  "clipDelta": d.clip, "clipAbsolute": a.clip]
+                        var data = try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]); data.append(0x0A)
+                        try out.write(contentsOf: data)
+                    }
+                }
+                guard !delta.isEmpty else { continue }
+                let md = delta.reduce(0, +) / Double(delta.count), ma = absolute.reduce(0, +) / Double(absolute.count)
+                totals[name, default: [:]]["natural", default: []].append(base.dE)
+                totals[name, default: [:]]["delta", default: []].append(md)
+                totals[name, default: [:]]["absolute", default: []].append(ma)
+                totals[name, default: [:]]["oracle", default: []].append(oracle.dE)
+                clipTotals[name, default: [:]]["natural", default: []].append(base.clip)
+                clipTotals[name, default: [:]]["delta", default: []].append(deltaClip.reduce(0, +) / Double(deltaClip.count))
+                clipTotals[name, default: [:]]["absolute", default: []].append(absClip.reduce(0, +) / Double(absClip.count))
+                print(String(format: "  %@  natural %5.2f  delta %5.2f  absolute %5.2f  oracle %5.2f",
+                             f.id, base.dE, md, ma, oracle.dE))
+            }
+        }
+        func mean(_ v: [Double]) -> Double { v.isEmpty ? .nan : v.reduce(0, +) / Double(v.count) }
+        print("\nmean ΔE to the photographer's own edit (lower is closer)")
+        var all: [String: [Double]] = [:]
+        for (name, arms) in totals.sorted(by: { $0.key < $1.key }) {
+            let n = arms["natural"]?.count ?? 0
+            let wins = zip(arms["delta"] ?? [], arms["natural"] ?? []).filter { $0 < $1 }.count
+            print(String(format: "  %@ (%d): natural %5.2f  delta %5.2f  absolute %5.2f  oracle %5.2f  · delta better on %d/%d · clip %.2f%%→%.2f%%/%.2f%%",
+                         name, n, mean(arms["natural"] ?? []), mean(arms["delta"] ?? []), mean(arms["absolute"] ?? []),
+                         mean(arms["oracle"] ?? []), wins, n,
+                         mean(clipTotals[name]?["natural"] ?? []) * 100, mean(clipTotals[name]?["delta"] ?? []) * 100,
+                         mean(clipTotals[name]?["absolute"] ?? []) * 100))
+            for (arm, v) in arms { all[arm, default: []].append(contentsOf: v) }
+        }
+        print(String(format: "  ALL: natural %5.2f  delta %5.2f  absolute %5.2f  oracle %5.2f",
+                     mean(all["natural"] ?? []), mean(all["delta"] ?? []), mean(all["absolute"] ?? []), mean(all["oracle"] ?? [])))
+        if rest.contains("--shoot-wide") {
+            for (name, arms) in totals.sorted(by: { $0.key < $1.key }) {
+                let n = arms["natural"]?.count ?? 0
+                let wins = zip(arms["match"] ?? [], arms["natural"] ?? []).filter { $0 < $1 }.count
+                let beatsSlider = zip(arms["match"] ?? [], arms["slider"] ?? []).filter { $0 < $1 }.count
+                print(String(format: "  %@ (%d): natural %5.2f  match %5.2f  slider %5.2f  half-hero %5.2f · match beats natural %d/%d, beats slider %d/%d",
+                             name, n, mean(arms["natural"] ?? []), mean(arms["match"] ?? []), mean(arms["slider"] ?? []),
+                             mean(arms["half"] ?? []), wins, n, beatsSlider, n))
+            }
+            print(String(format: "  ALL: natural %5.2f  match %5.2f  slider %5.2f  half-hero %5.2f",
+                         mean(all["natural"] ?? []), mean(all["match"] ?? []), mean(all["slider"] ?? []), mean(all["half"] ?? [])))
+        }
+        _ = dumpDir
     } catch {
         fail("\(error)")
     }
