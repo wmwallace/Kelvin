@@ -229,10 +229,16 @@ final class RecipeEngineTests: XCTestCase {
     }
 
     /// Pins the tint (green ↔ magenta) sign independently of temperature.
-    func testWhiteBalanceReducesMeasuredMagentaCast() throws {
-        let casted = TestSupport.makeSolidImage(r: 150, g: 120, b: 148)   // magenta
+    ///
+    /// On the GREEN side since 0.7.5: a frame whose greyest pixels read more magenta than blue or
+    /// amber is treated as a magenta scene, not a magenta light, and left alone
+    /// (`NeutralChromaTests.testAMagentaSceneIsNotALight`). The old fixture, a flat purple
+    /// (a +16.7, b −10.7), is exactly that. Fluorescent green is the tint cast real light makes, and
+    /// the sign under test is the same one.
+    func testWhiteBalanceReducesMeasuredGreenCast() throws {
+        let casted = TestSupport.makeSolidImage(r: 120, g: 150, b: 122)   // fluorescent green
         let s = try ImageStatistics.compute(casted)
-        XCTAssertGreaterThan(s.chromaA, 5, "fixture should have a clear magenta cast")
+        XCTAssertLessThan(s.chromaA, -5, "fixture should have a clear green cast")
 
         let percept = perception(scene: .stillLife, intent: .productAccurate)
         let recipe = RecipeEngine.recipe(perception: percept, statistics: s)
@@ -242,6 +248,7 @@ final class RecipeEngineTests: XCTestCase {
         let before = (s.chromaA * s.chromaA + s.chromaB * s.chromaB).squareRoot()
         let residual = (after.chromaA * after.chromaA + after.chromaB * after.chromaB).squareRoot()
         XCTAssertLessThan(residual, before, "tint correction must reduce the measured cast")
+        XCTAssertGreaterThan(after.chromaA, s.chromaA, "and it must move a toward neutral")
     }
 
     // MARK: - Serialization

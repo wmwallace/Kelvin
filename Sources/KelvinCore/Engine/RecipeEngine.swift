@@ -119,6 +119,7 @@ public enum RecipeEngine {
             "wbEstimator:\(estimator.rawValue)",
             "wbEdgeP:\(ImageStatistics.edgeMinkowskiP)",
             "wbDeadband:\(castDeadband)",
+            "wbMagenta:\(magentaCeiling)",
             "clipCeiling:\(clipCeiling)",
             "headroomGain:\(headroomGain)/\(headroomCap)",
             "dehazeYield:\(dehazeYieldsToStretch ? "on" : "off")",
@@ -1310,6 +1311,17 @@ public enum RecipeEngine {
         let cast = castChroma(s)
         let castMagnitude = (gate.a * gate.a + gate.b * gate.b).squareRoot()
         guard strength > 0, castMagnitude > castDeadband else { return (nil, 0) }
+        // NO GREY IN FRAME (0.7.5). A light's colour runs blue to amber, with a green excursion for
+        // fluorescent; no common light is magenta. So when the greyest 15% of a frame reads more
+        // magenta than amber-or-blue, what was measured is the scene: a lavender field
+        // (`_DSC0294`) read a+8.5/b+4.4 and got 4950 K / tint +16 on Vivid, and the stems went
+        // acid yellow. Over 201 library JPEGs the gate fired on 13; this takes out the 8 lavender
+        // frames (a/|b| 1.9–2.7) and nothing else. 19 synthetic warm casts on ordinary frames read
+        // a/|b| ≤ 0.59; the same cast laid over lavender reads 1.26 (`_DSC0294`) and 2.07
+        // (`_DSC0203`), so 1.5 keeps the first and — the price, named — gives up the second, whose
+        // estimate is mostly flower. `KELVIN_WB_MAGENTA` is the ratio; a large value switches it
+        // off. The green side is left alone on purpose: fluorescent light is green.
+        guard gate.a <= magentaCeiling * abs(gate.b) else { return (nil, 0) }
 
         // SKIN IS WARM, AND A PHOTOGRAPH OF PEOPLE IS WARM BECAUSE OF THE PEOPLE.
         //
@@ -1461,6 +1473,12 @@ public enum RecipeEngine {
     public static let castDeadband =
         ProcessInfo.processInfo.environment["KELVIN_WB_DEADBAND"]
             .flatMap(Double.init).map { min(30, max(0, $0)) } ?? 6.0
+
+    /// How much more magenta than blue-or-amber the cast gate may read and still be a light. See
+    /// `whiteBalance`. `KELVIN_WB_MAGENTA`, in `tuningSignature`.
+    public static let magentaCeiling =
+        ProcessInfo.processInfo.environment["KELVIN_WB_MAGENTA"]
+            .flatMap(Double.init).map { max(0, $0) } ?? 1.5
 
     /// Mired shift per unit of measured chroma-b, measured against the real renderer.
     ///

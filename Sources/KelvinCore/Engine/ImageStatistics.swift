@@ -96,6 +96,12 @@ public struct ImageStatistics: Equatable, Sendable {
     public var neutralChromaA: Double
     public var neutralChromaB: Double
 
+    /// Mean chroma MAGNITUDE of those same least-chromatic pixels — how grey the greyest part of
+    /// the frame actually is. Where there is a grey to read the light from, the cast estimate's
+    /// own magnitude explains all of it; where there is none (a field of lavender), the set is
+    /// coloured in its own right. Defaults to the estimate's magnitude for hand-built fixtures.
+    public var neutralSetChroma: Double
+
     /// Magnitude of the neutral-pixel cast estimate. This is the number `whiteBalance` gates on.
     public var neutralCastMagnitude: Double {
         (neutralChromaA * neutralChromaA + neutralChromaB * neutralChromaB).squareRoot()
@@ -194,9 +200,11 @@ public struct ImageStatistics: Equatable, Sendable {
         shadowMass: Double = 0, shadowRegion: Double = 0, saturationClip: Double = 0,
         neutralChromaA: Double? = nil, neutralChromaB: Double? = nil,
         edgeChromaA: Double? = nil, edgeChromaB: Double? = nil,
-        channelWhitePoint: Double? = nil
+        channelWhitePoint: Double? = nil, neutralSetChroma: Double? = nil
     ) {
         self.channelWhitePoint = channelWhitePoint ?? whitePoint
+        let na = neutralChromaA ?? chromaA, nb = neutralChromaB ?? chromaB
+        self.neutralSetChroma = neutralSetChroma ?? (na * na + nb * nb).squareRoot()
         self.shadowMass = shadowMass
         self.shadowRegion = shadowRegion
         self.saturationClip = saturationClip
@@ -403,6 +411,7 @@ public struct ImageStatistics: Equatable, Sendable {
         // *surfaces* identified some other way, e.g. by local gradient invariants rather than by
         // absolute chroma.
         var neutralA = sa / Double(count), neutralB = sb / Double(count)
+        var setChroma: Double?
         if usableCount > 0 {
             // Walk the histogram to the chroma below which the least-chromatic share lives.
             let wanted = max(1, Int(Double(usableCount) * neutralSampleFraction))
@@ -412,11 +421,14 @@ public struct ImageStatistics: Equatable, Sendable {
                 if seen >= wanted { cutoffBucket = bucket; break }
             }
             let cutoff = Float(cutoffBucket + 1) / bucketScale
-            var na = 0.0, nb = 0.0, taken = 0
+            var na = 0.0, nb = 0.0, nc = 0.0, taken = 0
             for i in 0..<usableCount where chroma[i] <= cutoff {
-                na += Double(chA[i]); nb += Double(chB[i]); taken += 1
+                na += Double(chA[i]); nb += Double(chB[i]); nc += Double(chroma[i]); taken += 1
             }
-            if taken > 0 { neutralA = na / Double(taken); neutralB = nb / Double(taken) }
+            if taken > 0 {
+                neutralA = na / Double(taken); neutralB = nb / Double(taken)
+                setChroma = nc / Double(taken)
+            }
         }
 
         // The grey-edge estimate needs the grid's row length; a caller that did not supply one is
@@ -460,7 +472,8 @@ public struct ImageStatistics: Equatable, Sendable {
             neutralChromaB: neutralB,
             edgeChromaA: edge?.a,
             edgeChromaB: edge?.b,
-            channelWhitePoint: Double(channelWhite) / 255
+            channelWhitePoint: Double(channelWhite) / 255,
+            neutralSetChroma: setChroma
         )
     }
 

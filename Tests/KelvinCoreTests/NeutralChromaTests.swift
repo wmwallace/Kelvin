@@ -90,6 +90,26 @@ final class NeutralChromaTests: XCTestCase {
                         "a genuine tungsten cast must still be corrected")
     }
 
+    /// A lavender field has nothing grey in it: its least-chromatic pixels are still purple, and
+    /// read as a magenta cast (`_DSC0294`: a+8.5/b+4.4 → 4950 K / tint +16 on Vivid, acid-yellow
+    /// stems). No light is magenta, so a gate that reads more magenta than amber-or-blue is scene.
+    func testAMagentaSceneIsNotALight() throws {
+        let s = try stats(image { x, y in
+            (x + y) % 3 == 0 ? (170, 130, 160)      // lavender-pink bloom
+                             : (150, 128, 142)      // duller, the "greyest" there is
+        })
+        XCTAssertGreaterThan(s.neutralCastMagnitude, 6.0, "the gate would fire on this")
+        XCTAssertGreaterThan(s.neutralChromaA, abs(s.neutralChromaB), "and it reads magenta")
+        let p = Perception(
+            scene: .landscape,
+            subject: Perception.Subject(present: false, type: .none, count: .none, placement: .center),
+            lighting: Perception.Lighting(condition: .overcast, direction: .diffuse, contrastRange: .normal),
+            problems: [], intent: .natural, confidence: 0.9)
+        let wb = RecipeEngine.whiteBalance(p, s)
+        XCTAssertNil(wb.temperatureK, "a magenta scene gets no temperature shift")
+        XCTAssertEqual(wb.tint, 0)
+    }
+
     /// A neutral frame under neutral light reads as no cast on both estimates. The floor case.
     func testANeutralFrameReadsNeutral() throws {
         let s = try stats(image { x, y in
