@@ -97,16 +97,24 @@ public enum FoundationEnrichment {
     public static var fillsWarmLight: Bool {
         ProcessInfo.processInfo.environment["KELVIN_FM_LIGHT"] != "0"
     }
+    /// D34. `KELVIN_FM_SKY=0` leaves `Perception.sky` unjudged.
+    public static var fillsSky: Bool {
+        ProcessInfo.processInfo.environment["KELVIN_FM_SKY"] != "0"
+    }
 
     /// Which fills are on, for identifiers and signatures.
     public static var signature: String {
-        "interior:\(fillsInterior ? "on" : "off")/light:\(fillsWarmLight ? "on" : "off")"
+        "interior:\(fillsInterior ? "on" : "off")/light:\(fillsWarmLight ? "on" : "off")/sky:\(fillsSky ? "on" : "off")"
     }
 
     /// `p` with the measured judgments of `read` written in. Pure.
     public static func apply(_ read: FoundationSceneRead, to p: Perception,
-                             interior: Bool = fillsInterior, warmLight: Bool = fillsWarmLight) -> Perception {
+                             interior: Bool = fillsInterior, warmLight: Bool = fillsWarmLight,
+                             sky: Bool = fillsSky) -> Perception {
         var out = p
+        // D34: the best of the three judgments on the labelled set (101/113; as a gate on SkyMask,
+        // false skies 8 → 1 with no real sky lost). Written as a judgment, read only by the sky lever.
+        if sky { out.sky = read.skyVisible ? .visible : .notVisible }
         if interior, read.indoors, out.scene == .other {
             out.scene = .interior
         }

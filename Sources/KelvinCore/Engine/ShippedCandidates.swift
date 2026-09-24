@@ -246,7 +246,10 @@ public enum ShippedCandidates {
         // serially, against the one face set above, so the concurrency cannot change an answer.
         // The sky, measured once for every candidate, so each can be held out of clipping its own
         // levers pushed it into (`SkyGuard`). Nil when there is no sky, or the guard is off.
-        let skyGuard = SkyGuard.frame(proxy: measureOn, bitmaps: masks.bitmaps)
+        // Not where the read judged there is no sky (D34): the guard would otherwise CREATE the sky
+        // mask the sky lever just declined, over whatever `SkyMask` mistook for one.
+        let skyGuard = perception.sky == Perception.SkyJudgment.notVisible
+            ? nil : SkyGuard.frame(proxy: measureOn, bitmaps: masks.bitmaps)
         let work = RenderWork(recipes: recipes, measureOn: measureOn, bitmaps: masks.bitmaps,
                               isCurrent: options.isCurrent)
         DispatchQueue.concurrentPerform(iterations: max(1, min(options.width, recipes.count))) { _ in

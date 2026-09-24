@@ -154,3 +154,46 @@ final class FoundationSceneTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(FoundationSceneRead.self, from: data), read)
     }
 }
+
+/// D34: the model's sky judgment, carried in `Perception.sky` and read only by the sky lever.
+final class SkyJudgmentTests: XCTestCase {
+    private func vision() -> Perception {
+        Perception(scene: .other,
+                   subject: Perception.Subject(present: false, type: .none, count: .none, placement: .center),
+                   lighting: .unknown, problems: [], intent: .natural, confidence: 0.9)
+    }
+    private func stats() -> ImageStatistics {
+        ImageStatistics(meanLuma: 0.5, medianLuma: 0.5, blackPoint: 0.02, shadowLevel: 0.1,
+                        highlightLevel: 0.9, whitePoint: 0.95, highlightClip: 0.0, shadowClip: 0,
+                        chromaA: 0, chromaB: 0)
+    }
+
+    func testTheJudgmentIsWrittenFromTheRead() {
+        let none = FoundationEnrichment.apply(FoundationSceneRead(indoors: false, skyVisible: false, light: .daylight),
+                                              to: vision())
+        XCTAssertEqual(none.sky, Perception.SkyJudgment.notVisible)
+        let seen = FoundationEnrichment.apply(FoundationSceneRead(indoors: false, skyVisible: true, light: .daylight),
+                                              to: vision())
+        XCTAssertEqual(seen.sky, .visible)
+        let off = FoundationEnrichment.apply(FoundationSceneRead(indoors: false, skyVisible: false, light: .daylight),
+                                             to: vision(), sky: false)
+        XCTAssertNil(off.sky)
+    }
+
+    func testNoSkyJudgedMeansNoSkyMaskWhateverSkyMaskFound() {
+        var p = vision()
+        XCTAssertNotNil(RecipeEngine.skyMask(p, stats(), skyLuma: 0.8), "unjudged: SkyMask's sky stands")
+        p.sky = Perception.SkyJudgment.notVisible
+        XCTAssertNil(RecipeEngine.skyMask(p, stats(), skyLuma: 0.8))
+        p.sky = .visible
+        XCTAssertNotNil(RecipeEngine.skyMask(p, stats(), skyLuma: 0.8))
+    }
+
+    func testAReadStoredBeforeTheFieldIsUnjudged() throws {
+        let json = #"{"schema_version":1,"scene":"other","intent":"natural","confidence":0.9}"#
+        XCTAssertNil(try JSONDecoder().decode(Perception.self, from: Data(json.utf8)).sky)
+        let odd = #"{"schema_version":1,"scene":"other","sky":"maybe"}"#
+        XCTAssertNil(try JSONDecoder().decode(Perception.self, from: Data(odd.utf8)).sky,
+                     "an unknown value is unjudged, not an error")
+    }
+}
