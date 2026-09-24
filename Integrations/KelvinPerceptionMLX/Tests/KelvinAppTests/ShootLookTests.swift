@@ -411,27 +411,36 @@ final class ShootLookTests: XCTestCase {
 
     /// A shoot look must survive quitting, which is the only reason it is a file. Written and read
     /// through a temporary folder so the test never touches a real shoot's record.
+    /// The records live under a temporary directory, not Application Support: running the suite
+    /// must never write beside a real shoot's record.
+    private func temporaryStore() throws -> URL {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("kelvin-shoots-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: base) }
+        return base
+    }
+
     func testALookSurvivesBeingWrittenAndReadBack() throws {
-        let folder = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("kelvin-shoot-\(UUID().uuidString)")
-        defer { ShootLookStore.remove(for: folder) }
+        let store = try temporaryStore()
+        let folder = URL(fileURLWithPath: "/shoots/wedding")
 
         let look = ShootLook(style: "vivid", overrides: ["/shoot/a.ARW": "soft"],
                              appliedAt: "2026-07-28T10:00:00Z")
-        ShootLookStore.save(look, for: folder)
-        let read = try XCTUnwrap(ShootLookStore.load(for: folder))
+        ShootLookStore.save(look, for: folder, in: store)
+        let read = try XCTUnwrap(ShootLookStore.load(for: folder, in: store))
         XCTAssertEqual(read, look)
     }
 
     /// Removing the record is what "clear the look" does, and it has to actually be gone — a look
     /// that comes back on relaunch is worse than one that never cleared.
-    func testClearingRemovesTheRecord() {
-        let folder = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("kelvin-shoot-\(UUID().uuidString)")
-        ShootLookStore.save(ShootLook(style: "natural"), for: folder)
-        XCTAssertNotNil(ShootLookStore.load(for: folder))
-        ShootLookStore.remove(for: folder)
-        XCTAssertNil(ShootLookStore.load(for: folder))
+    func testClearingRemovesTheRecord() throws {
+        let store = try temporaryStore()
+        let folder = URL(fileURLWithPath: "/shoots/wedding")
+        ShootLookStore.save(ShootLook(style: "natural"), for: folder, in: store)
+        XCTAssertNotNil(ShootLookStore.load(for: folder, in: store))
+        ShootLookStore.remove(for: folder, in: store)
+        XCTAssertNil(ShootLookStore.load(for: folder, in: store))
     }
 
     /// Two shoots must never share a record — the same failure mode `EditStore` is keyed against,
