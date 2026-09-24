@@ -539,6 +539,99 @@ final class AppState {
             + "the rest of the picture, it has run into something the same colour."
     }
 
+    // MARK: Select object — tap-to-segment (D32)
+
+    /// Which object mask the canvas is taking taps for.
+    ///
+    /// Stays armed after a click, unlike the wand's `seedingMaskId`: picking an object is a short
+    /// conversation — tap it, see what came back, tap the part it missed, ⌥-tap the part it took —
+    /// and disarming after each tap would be the heal tool's old mistake.
+    var tappingMaskId: UUID?
+
+    /// Where Apple's segmentation model is, so the mask card can say so instead of sitting silent.
+    enum ObjectSelectionState: Equatable {
+        /// This Mac cannot: older than macOS 27, or a build made without its SDK.
+        case unsupported
+        case notPrepared, preparing, ready
+        case failed(String)
+    }
+    var objectSelection: ObjectSelectionState =
+        ObjectSegmentation.isSupported ? .notPrepared : .unsupported
+    /// A selection is being segmented — the card's "Selecting…".
+    var segmentingObject = false
+
+    /// A click on the canvas while an object mask is taking taps. `exclude` is the ⌥-click path.
+    /// Same `imageRect` / `viewToNorm` mapping as every other canvas tool, so zoom, pan and
+    /// straighten are honoured, and taps are stored top-left like the wand's seed.
+    func tapObject(at loc: CGPoint, container: CGSize, pad: CGFloat = 24, exclude: Bool = false) {
+        guard let mid = tappingMaskId,
+              let idx = userMasks.firstIndex(where: { $0.id == mid }) else { return }
+        let rect = imageRect(in: container, pad: pad)
+        guard rect.width > 0, rect.height > 0 else { return }
+        let (nx, ny) = viewToNorm(loc, in: rect)
+        guard nx >= 0, nx <= 1, ny >= 0, ny <= 1 else { return }
+        if exclude && userMasks[idx].objectInclude.isEmpty {
+            statusMessage = "Click the object first — ⌥-click takes a piece off a selection."
+            return
+        }
+        let taps = exclude ? userMasks[idx].objectExclude : userMasks[idx].objectInclude
+        guard taps.count < SegmentSeed.maxPoints else {
+            statusMessage = "That's as many taps as a selection keeps — clear it and start again."
+            return
+        }
+        let tap = SegmentSeed.Point(x: nx, y: ny)
+        if exclude { userMasks[idx].objectExclude.append(tap) } else { userMasks[idx].objectInclude.append(tap) }
+        showMaskOverlay = true
+        // One tap, one undo step: two taps a moment apart are two decisions (the heal tool's rule).
+        onDiscreteEdit()
+    }
+
+    /// What the object tool is waiting on, in words, for the mask card — nil when nothing is.
+    /// `.unsupported` still speaks: an edit made on macOS 27 can be opened on a Mac that is not.
+    var objectStatusLine: String? {
+        switch objectSelection {
+        case .unsupported: return "Needs macOS 27 — on this Mac the selection is empty."
+        case .preparing: return "Getting Apple's object selection ready…"
+        case .failed(let why): return "Object selection is unavailable — \(why)"
+        case .notPrepared, .ready: return segmentingObject ? "Selecting…" : nil
+        }
+    }
+
+    func clearObjectTaps(_ id: UUID) {
+        guard let i = userMasks.firstIndex(where: { $0.id == id }) else { return }
+        userMasks[i].objectInclude = []; userMasks[i].objectExclude = []
+        onDiscreteEdit()
+    }
+
+    /// Fetch and load Apple's model, once a launch. The first time on a Mac it downloads (~6 s
+    /// measured) and every launch pays a model load (~10 s) that would otherwise land on the first
+    /// tap — so it starts the moment the tool is picked, while the photographer is still aiming.
+    ///
+    /// On the Vision lane: its warm-up IS a Vision request, and the lane is what keeps this request
+    /// to one at a time (see `ObjectSegmentation` for why that is the whole of D21's protection).
+    func prepareObjectSelection() {
+        switch objectSelection {
+        case .notPrepared, .failed: break
+        case .unsupported, .preparing, .ready: return
+        }
+        objectSelection = .preparing
+        statusMessage = "Getting Apple's object selection ready — the first time, macOS downloads it…"
+        Task { [weak self] in
+            let failure = await Offload.run(.vision) { () -> String? in
+                do { try ObjectSegmentation.prepare(); return nil } catch { return error.localizedDescription }
+            }
+            guard let self else { return }
+            if let failure {
+                self.objectSelection = .failed(failure)
+                self.statusMessage = "Object selection is unavailable — \(failure)"
+            } else {
+                self.objectSelection = .ready
+                if self.tappingMaskId != nil { self.statusMessage = "Ready — click the object." }
+                self.updateActiveRecipe()
+            }
+        }
+    }
+
     /// Add (or re-select) the mask for one detected subject.
     func addInstanceMask(_ instance: SubjectInstances.Instance) {
         // Kind-checked: a SKIN mask scoped to this person is a different tool, and its existence
@@ -1005,7 +1098,7 @@ final class AppState {
         baseline.geometry = nil; baseline.heal = nil
         var done = finished
         done.geometry = nil; done.heal = nil
-        return IntentJob(proxy: proxy, baseline: baseline, finished: done, masks: proxyMaskBitmaps)
+        return IntentJob(proxy: proxy, baseline: baseline, finished: done, masks: canvasMaskBitmaps)
     }
 
     /// Render the hero twice on the render lane and measure the difference.
@@ -3068,7 +3161,7 @@ final class AppState {
         activeRecipe = nil; preview.active = nil; original = nil; preview.lastRenderedCI = nil; preview.histogram = nil
         candidates = []; selectedCandidateId = nil; perception = nil; openedInByRule = nil
         activeCraftIssues = []; lastCraftReading = nil; exhaustedFixes = []
-        userMasks = []; paintingMaskId = nil; selectedMask = nil; pickingInstance = false
+        userMasks = []; paintingMaskId = nil; tappingMaskId = nil; selectedMask = nil; pickingInstance = false
         subjectInstances = []; highlightedInstanceId = nil
         proxyMaskBitmaps = [:]; brushCache = [:]; localMeasure = .none
         healSpots = []; healToolActive = false
@@ -3127,7 +3220,7 @@ final class AppState {
         edit = s.edit; editBaseline = s.editBaseline
         baseMasks = s.baseMasks; maskEnabled = s.maskEnabled; maskStrength = s.maskStrength
         userMasks = s.userMasks; straighten = s.straighten; hsl = s.hsl
-        brushCache = [:]; selectedMask = nil; paintingMaskId = nil; pickingInstance = false
+        brushCache = [:]; selectedMask = nil; paintingMaskId = nil; tappingMaskId = nil; pickingInstance = false
         zoom = 1; pan = .zero; showingOriginal = false
         comparing = false; compareRenders = [:]; comparePartnerId = nil
         updateActiveRecipe()
@@ -3149,7 +3242,7 @@ final class AppState {
         candidates = []; selectedCandidateId = nil; openedInByRule = nil
         activeRecipe = nil; preview.active = nil; original = nil
         preview.lastRenderedCI = nil; preview.histogram = nil; activeCraftIssues = []; lastCraftReading = nil; exhaustedFixes = []
-        userMasks = []; paintingMaskId = nil; selectedMask = nil; pickingInstance = false
+        userMasks = []; paintingMaskId = nil; tappingMaskId = nil; selectedMask = nil; pickingInstance = false
         subjectInstances = []; highlightedInstanceId = nil
         brushCache = [:]
         proxyMaskBitmaps = [:]; healSpots = []; healToolActive = false
@@ -3556,7 +3649,7 @@ final class AppState {
             PlaceNames.shared.resolve(here)
             PlaceMaps.shared.fetch(here)
         }
-        userMasks = []; paintingMaskId = nil; selectedMask = nil; pickingInstance = false   // hand-drawn masks are per-photo
+        userMasks = []; paintingMaskId = nil; tappingMaskId = nil; selectedMask = nil; pickingInstance = false   // hand-drawn masks are per-photo
         // The subjects belong to the photograph, so they go out with it. Left standing,
         // the list would offer the last photo's people while this one decoded.
         subjectInstances = []; highlightedInstanceId = nil
@@ -4231,7 +4324,7 @@ final class AppState {
         let photo = imageURL
         let input = RenderInput(
             recipe: recipe, proxy: proxy,
-            bitmaps: proxyMaskBitmaps
+            bitmaps: canvasMaskBitmaps
                 .merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked }
                 .merging(wandBitmaps(extent: proxy.extent, source: proxy)) { _, grown in grown })
         Task.detached(priority: .userInitiated) {
@@ -4275,7 +4368,7 @@ final class AppState {
     private func applySkyFix(proxy: CIImage, recipe: Recipe) {
         fixInProgress = true
         let photo = imageURL
-        let job = SkyFixJob(proxy: proxy, recipe: recipe, bitmaps: proxyMaskBitmaps)
+        let job = SkyFixJob(proxy: proxy, recipe: recipe, bitmaps: canvasMaskBitmaps)
         Task { [weak self] in
             let protected = await Offload.run(.render, qos: .userInitiated) { () -> SkyFixResult in
                 guard let frame = SkyGuard.frame(proxy: job.proxy, bitmaps: job.bitmaps, force: true)
@@ -4364,7 +4457,7 @@ final class AppState {
         let photo = imageURL            // see `applyFix`: this run belongs to one photograph
         let input = RenderInput(
             recipe: recipe, proxy: proxy,
-            bitmaps: proxyMaskBitmaps
+            bitmaps: canvasMaskBitmaps
                 .merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked }
                 .merging(wandBitmaps(extent: proxy.extent, source: proxy)) { _, grown in grown })
         Task.detached(priority: .userInitiated) {
@@ -4463,7 +4556,7 @@ final class AppState {
         let photo = imageURL
         let input = RenderInput(
             recipe: recipe, proxy: proxy,
-            bitmaps: proxyMaskBitmaps
+            bitmaps: canvasMaskBitmaps
                 .merging(brushBitmaps(extent: proxy.extent)) { _, baked in baked }
                 .merging(wandBitmaps(extent: proxy.extent, source: proxy)) { _, grown in grown })
         Task.detached(priority: .userInitiated) {
@@ -4790,6 +4883,7 @@ final class AppState {
             // painting strokes the canvas has stopped showing. Putting the mask down puts the
             // brush down.
             if paintingMaskId == id { paintingMaskId = nil }
+            if tappingMaskId == id { tappingMaskId = nil }     // and the object taps, same reason
         } else {
             selectedUserMaskId = id
         }
@@ -4989,7 +5083,7 @@ final class AppState {
         if kind == .luminance { m.selCenter = 0.78; m.selRange = 0.2 }    // highlights by default
         if kind == .skin { m.selCenter = 0.06; m.selRange = 0.06; m.selSoftness = 0.05; m.exposure = 0.3 }
         if kind == .background { m.exposure = -0.5 }   // darken the background by default
-        if kind == .subject { m.exposure = 0.3 }
+        if kind == .subject || kind == .object { m.exposure = 0.3 }   // an object: usually lifted
         userMasks.append(m)
         selectedUserMaskId = m.id                      // show its canvas handles
         // Shown once, on CREATION only. A mask you cannot see when it appears looks broken —
@@ -5002,6 +5096,9 @@ final class AppState {
         // the frame, so it would appear having already grabbed whatever happens to be at dead
         // centre. Arming it means the first thing that happens is the photographer pointing.
         if kind == .wand { seedingMaskId = m.id }
+        // And an object mask is nothing but taps, so it too starts listening — and starts Apple's
+        // model loading while the photographer aims.
+        if kind == .object { tappingMaskId = m.id; prepareObjectSelection() }
         onEdit()
     }
 
@@ -5022,6 +5119,7 @@ final class AppState {
     func removeUserMask(_ id: UUID) {
         userMasks.removeAll { $0.id == id }
         if paintingMaskId == id { paintingMaskId = nil }
+        if tappingMaskId == id { tappingMaskId = nil }
         onEdit()
     }
 
@@ -5185,6 +5283,8 @@ final class AppState {
                 bitmap = bitmaps[maskStruct.id]
                     ?? RegionGrow.mask(in: proxy, seed: CGPoint(x: seed.x, y: seed.y),
                                        tolerance: seed.tolerance, softness: seed.softness)
+            } else if maskStruct.segment != nil {
+                bitmap = bitmaps[maskStruct.id]      // the renderer's rule: its own, or nothing
             } else {
                 bitmap = bitmaps[maskStruct.id] ?? bitmaps[maskStruct.type]
             }
@@ -5286,6 +5386,79 @@ final class AppState {
         cache = cache.filter { live.contains($0.key) }
         return (out, cache)
     }
+
+    /// Object masks segmented on the canvas proxy, per mask and newest last, each with the taps it
+    /// came from. A few are kept so ⌘Z back through a run of taps is instant rather than a Vision
+    /// pass a step; a nil image is Vision finding nothing, remembered so it is not asked again on
+    /// every render. The open photograph's only (`objectCacheURL`).
+    @ObservationIgnored private var objectCache: [UUID: [(seed: SegmentSeed, image: CIImage?)]] = [:]
+    @ObservationIgnored private var objectCacheURL: URL?
+    @ObservationIgnored private var objectJobInFlight = false
+
+    /// The object masks the canvas has, by mask id, for the renderer. While new taps are being
+    /// segmented the previous selection stands in, so a tap does not blink the edit off and on.
+    /// Export uses none of this: it segments again from the taps (`LocalMasks.measureForDelivery`).
+    private func objectBitmaps() -> [String: CIImage] {
+        guard objectCacheURL == loadedURL else { return [:] }
+        var out: [String: CIImage] = [:]
+        for m in userMasks where m.kind == .object && !m.objectInclude.isEmpty {
+            guard let entries = objectCache[m.id] else { continue }
+            let seed = m.objectSeed
+            let image = entries.last(where: { $0.seed == seed }).map { $0.image } ?? entries.last?.image
+            if let image { out[m.id.uuidString] = image }
+        }
+        return out
+    }
+
+    /// The segmentation bitmaps plus the tapped objects — what a render of the EDIT is handed.
+    private var canvasMaskBitmaps: [String: CIImage] {
+        proxyMaskBitmaps.merging(objectBitmaps()) { _, tapped in tapped }
+    }
+
+    /// Segment the first object mask whose taps have no selection yet, and re-render when it lands —
+    /// which comes back here for the next. Called on every render, so a tap, an undo, a redo and a
+    /// reopened edit all arrive without a hook of their own. One at a time, on the Vision lane.
+    private func refreshObjectMasks() {
+        if objectCacheURL != loadedURL { objectCache = [:]; objectCacheURL = loadedURL }
+        let live = Set(userMasks.map(\.id))
+        objectCache = objectCache.filter { live.contains($0.key) }
+        guard let pending = userMasks.first(where: { m in
+            m.kind == .object && !m.objectInclude.isEmpty
+                && objectCache[m.id]?.contains(where: { $0.seed == m.objectSeed }) != true
+        }) else { return }
+        switch objectSelection {
+        case .notPrepared: prepareObjectSelection(); return
+        case .unsupported, .preparing, .failed: return
+        case .ready: break
+        }
+        guard !objectJobInFlight, let proxy = proxyCI, let url = loadedURL else { return }
+        objectJobInFlight = true
+        segmentingObject = true
+        let id = pending.id, seed = pending.objectSeed
+        let input = ImageBox(image: proxy)
+        Task { [weak self] in
+            // On the proxy as decoded, not the edit — the photograph that was clicked, the wand's rule.
+            let found = await Offload.run(.vision) { () -> ObjectMaskResult in
+                ObjectMaskResult(image: ObjectSegmentation.mask(for: seed, in: input.image))
+            }
+            guard let self else { return }
+            self.objectJobInFlight = false
+            self.segmentingObject = false
+            // A photograph left while Vision worked keeps nothing; the next one may have its own.
+            guard self.loadedURL == url, self.objectCacheURL == url else {
+                self.refreshObjectMasks()
+                return
+            }
+            self.objectCache[id] = Array(((self.objectCache[id] ?? []) + [(seed, found.image)]).suffix(8))
+            if found.image == nil {
+                self.statusMessage = "Nothing to select there — try nearer the middle of the object."
+            }
+            self.updateActiveRecipe()
+        }
+    }
+
+    /// A segmentation crossing back from the Vision lane. Same promise as `ImageBox`.
+    private struct ObjectMaskResult: @unchecked Sendable { let image: CIImage? }
 
     private func wandBitmaps(extent: CGRect, source: CIImage) -> [String: CIImage] {
         let grown = Self.bakeWand(masks: userMasks, cache: wandCache, extent: extent, source: source)
@@ -5410,6 +5583,7 @@ final class AppState {
         finalRecipe.blackAndWhite = activeLook?.mono
         if let activeLook { finalRecipe.curve = activeLook.curve(composedOnto: candidate.baseRecipe.curve) }
         self.activeRecipe = finalRecipe
+        refreshObjectMasks()
 
         if renderInFlight { renderDirty = true; return }
         renderInFlight = true
@@ -5418,7 +5592,7 @@ final class AppState {
         // ran on the main thread in front of the render. They need the masks and their caches,
         // which cross in a box like everything else in the job and come back updated with it.
         let bake = MaskBakeInput(masks: userMasks, brushCache: brushCache, wandCache: wandCache,
-                                 base: proxyMaskBitmaps)
+                                 base: canvasMaskBitmaps)
         let input = RenderInput(recipe: finalRecipe, proxy: proxy, bitmaps: [:])
         // Which photo these pixels are of. A render started before a photo switch can still land
         // after it; tagged, that frame is ignored instead of being shown under the new photo's name.
@@ -5574,7 +5748,7 @@ final class AppState {
         // mask, which is the one activity that wants the shape rather than the picture — and a
         // second render arriving underneath a brush stroke is a flicker in the middle of a gesture.
         guard !(showMaskOverlay && selectedMask != nil), paintingMaskId == nil,
-              seedingMaskId == nil, !pickingInstance else { return }
+              seedingMaskId == nil, tappingMaskId == nil, !pickingInstance else { return }
         // Nothing to gain when the proxy already holds every pixel the file has: a small JPEG, or a
         // frame whose long edge is under the interactive size. Never upscale to look sharper.
         let native = max(fullRes.extent.width, fullRes.extent.height)
@@ -5588,7 +5762,7 @@ final class AppState {
         // and `SubjectInstances.detect` are Vision passes costing hundreds of milliseconds, which is
         // affordable once per exported file and absurd every time somebody lets go of a slider.
         // Nothing real is lost — a mask has always been an upscale of something small.
-        let sourceMasks = proxyMaskBitmaps
+        let sourceMasks = canvasMaskBitmaps
         let renderURL = url
 
         // Boxed for the same reason as the candidate stage's `Inputs`: `CIImage` is `Sendable` on
@@ -5740,6 +5914,7 @@ final class AppState {
         userMasks.first { $0.instanceId == id }?.name
             ?? userMasks.first { $0.instanceId == id }?.instanceLabel
             ?? subjectInstances.first { $0.id == id }?.label
+            ?? userMasks.first { $0.id.uuidString == id }?.displayName   // a tapped object (D32)
             ?? "a subject mask"
     }
 
@@ -5832,7 +6007,8 @@ final class AppState {
         // cooperative thread while it works — see `Offload`.
         let measured = await Offload.run(.vision) { () -> ExportMasks in
             guard masksNeeded else { return ExportMasks(bitmaps: [:], lost: []) }
-            let delivery = LocalMasks.measureForDelivery(in: input.fullRes, reidentifying: references)
+            let delivery = LocalMasks.measureForDelivery(in: input.fullRes, reidentifying: references,
+                                                         segmenting: input.recipe.masks ?? [])
             return ExportMasks(bitmaps: delivery.bitmaps, lost: delivery.unmatched)
         }
         do {
@@ -6369,7 +6545,8 @@ final class AppState {
         // bound subject found again at this resolution. See `RenderJob.instanceReferences`.
         let measured = needsMasks
             ? await Offload.run(.vision) { () -> ExportMasks in
-                let delivery = LocalMasks.measureForDelivery(in: decoded.image, reidentifying: references)
+                let delivery = LocalMasks.measureForDelivery(in: decoded.image, reidentifying: references,
+                                                             segmenting: job.recipe.masks ?? [])
                 return ExportMasks(bitmaps: delivery.bitmaps, lost: delivery.unmatched)
             }
             : ExportMasks(bitmaps: [:], lost: [])
@@ -7292,6 +7469,7 @@ struct ContentView: View {
                         else if appState.paintingMaskId != nil { paintingBadge }
                         else if appState.pickingInstance { pickingBadge }
                         else if appState.seedingMaskId != nil { seedingBadge }
+                        else if appState.tappingMaskId != nil { tappingBadge }
                         else if appState.healToolActive { healingBadge }
                     }
                     .contentShape(Rectangle())
@@ -7301,7 +7479,8 @@ struct ContentView: View {
                             // Picking takes the drag but does nothing with it: a click is a drag of
                             // zero distance, and letting the pan branch run would slide the photo
                             // under the pointer between press and release.
-                            if appState.pickingInstance || appState.seedingMaskId != nil { return }
+                            if appState.pickingInstance || appState.seedingMaskId != nil
+                                || appState.tappingMaskId != nil { return }
                             // Same reason as picking: the heal lands on release, so the drag branch
                             // must not pan the photo out from under the pointer first.
                             if appState.healToolActive { return }
@@ -7321,6 +7500,12 @@ struct ContentView: View {
                             }
                             if appState.seedingMaskId != nil {
                                 appState.seedWand(at: v.location, container: geo.size)
+                                return
+                            }
+                            if appState.tappingMaskId != nil {
+                                // ⌥ takes a piece off, the heal tool's modifier for the same idea.
+                                appState.tapObject(at: v.location, container: geo.size,
+                                                   exclude: NSEvent.modifierFlags.contains(.option))
                                 return
                             }
                             if appState.healToolActive {
@@ -7350,6 +7535,7 @@ struct ContentView: View {
                     .onExitCommand {
                         if appState.pickingInstance { appState.pickingInstance = false }
                         else if appState.seedingMaskId != nil { appState.seedingMaskId = nil }
+                        else if appState.tappingMaskId != nil { appState.tappingMaskId = nil }
                         else if appState.paintingMaskId != nil { appState.paintingMaskId = nil }
                         else if appState.healToolActive { appState.healToolActive = false }
                     }
@@ -7649,6 +7835,18 @@ struct ContentView: View {
             .help("Cancel picking a point")
     }
 
+    /// Same contract as the other armed modes. Says ⌥ out loud because it is the half of the tool
+    /// nobody would guess, and "finish" rather than "cancel" because the taps already made stay.
+    private var tappingBadge: some View {
+        Text("OBJECT · click to add · ⌥-click to take away · esc or tap here to finish")
+            .font(Theme.mono(11, .semibold)).tracking(1).foregroundColor(Theme.base)
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(Capsule().fill(Theme.glow.opacity(0.9))).padding(30)
+            .contentShape(Capsule())
+            .onTapGesture { appState.tappingMaskId = nil }
+            .help("Finish selecting")
+    }
+
     /// Same contract as the other armed modes: says what to do and how to get out, and the badge
     /// itself is the exit for when the canvas has lost focus and Escape will not fire.
     private var healingBadge: some View {
@@ -7775,6 +7973,32 @@ struct ContentView: View {
                     }
                     .stroke(Color.white, lineWidth: 1)
                     .shadow(color: .black.opacity(0.8), radius: 1)
+                }
+            case .object:
+                // Every tap, marked: a filled dot on the object, a ring with a bar through it where
+                // a piece was taken off. The taps ARE this mask, so when the selection surprises you
+                // the first question is where they landed. An annotation, so behind the overlay
+                // toggle like the wand's crosshair.
+                if appState.showMaskOverlay {
+                    ForEach(Array(m.objectInclude.enumerated()), id: \.offset) { _, tap in
+                        Circle().fill(Theme.glow)
+                            .overlay(Circle().stroke(Color.white, lineWidth: 1.5))
+                            .frame(width: 9, height: 9)
+                            .shadow(color: .black.opacity(0.8), radius: 1)
+                            .position(appState.normToView(tap.x, tap.y, in: rect))
+                            .allowsHitTesting(false)
+                    }
+                    ForEach(Array(m.objectExclude.enumerated()), id: \.offset) { _, tap in
+                        let at = appState.normToView(tap.x, tap.y, in: rect)
+                        ZStack {
+                            Circle().stroke(Color.white, lineWidth: 1.5)
+                            Rectangle().fill(Color.white).frame(width: 7, height: 1.5)
+                        }
+                        .frame(width: 11, height: 11)
+                        .shadow(color: .black.opacity(0.8), radius: 1)
+                        .position(at)
+                        .allowsHitTesting(false)
+                    }
                 }
             case .brush, .colorRange, .luminance, .background, .subject, .sky:
                 EmptyView()
@@ -8679,6 +8903,12 @@ struct SidebarPanel: View {
                             toggleSeeding: {
                                 appState.seedingMaskId = (appState.seedingMaskId == m.id) ? nil : m.id
                             },
+                            isTapping: appState.tappingMaskId == m.id,
+                            toggleTapping: {
+                                appState.tappingMaskId = (appState.tappingMaskId == m.id) ? nil : m.id
+                            },
+                            clearTaps: { appState.clearObjectTaps(m.id) },
+                            objectStatus: m.kind == .object ? appState.objectStatusLine : nil,
                             hasPerson: appState.hasPerson,
                             subjectIsPerson: appState.subjectIsPerson,
                             hasSky: appState.hasSky,
@@ -8719,9 +8949,27 @@ struct SidebarPanel: View {
                         // the frame, the wand takes the one connected thing you point at. It is the
                         // answer for everything Vision will not segment — a sea stack, a headland,
                         // a wall — which is most of a landscape.
+                        //
+                        // Object is the wand's object-aware sibling, so it sits beside it: the wand
+                        // follows colour and leaks where the rock meets its own shade; this stops at
+                        // the edge of the thing. Shown on every Mac, and SAYS when it cannot work —
+                        // a missing button is a feature nobody learns exists, a dead one is a bug.
                         HStack(spacing: 6) {
                             Button(action: { appState.addUserMask(.wand) }) { SidebarPanel.addMaskLabel("Wand", icon: "wand.and.stars") }.buttonStyle(.plain)
+                            Button(action: { appState.addUserMask(.object) }) {
+                                SidebarPanel.addMaskLabel("Object", icon: "hand.tap")
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(appState.objectSelection == .unsupported)
+                            .opacity(appState.objectSelection == .unsupported ? 0.45 : 1)
+                            .help(appState.objectSelection == .unsupported
+                                  ? "Selecting an object by tapping it needs macOS 27"
+                                  : "Select an object by clicking it — Apple's segmentation, on this Mac")
                             Spacer(minLength: 0)
+                        }
+                        if appState.objectSelection == .unsupported {
+                            Text("Object needs macOS 27.")
+                                .font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
                         }
                         // Presets: the same masks with the settings already in them. Built-ins
                         // ship a few honest starting points; the star of the show is "save as
@@ -9783,6 +10031,10 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
         /// counterpart to `colorRange`: that takes every matching pixel in the frame, this takes
         /// the one connected thing you pointed at.
         case wand
+        /// An object picked by tapping it — Apple's segmentation, not a colour fill (D32). The wand's
+        /// object-aware sibling: where the wand runs along anything the same colour as the click,
+        /// this stops at the edge of the thing. Needs macOS 27.
+        case object
     }
     var id = UUID()
     var kind: Kind
@@ -9794,6 +10046,10 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
     /// for a radial mask, and inventing a second pair of coordinates for the same idea is how two
     /// fields that must agree end up disagreeing.
     var wandTolerance = 0.10, wandSoftness = 0.25
+    /// Object only: the taps on the photograph — on the object, and ⌥-clicked off it. The whole of
+    /// the mask; the pixels are made again from these wherever it is rendered.
+    var objectInclude: [SegmentSeed.Point] = [], objectExclude: [SegmentSeed.Point] = []
+    var objectSeed: SegmentSeed { SegmentSeed(include: objectInclude, exclude: objectExclude) }
     /// The local adjustments this mask carries. Keys and ranges live in
     /// `AppState.maskAdjustmentSpecs`, and the editor builds its sliders from that list, so a
     /// hand-drawn mask and an auto mask can never again offer different controls.
@@ -9869,6 +10125,7 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
         case shadows, highlights, vibrance, name
         case refinement, refineCenter, refineRange, refineSoftness
         case wandTolerance, wandSoftness
+        case objectInclude, objectExclude
     }
 
     init(id: UUID = UUID(), kind: Kind, cx: Double = 0.5, cy: Double = 0.5, radius: Double = 0.35, angle: Double = 0.0, softness: Double = 0.35, stamps: [BrushStamp] = [], selCenter: Double = 0.0, selRange: Double = 0.1, selSoftness: Double = 0.1, exposure: Double = 0.0, contrast: Double = 0.0, saturation: Double = 0.0, instanceId: String? = nil, instanceLabel: String? = nil, instanceBox: CGRect? = nil, instanceKind: SubjectInstances.Kind? = nil, tightness: Double = 0.0, feather: Double = 0.0, invert: Bool = false) {
@@ -9915,6 +10172,8 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
         refineSoftness = try c.decodeIfPresent(Double.self, forKey: .refineSoftness) ?? 0.06
         wandTolerance = try c.decodeIfPresent(Double.self, forKey: .wandTolerance) ?? 0.10
         wandSoftness = try c.decodeIfPresent(Double.self, forKey: .wandSoftness) ?? 0.25
+        objectInclude = try c.decodeIfPresent([SegmentSeed.Point].self, forKey: .objectInclude) ?? []
+        objectExclude = try c.decodeIfPresent([SegmentSeed.Point].self, forKey: .objectExclude) ?? []
     }
 
     var label: String {
@@ -9922,6 +10181,7 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
         case .radial: return "Radial"; case .linear: return "Graduated"; case .brush: return "Brush"
         case .colorRange: return "Colour range"; case .luminance: return "Luminance"; case .skin: return "Skin"
         case .background: return "Background"; case .sky: return "Sky"; case .wand: return "Wand"
+        case .object: return "Object"
         case .subject: return "Subject"
         case .instance: return instanceLabel ?? "Subject"
         }
@@ -10061,6 +10321,15 @@ struct UserMaskVM: Identifiable, Equatable, Codable {
                         refine: ref,
                         region: RegionSeed(x: cx, y: cy,
                                            tolerance: wandTolerance, softness: wandSoftness))
+        case .object:
+            // THE TAPS, never the pixels (D32): the canvas segments them on its proxy and the export
+            // segments them again on its own measurement image, so the file matches the screen.
+            //
+            // A light default feather — Vision's matte already falls off at the edge, and a wide one
+            // would put a glow round a rock the selection traced exactly.
+            return Mask(id: id.uuidString, type: "object", source: "tap-segment", invert: inv,
+                        feather: f != 0 ? f : 4, opacity: 1, adjustments: adj, tightness: t,
+                        refine: ref, segment: objectSeed)
         }
     }
 }
@@ -10088,6 +10357,12 @@ struct UserMaskEditor: View {
     /// pick is one — the canvas is also how you pan and zoom.
     var isSeeding = false
     var toggleSeeding: () -> Void = {}
+    /// The object tool's equivalents: the canvas is taking this mask's taps, and the taps can be
+    /// thrown away. `objectStatus` is what Apple's model is doing, in words — nil when nothing.
+    var isTapping = false
+    var toggleTapping: () -> Void = {}
+    var clearTaps: () -> Void = {}
+    var objectStatus: String?
     var hasPerson = true
     /// Whether that subject is actually a person. Drives the copy on the Subject and Skin cards,
     /// which otherwise promise a person over a mask that may be a dog or a sea stack.
@@ -10247,6 +10522,37 @@ struct UserMaskEditor: View {
                            unit: "", onChange: onChange, neutral: 0.25)
                 ToneSlider(label: "Seed X", value: $mask.cx, range: 0...1, step: 0.005, unit: "", onChange: onChange)
                 ToneSlider(label: "Seed Y", value: $mask.cy, range: 0...1, step: 0.005, unit: "", onChange: onChange)
+            case .object:
+                Text("Click the thing you want — it is selected to its edges, not by colour. Click "
+                     + "what it missed to add it; ⌥-click what it took to take it away.")
+                    .font(Theme.mono(9)).foregroundColor(Theme.inkDim)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let objectStatus {
+                    Text(objectStatus)
+                        .font(Theme.mono(9)).foregroundColor(Theme.glow)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack(spacing: 8) {
+                    Button(action: toggleTapping) {
+                        Text(isTapping ? "Clicking the photo… (esc)" : "Add or take away")
+                            .font(Theme.ui(11, .semibold)).foregroundColor(isTapping ? Theme.base : Theme.ink)
+                            .frame(maxWidth: .infinity).padding(.vertical, 7)
+                            .background(RoundedRectangle(cornerRadius: 7)
+                                .fill(isTapping ? Theme.glow : Theme.surface2)
+                                .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.hairline, lineWidth: 1)))
+                    }.buttonStyle(.plain)
+                    Button(action: clearTaps) {
+                        Text("Clear").font(Theme.ui(11, .semibold)).foregroundColor(Theme.inkDim)
+                            .frame(maxWidth: .infinity).padding(.vertical, 7)
+                            .background(RoundedRectangle(cornerRadius: 7).fill(Theme.surface2)
+                                .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.hairline, lineWidth: 1)))
+                    }.buttonStyle(.plain)
+                    .disabled(mask.objectInclude.isEmpty && mask.objectExclude.isEmpty)
+                }
+                if !mask.objectInclude.isEmpty {
+                    Text("\(mask.objectInclude.count) in · \(mask.objectExclude.count) out · ⌘Z undoes a tap")
+                        .font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
+                }
             case .radial:
                 ToneSlider(label: "Center X", value: $mask.cx, range: 0...1, step: 0.01, unit: "", onChange: onChange)
                 ToneSlider(label: "Center Y", value: $mask.cy, range: 0...1, step: 0.01, unit: "", onChange: onChange)

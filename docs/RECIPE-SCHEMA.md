@@ -212,6 +212,8 @@ caller supplies for that `id`/`type`).
 | `radial`, `linear` | `shape` | `{kind, cx, cy, radius, angle, softness}` — a soft ellipse or a graduated edge. Normalised, top-left origin. |
 | `brush` | `stamps` | `[{x, y, radius, hardness}]` — the union of soft circular dabs along a stroke. A caller may supply a pre-baked stroke under the mask's `id` to avoid recompositing every frame; it must render identically. |
 | `color`, `luminance` | `selection` | `{kind, center, range, softness}` baked into a cube that keys hue or luma → white-where-selected. Near-grey pixels are excluded from a colour selection. |
+| `wand` | `region` | `{x, y, tolerance, softness}` — the magic wand: a region grown outward by colour from one clicked point, top-left origin. The renderer regrows it at whatever resolution it is rendering; a caller may supply the grown bitmap under the mask's `id`. |
+| `object` | `segment` | `{include: [{x, y}], exclude: [{x, y}]}` — an object picked by tapping it (D32): Apple's iterative segmentation, macOS 27 / iOS 27. The first `include` tap is the seed; `exclude` taps take pieces off. Top-left origin, clamped, at most 32 taps a list. **The one source the renderer cannot make itself** (the request is asynchronous): the caller segments the taps on the image being rendered and supplies the bitmap under the mask's `id` — the canvas on its proxy, the export on its 2048 px measurement image — and with no bitmap the mask is skipped, never borrowing another. |
 | `lights` | *(none)* | The light sources in frame (engine 0.7.3): small, white-hot, warm islands near clipping in the source, outside any person and any sky; caller supplies the bitmap (`LocalMasks` → `LightsMask`). **Rendered differently from every other kind:** its layer is the frame as it entered exposure, composited straight after highlight/shadow recovery — so inside it neither the global `exposure_ev` nor the global recovery applies, and its own `adjustments` are relative to the frame *as shot* (empty = as shot). Everything after that stage (tone, colour, detail) reaches it like anywhere else. |
 
 **`lights` is an additive value of `type`, not a new field** (engine 0.7.3, 24 September 2026).
@@ -220,6 +222,12 @@ reading a recipe that does contain one finds no bitmap for it and skips it — t
 mask it cannot resolve — so it renders the edit without the protection, which is exactly what
 that build would have produced for the photograph itself. The one semantic novelty is the render
 stage above, and it is confined to masks of this type.
+
+**`segment` is an additive field** (D32, 24 September 2026), optional and absent on every mask
+written before it. A build that predates it drops the unknown key, finds no bitmap for the mask's id
+or for type `object`, and skips it — **the mask renders nothing there**, and the rest of the edit
+renders as it would have. A current build on an OS without the request (anything before macOS 27 /
+iOS 27, or built without that SDK) does the same, and the app says why.
 
 `heal` sits outside `masks`: a list of `{x, y, radius, dx, dy, feather}` spots, each patched
 from `(dx, dy)` away. Non-generative and applied first, so downstream tone treats the
