@@ -174,6 +174,11 @@ struct CandidateViewModel: Identifiable {
     let label: String
     let baseRecipe: Recipe
     let previewImage: NSImage
+    /// The style's own recipe when `baseRecipe` is it with the shoot's carried adjustments solved in
+    /// (D30, `ResultMatch`). Kept because a hero is measured against the STYLE, never against a
+    /// recipe that already carries a previous hero's finish — otherwise re-applying from a matched
+    /// frame would carry only what was changed since, and lose the rest.
+    var unmatchedRecipe: Recipe? = nil
     /// What this look does to THIS photograph, in words, relative to Natural — `CandidateDescription`,
     /// the same sentence the iPhone shows. Empty until the set is known (it is a comparison).
     var summary: String = ""
@@ -775,6 +780,39 @@ final class AppState {
         shootLook?.lookId(for: photo).flatMap(LookPreset.named)
     }
 
+    /// The hero's measured finish the shoot carries onto a photograph (D30), or nil. Off entirely
+    /// when the photographer switched the carry off — the record keeps it, so switching back on
+    /// needs no re-apply.
+    func effectiveIntent(for photo: URL) -> ResultMatch.Intent? {
+        carryAdjustments ? shootLook?.intent(for: photo) : nil
+    }
+
+    /// Whether applying a look to the shoot also carries the finishing adjustments made by hand on
+    /// the open frame — measured as what they did, and solved on each frame (D30). On by default:
+    /// adjusting a frame and then pressing Apply reads as "like this", and the shoot check shows
+    /// what that means on the frames least like it before anything is exported.
+    var carryAdjustments = UserDefaults.standard.object(forKey: AppState.carryAdjustmentsKey) as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(carryAdjustments, forKey: AppState.carryAdjustmentsKey)
+            // Frames already put up with (or without) the carry are now showing the other answer.
+            dropSessionsCarryingIntent()
+        }
+    }
+    static let carryAdjustmentsKey = "shoot.carryAdjustments"
+
+    /// A hero measurement in flight, so a test (or a second apply) can wait for it.
+    @ObservationIgnored private(set) var pendingIntent: Task<Void, Never>?
+
+    /// Cached sessions of frames the shoot's carried adjustments reach, left untouched — they were
+    /// put up under the previous answer and would be restored exactly as they were.
+    private func dropSessionsCarryingIntent() {
+        guard let shootLook else { return }
+        for url in cachedSessionURLs where shootLook.style(for: url) != nil && !editedURLs.contains(url) {
+            sessions.removeValue(forKey: url)
+            sessionOrder.removeAll { $0 == url }
+        }
+    }
+
     /// The look the shoot carries onto the photograph whose pixels are in memory.
     ///
     /// This is part of what "untouched" MEANS on a claimed frame, which is why it is read by
@@ -822,6 +860,10 @@ final class AppState {
         // screen with the look it is ABOUT to get — and a frame showing the old record's Portrait
         // film, untouched, would read as hand-edited and be left standing in the old look.
         let openWasUntouched = !isTouched
+        // What the open frame is showing of a PREVIOUS hero's finish, read before the record changes
+        // for the same reason. Re-applying from a frame that shows carried adjustments, untouched,
+        // carries them on — what you see is what you apply.
+        let intentOnOpen = loadedURL.flatMap { effectiveIntent(for: $0) }
 
         let scope = applyScope()
         let coversWholeShoot = ShootLook.covers(scope, folderPhotos)
@@ -897,6 +939,82 @@ final class AppState {
             guard let self, unread > 0, self.statusMessage == settled else { return }
             self.statusMessage = base + " · reading \(unread) of them now, so export doesn't have to"
         }
+
+        carryHeroFinish(openWasUntouched: openWasUntouched, intentOnOpen: intentOnOpen,
+                        styleId: styleId, lookId: lookId, scope: scope, folder: folder,
+                        appliedAt: look.appliedAt, base: base)
+    }
+
+    /// The hero's finish, measured and attached to the record an apply just wrote (D30).
+    ///
+    /// After the record, not before it: measuring renders the hero twice, and the apply itself must
+    /// not wait on that — the strip and the status line answer at once, and the carried adjustments
+    /// land a moment later. Guarded on `appliedAt`, so a measurement that finishes after a newer
+    /// apply or a clear writes nothing.
+    private func carryHeroFinish(openWasUntouched: Bool, intentOnOpen: ResultMatch.Intent?,
+                                 styleId: String, lookId: String?, scope: [URL], folder: URL,
+                                 appliedAt: String?, base: String) {
+        guard carryAdjustments else { return }
+        let heroName = loadedURL?.lastPathComponent
+        if openWasUntouched {
+            // Nothing new was done here by hand; carry on whatever this frame was already showing.
+            guard let intentOnOpen, let current = shootLook else { return }
+            let next = current.attaching(intentOnOpen, source: current.intentSource ?? heroName,
+                                         to: scope, inShootOf: folderPhotos)
+            ShootLookStore.save(next, for: folder, in: shootLookDirectory)
+            shootLook = next
+            return
+        }
+        guard let candidate = candidates.first(where: { $0.id == styleId }),
+              let finished = activeRecipe, let proxy = proxyCI else { return }
+        // Measured against what the app PUT UP — the style (unmatched), with the creative look the
+        // apply carries — and with geometry and healing left out of both, because a straightened
+        // crop changes what every region measures without being a finishing move.
+        var baseline = candidate.unmatchedRecipe ?? candidate.baseRecipe
+        if let look = lookId.flatMap(LookPreset.named) { baseline = look.applied(to: baseline) }
+        baseline.geometry = nil; baseline.heal = nil
+        var done = finished
+        done.geometry = nil; done.heal = nil
+        let job = IntentJob(proxy: proxy, baseline: baseline, finished: done, masks: proxyMaskBitmaps)
+        pendingIntent = Task { [weak self] in
+            let measured = await Offload.run(.render, qos: .userInitiated) {
+                IntentResult(value: ResultMatch.intent(proxy: job.proxy, baseline: job.baseline,
+                                                       finished: job.finished, maskBitmaps: job.masks))
+            }
+            guard let self, self.shootLookFolder == folder, let current = self.shootLook,
+                  current.appliedAt == appliedAt,
+                  let intent = measured.value, !intent.isNeutral else { return }
+            let next = current.attaching(intent, source: heroName, to: scope, inShootOf: self.folderPhotos)
+            ShootLookStore.save(next, for: folder, in: self.shootLookDirectory)
+            self.shootLook = next
+            // Frames browsed since the apply were put up without the carry; like the apply's own
+            // sweep, they have to be read again to show it.
+            self.dropSessionsCarryingIntent()
+            if self.statusMessage.hasPrefix(base) {
+                self.statusMessage = base + " · your adjustments on \(heroName ?? "this frame") go "
+                    + "with it, matched on each frame. Export edited writes the files"
+            }
+        }
+    }
+
+    /// The hero measurement's inputs, crossing to the render lane. Core Image images are immutable
+    /// recipes for pixels; the box says the crossing is deliberate, as `RenderInput` does.
+    private struct IntentJob: @unchecked Sendable {
+        let proxy: CIImage
+        let baseline: Recipe
+        let finished: Recipe
+        let masks: [String: CIImage]
+    }
+    private struct IntentResult: Sendable { let value: ResultMatch.Intent? }
+    /// A frame's opening candidate crossing to the render lane to have the carried finish solved in.
+    private struct MatchJob: @unchecked Sendable {
+        let proxy: CIImage
+        let masks: [String: CIImage]
+        let style: Recipe
+    }
+    private struct MatchResult: @unchecked Sendable {
+        let recipe: Recipe
+        let preview: CGImage?
     }
 
     /// The frames `applyLookToShoot` will claim: the selection if there is one, otherwise the whole
@@ -3727,6 +3845,40 @@ final class AppState {
                     summary: CandidateDescription.sentence(for: item.recipe, relativeTo: naturalRecipe,
                                                            subject: subjectNoun))
             }
+            // THE SHOOT'S CARRIED ADJUSTMENTS, solved on THIS frame (D30) — onto the candidate the
+            // frame opens in under the shoot's look, and only when nobody has edited it by hand (a
+            // hand edit outranks the whole shoot record, D13). Solved into the candidate itself, so
+            // "the candidate as the app put it up" includes them and opening a frame never reads as
+            // an edit; the style's own recipe is kept for the next hero measurement.
+            var carriedFinishOnOpen = false
+            let openingUnderShoot = composition.honouredRequest
+                ? composition.chosen?.recipe.id : (wanted != nil ? self.candidates.first?.id : nil)
+            if let openingUnderShoot, let intent = effectiveIntent(for: url),
+               let index = self.candidates.firstIndex(where: { $0.id == openingUnderShoot }),
+               EditStore.load(for: url) == nil {
+                let style = self.candidates[index].baseRecipe
+                let finish = effectiveLook(for: url)
+                let job = MatchJob(proxy: premeasured.measuredOn, masks: proxyMasks, style: style)
+                let solved = await Offload.run(.render, qos: .userInitiated) { () -> MatchResult in
+                    let matched = ResultMatch.apply(intent, to: job.style, proxy: job.proxy,
+                                                    maskBitmaps: job.masks,
+                                                    finishing: { finish?.applied(to: $0) ?? $0 })
+                    let preview = Renderer.render(job.proxy, with: matched, maskBitmaps: job.masks)
+                    return MatchResult(recipe: matched,
+                                       preview: Self.sharedContext.createCGImage(preview, from: preview.extent))
+                }
+                guard imageURL == url else { return }
+                if solved.recipe != style {
+                    let old = self.candidates[index]
+                    var matched = CandidateViewModel(
+                        id: old.id, label: old.label, baseRecipe: solved.recipe,
+                        previewImage: solved.preview.map { NSImage(cgImage: $0, size: .zero) } ?? old.previewImage,
+                        summary: old.summary)
+                    matched.unmatchedRecipe = style
+                    self.candidates[index] = matched
+                    carriedFinishOnOpen = true
+                }
+            }
             let models = self.candidates
             // This is what makes applying a look to a folder mean anything: the style was chosen
             // once, and every frame resolves it against its own histogram, its own scene reading and
@@ -3757,7 +3909,9 @@ final class AppState {
                 // with the style — so "Soft" is never said over a frame showing Soft + Portrait film.
                 let carried = effectiveLook(for: url)?.id
                 statusMessage = "Ready · \(ShootLook.choiceLabel(style: shootStyle.label, look: carried)), "
-                    + "adapted to this frame from the shoot's look\(statusNote)"
+                    + "adapted to this frame from the shoot's look"
+                    + (carriedFinishOnOpen ? ", with the adjustments from \(shootLook?.intentSource ?? "the hero frame") matched here" : "")
+                    + statusNote
             } else if let wanted, let style = CandidateStyle.all.first(where: { $0.id == wanted }) {
                 // Say so rather than quietly showing a different look than the strip implies. The
                 // creative look is NOT dropped with the style: a preset is a choice made on its own
@@ -5775,7 +5929,11 @@ final class AppState {
                 let adapted: Recipe
                 do {
                     let resolved = try await adaptedRecipe(for: url, style: style)
-                    adapted = ShootLook.finished(resolved, look: carriedLookId)
+                    // The hero's carried finish, solved on this frame through the creative look,
+                    // BEFORE the look is composed — exactly as the canvas does it (D30).
+                    let matched = try await matchedRecipe(for: url, resolved: resolved, style: style,
+                                                          look: carriedLookId)
+                    adapted = ShootLook.finished(matched, look: carriedLookId)
                 } catch {
                     failed += 1; continue
                 }
@@ -5951,6 +6109,38 @@ final class AppState {
     ///
     /// Expensive on purpose — a decode, a perception pass and two Vision passes per photograph — so
     /// it runs at export, once, and never while someone is browsing.
+    /// `resolved` with the shoot's carried finish solved in (D30), or `resolved` itself when the
+    /// frame carries none. Cached like the resolve, under a key that names the intent and the look
+    /// — a change to either is a different answer, and serving the old one would export the
+    /// previous hero's adjustments.
+    private func matchedRecipe(for url: URL, resolved: Recipe, style: CandidateStyle,
+                               look lookId: String?) async throws -> Recipe {
+        guard let intent = effectiveIntent(for: url), ResultMatch.enabled else { return resolved }
+        let modelId = perceptionProvider.activeModelID
+        let key = "\(style.id)|look:\(lookId ?? "-")|match:\(ResultMatch.signature(of: intent))"
+        if let cached = ResolvedRecipeStore.load(for: url, styleId: key, modelId: modelId) {
+            return cached
+        }
+        try await Offload.run(.fetch, qos: .utility) { try CloudFile.materialise(url) }
+        // The same proxy route `adaptedRecipe` measures on, so the solve sees the pixels the style
+        // was resolved against; the masks are measured on it because the cache hit above skipped
+        // the composition that had them.
+        let proxy = try await Offload.run(.decode) { () -> DecodedProxy in
+            let image = try ImageDecoder.decode(url: url)
+            return DecodedProxy(image: PerceptionProxy.fromFile(url, matching: image.extent)
+                ?? Self.materialiseDecoded(PerceptionProxy.downsample(image)))
+        }
+        let finish = lookId.flatMap(LookPreset.named)
+        let matched = await Offload.run(.vision) { () -> Recipe in
+            let masks = LocalMasks.measure(in: proxy.image).bitmaps
+            return ResultMatch.apply(intent, to: resolved, proxy: proxy.image, maskBitmaps: masks,
+                                     finishing: { finish?.applied(to: $0) ?? $0 })
+        }
+        ResolvedRecipeStore.save(matched, for: url, styleId: key, modelId: modelId)
+        return matched
+    }
+    private struct DecodedProxy: @unchecked Sendable { let image: CIImage }
+
     private func adaptedRecipe(for url: URL, style: CandidateStyle) async throws -> Recipe {
         // PHOTO + STYLE → RECIPE IS DETERMINISTIC, so the answer is worth keeping. On a hit the
         // whole of this function is skipped, decode included — the caller decodes separately for
@@ -7658,6 +7848,20 @@ struct ContentView: View {
                         .foregroundColor(Theme.inkDim)
                         .help("Apply the look to just the \(appState.keeperCount) frame"
                               + "\(appState.keeperCount == 1 ? "" : "s") flagged Keep")
+                    }
+                    // Only when there is something to carry: the open frame has been adjusted by
+                    // hand. It says what it does in the words someone who is not a photographer
+                    // uses, and the tooltip says the part that matters — the adjustment is matched
+                    // on each frame, not copied (D30).
+                    if appState.isTouched {
+                        Toggle(isOn: $appState.carryAdjustments) {
+                            Text("With my adjustments").font(Theme.ui(11))
+                        }
+                        .toggleStyle(.checkbox)
+                        .foregroundColor(Theme.inkDim)
+                        .help("Carry what you changed on this photo — brighter, warmer, the people "
+                              + "lifted — to the rest. Each frame gets the same change made with its own "
+                              + "settings, not a copy of yours.")
                     }
                     if appState.shootLook != nil {
                         Button(action: { appState.clearShootLook() }) {

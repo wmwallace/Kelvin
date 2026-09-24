@@ -1568,3 +1568,53 @@ old behaviour.
 **Not changed.** The iPhone has no creative look presets — its "looks" are the candidate styles, and
 its apply already carries the style plus `LookAdjustments` offsets. That carry is untouched here; it
 is being reworked separately ("result matching").
+
+---
+
+## D30 — A hero's hand finish travels as what it did, solved on each frame · **Decided 24 September 2026** (owner: "build it all"; in-project decisions delegated 22 Sep)
+
+**The gap.** D13 made a shoot look carry a style and nothing else, and D29 added the creative look. What
+the photographer did BY HAND on the hero — a touch brighter, warmer, the people lifted — still stayed on
+the one frame on the Mac, while the iPhone carried it the way D13 forbids: `LookAdjustments` offsets,
+"+0.3 EV" added to every frame whatever it needed.
+
+**Now: measure the finish, solve per frame.** `ResultMatch` renders the hero twice — as the app put it
+up (style + carried look) and as finished — and measures the difference in a handful of outcome numbers:
+L* lightness, tonal spread, warmth and tint on the near-neutral pixels, colourfulness, and the subject's
+and sky's lightness *relative to the background*. That `Intent` is what the shoot record carries
+(`ShootLook.intent`). On each frame, the style's own levers — exposure, the subject and sky masks,
+temperature, tint, contrast, vibrance — are bisected until THIS frame's change measures the same, seen
+through the carried look, under a clipping allowance of what the hero edit itself added. A hero nobody
+touched has a neutral intent and changes nothing, byte for byte.
+
+**Why this and not the sliders, on the numbers** (`kelvin-cli match-probe`, paired corpus, 76 frames,
+mean ΔE to the photographer's own finished edit, lower is closer):
+
+| carry | Wedding (53) | Cannon Beach (23) | all |
+|---|---|---|---|
+| style only (Mac until now) | 7.38 | 7.05 | 7.28 |
+| shoot-wide intent, **solved per frame** | **6.57** | 7.45 | **6.84** |
+| same intent, hero's **slider change copied** (iPhone until now) | 7.19 | 8.33 | 7.53 |
+| each frame's OWN intent (ceiling of these levers) | 5.29 | 4.91 | 5.17 |
+
+Solving beats copying on 36/53 and 20/23 frames. The mechanism is sound; D13 was right, and now has a
+number.
+
+**The caveat the corpus insisted on.** Carrying ONE finished frame's whole Lightroom edit to the rest made
+them worse (7.28 → 8.77): a photographer's per-frame edit is mostly per-frame correction — lightness
+varies ±5–7 L* frame to frame — and only part of it (Wedding's lower contrast, lifted people) is the
+shoot's intent. On Cannon Beach no part of it was consistent, and carrying anything hurt. In the app the
+thing carried is different in kind — a deliberate adjustment ON TOP of Kelvin's own per-frame
+development, not a whole edit — but whether it is meant for the shoot is the photographer's call, so:
+
+- **Visible and switchable.** "With my adjustments" sits beside Apply whenever the open frame has been
+  adjusted; the status line names the hero; `carryAdjustments` turns it off without forgetting it.
+- **Checked before export.** The shoot check (D31) previews the carried result on the frames least like
+  the hero — where a carry that should not have happened shows.
+
+**Precedence unchanged**: hand edit, override (style + look + its own intent, or none), shoot, engine.
+An override never inherits the shoot's intent, a new apply is a new choice (the previous hero's intent is
+dropped), and an intent that no longer decodes costs the carry, never the shoot's look.
+
+**What does not travel**: the hero's exposure value, its masks' geometry, its per-band colour, its crop.
+Only outcome differences, and every number that reaches a frame is solved on that frame.

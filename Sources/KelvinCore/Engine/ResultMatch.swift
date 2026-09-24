@@ -215,6 +215,14 @@ public enum ResultMatch {
         }
     }
 
+    /// A stable spelling of an intent, for cache keys: two intents that would solve the same are
+    /// spelled the same (rounded to a tenth — well inside every deadband), and any change that could
+    /// move a frame is a different key.
+    public static func signature(of i: Intent) -> String {
+        [i.lightness, i.spread, i.warmth, i.tint, i.colourfulness, i.subjectSeparation, i.skyDepth, i.addedClip * 100]
+            .map { String(format: "%.1f", $0) }.joined(separator: ",")
+    }
+
     /// The intent of a finished render relative to the render its style produced.
     public static func intent(finished: Outcome, baseline: Outcome) -> Intent {
         var i = Intent()
@@ -268,14 +276,22 @@ public enum ResultMatch {
     /// - Parameters:
     ///   - proxy: the frame, at any size (it is reduced to `solveEdge` here).
     ///   - maskBitmaps: the frame's own measured masks (`LocalMasks.measure`), any extent.
+    ///   - finishing: what goes on top of the recipe before it is seen — a carried creative look
+    ///     (`LookPreset.applied(to:)`, D29). The solve moves the STYLE's own levers and measures
+    ///     them through the finish, so a film look's contrast is counted once, by the look, rather
+    ///     than solved for a second time underneath it. The returned recipe is the unfinished one:
+    ///     the caller composes the finish exactly as it would have without a match.
     public static func apply(_ intent: Intent, to baseline: Recipe, proxy: CIImage,
-                             maskBitmaps: [String: CIImage]) -> Recipe {
+                             maskBitmaps: [String: CIImage],
+                             finishing: (Recipe) -> Recipe = { $0 }) -> Recipe {
         guard enabled, !intent.isNeutral else { return baseline }
         let small = reduce(proxy)
         let bitmaps = maskBitmaps.mapValues { LocalMasks.scale($0, to: small.extent) }
         let regions = Regions.sampling(bitmaps, over: small.extent)
 
-        func render(_ r: Recipe) -> Sampled? { sample(Renderer.render(small, with: r, maskBitmaps: bitmaps)) }
+        func render(_ r: Recipe) -> Sampled? {
+            sample(Renderer.render(small, with: finishing(r), maskBitmaps: bitmaps))
+        }
         guard let base = render(baseline) else { return baseline }
         let neutral = neutralSet(of: base)
         let start = outcome(base, neutral: neutral, regions: regions)

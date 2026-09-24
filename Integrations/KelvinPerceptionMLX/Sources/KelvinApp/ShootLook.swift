@@ -64,15 +64,37 @@ struct ShootLook: Codable, Equatable {
     /// A separate map rather than widening `overrides`' value type, so every record already on
     /// disk decodes untouched — its overrides simply carry no look, which is what they always had.
     var overrideLooks: [String: String] = [:]
+    /// What the photographer's own finishing moves on the hero frame DID — "brighter by this much,
+    /// warmer by that, the people further out of the background" — measured on its pixels
+    /// (`ResultMatch.Intent`), so each frame can be solved to make the same change with its own
+    /// levers. Nil when the hero was not hand-adjusted, or the carry was switched off. D30.
+    ///
+    /// **Still not a slider carried across the shoot.** D13's objection is to frame 12's numbers
+    /// landing on frame 13; what travels here is a handful of measured differences, and every
+    /// number that reaches a frame is solved on that frame (`ResultMatch.apply`). Measured against
+    /// a photographer's own finished shoots, this beats copying the slider change on 56 of 76
+    /// frames (`kelvin-cli match-probe --shoot-wide`, EVALUATION.md).
+    var intent: ResultMatch.Intent?
+    /// The intent for each OVERRIDDEN frame — same rule as `overrideLooks`: an override is a whole
+    /// choice, so absent here means none, never the shoot's.
+    var overrideIntents: [String: ResultMatch.Intent] = [:]
+    /// The hero frame's file name, for the sentence that says where the carried adjustments came
+    /// from. Display only.
+    var intentSource: String?
 
     init(version: Int = 1, style: String? = nil, overrides: [String: String] = [:],
-         appliedAt: String? = nil, lookId: String? = nil, overrideLooks: [String: String] = [:]) {
+         appliedAt: String? = nil, lookId: String? = nil, overrideLooks: [String: String] = [:],
+         intent: ResultMatch.Intent? = nil, overrideIntents: [String: ResultMatch.Intent] = [:],
+         intentSource: String? = nil) {
         self.version = version
         self.style = style
         self.overrides = overrides
         self.appliedAt = appliedAt
         self.lookId = lookId
         self.overrideLooks = overrideLooks
+        self.intent = intent
+        self.overrideIntents = overrideIntents
+        self.intentSource = intentSource
     }
 
     /// Every field but `version` read with `decodeIfPresent`, so a record written by ANY earlier
@@ -87,6 +109,13 @@ struct ShootLook: Codable, Equatable {
         appliedAt = try c.decodeIfPresent(String.self, forKey: .appliedAt)
         lookId = try c.decodeIfPresent(String.self, forKey: .lookId)
         overrideLooks = try c.decodeIfPresent([String: String].self, forKey: .overrideLooks) ?? [:]
+        // `try?` rather than `try`: an intent is a convenience riding on the record, and one that
+        // no longer decodes (a field renamed in a later build) must cost the carry, not the shoot's
+        // whole look.
+        intent = (try? c.decodeIfPresent(ResultMatch.Intent.self, forKey: .intent)) ?? nil
+        overrideIntents = (try? c.decodeIfPresent([String: ResultMatch.Intent].self,
+                                                  forKey: .overrideIntents)) ?? [:]
+        intentSource = try c.decodeIfPresent(String.self, forKey: .intentSource)
     }
 
     func style(for photo: URL) -> String? {
@@ -102,6 +131,31 @@ struct ShootLook: Codable, Equatable {
         let key = photo.standardizedFileURL.path
         if overrides[key] != nil { return overrideLooks[key] }
         return style == nil ? nil : lookId
+    }
+
+    /// The hero's measured finish a photograph is carried into, or nil. Same precedence as
+    /// `lookId(for:)`, and like it, only ever carried together with a style.
+    func intent(for photo: URL) -> ResultMatch.Intent? {
+        let key = photo.standardizedFileURL.path
+        if overrides[key] != nil { return overrideIntents[key] }
+        return style == nil ? nil : intent
+    }
+
+    /// The record with `intent` attached to exactly the frames an apply over `scope` claimed —
+    /// written after the apply, because measuring the hero renders it twice and the record must
+    /// not wait on that. Pure, like `applying`, so the rule is testable without a window.
+    func attaching(_ intent: ResultMatch.Intent?, source: String?, to scope: [URL],
+                   inShootOf allPhotos: [URL]) -> ShootLook {
+        var next = self
+        let carried = intent.flatMap { $0.isNeutral ? nil : $0 }
+        if ShootLook.covers(scope, allPhotos) {
+            next.intent = carried
+            next.overrideIntents = [:]
+        } else {
+            for url in scope { next.overrideIntents[url.standardizedFileURL.path] = carried }
+        }
+        next.intentSource = carried == nil ? next.intentSource : source
+        return next
     }
 
     /// The record to write when `styleId` — with the creative look `lookId`, if any — is applied to
@@ -131,6 +185,11 @@ struct ShootLook: Codable, Equatable {
             next.lookId = lookId
             next.overrides = [:]
             next.overrideLooks = [:]
+            // A new apply is a new choice: the previous hero's adjustments do not survive it.
+            // `attaching` puts this apply's back, once they are measured.
+            next.intent = nil
+            next.overrideIntents = [:]
+            next.intentSource = nil
         } else {
             for url in scope {
                 let key = url.standardizedFileURL.path
@@ -138,6 +197,7 @@ struct ShootLook: Codable, Equatable {
                 // Written or REMOVED: an override re-applied without a look must not keep the look
                 // an earlier apply gave that frame.
                 next.overrideLooks[key] = lookId
+                next.overrideIntents[key] = nil
             }
         }
         return next
