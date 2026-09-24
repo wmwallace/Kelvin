@@ -32,7 +32,20 @@ public enum RecipeEngine {
     ///
     /// 0.7.3 (24 Sep 2026): a look's lift is held back from the light sources in frame — the
     /// `lights` mask (`lightsMask`, `LightsMask`). Frames with no light source are unchanged.
-    public static let version = "0.7.3"
+    ///
+    /// 0.7.4 (24 Sep 2026): a sky the recipe lifts into clipping is held down in the sky mask,
+    /// measured on the render (`SkyGuard`), so the foreground keeps its lift.
+    ///
+    /// 0.7.5 (24 Sep 2026): five fixes from a library-wide render audit, each behind a switch and
+    /// in `tuningSignature` (EVALUATION.md, "Five engine bugs from the render audit"):
+    ///   • the range stretch predicts the post-exposure range as the renderer makes it, so a pulled
+    ///     frame is no longer read as flat and its sky clipped (`KELVIN_STRETCH_LINEAR`);
+    ///   • metered skin no longer re-opens `exposure`'s leave-alone band, and a re-open only lifts
+    ///     (`KELVIN_SUBJECT_REOPEN`);
+    ///   • `SkyMask` refuses a warm region — a lit interior wall is not a sky (`KELVIN_SKY_WARM`);
+    ///   • the low-key exposure bound reads the brightest channel, not luma (`KELVIN_HEADROOM_CHANNEL`);
+    ///   • white balance leaves a frame alone whose greyest pixels read magenta (`KELVIN_WB_MAGENTA`).
+    public static let version = "0.7.5"
 
     /// Below this confidence the engine drops all *stylistic* moves (contrast shaping,
     /// vibrance, point placement) and keeps only *corrective* ones justified purely by

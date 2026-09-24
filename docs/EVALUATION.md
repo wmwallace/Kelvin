@@ -826,6 +826,114 @@ channel is 0.925), and any fire larger than 10% of the frame. Not run: the two �
 need a rebuild; both have frames lifted by exposure, so the mask can fire there, and that price is
 still to be taken.
 
+## Five engine bugs from the render audit (engine 0.7.5, 24 September 2026)
+
+A library-wide `look-audit` and a code audit found five rules that measured the wrong thing. Each
+is fixed behind its own switch (all in `tuningSignature`), so every number below is the same binary
+with the switch on and off. Instruments: `look-audit` on the 1200 px canvas route (flat = one
+channel ≥ 250 while another ≤ 150; face flat is inside Vision's face boxes); `kelvin-cli eval` on
+the 77 paired frames (Vision reads) and on a 132-entry degradation sample built from 22 finished
+frames (20 of the paired references plus two lavender frames); `sky-metrics` and `wb-probe`.
+
+| corpus, opener (engine-default) | 0.7.4 | 0.7.5 | each fix's margin (it alone switched off) |
+|---|---|---|---|
+| paired (77) | 7.24 | 7.33 | A +0.08 (3 frames), B +0.01, C/D/E 0 |
+| degradation sample (132) | 7.16 | 6.96 | A −0.08, B +0.02, C −0.01, E −0.01, D 0 |
+
+The margins do not sum to the degradation total (−0.20): A and B interact on the underexposed and
+overexposed arms. Every styled look moves with the opener on the pairs (+0.05…+0.07), the same ten
+frames. D cannot move either corpus by construction (every corpus frame has shadowMass ≤ 0.24).
+
+**A — the range stretch read a pulled frame as flat** (`KELVIN_STRETCH_LINEAR`). `RangeStretch`
+predicted the post-exposure white point as display × 2^EV; the renderer multiplies linear light. For
+`_DSC0378` (a hazy lake, white point 0.905, exposure −0.38) that predicted 0.70 where the render has
+0.80, so the stretch loaded against both caps (0.25…0.75) and clipped the sky flat cyan. Now
+decode → scale → encode, both directions — except a LIFT of a low-key frame, which keeps the
+display form's wider reading, ramped by the same `shadowMass` weight as the exposure bound (exact,
+it stretched the firelit `_DSC0477` on top of +0.81 EV: Vivid faces 0% → 16% flat). The exposure
+target and `highlightHeadroom` stay in display space ("Display space wins").
+
+| Natural | flat before → after | |
+|---|---|---|
+| `_DSC0378` | 15.3% → 2.5% (Vivid 10.7% → 0.0%) | range 0.25…0.75 → 0.25…0.87 |
+| `_DSC0380` | 8.1% → 0.0% | 0.13…0.82 → 0.03…0.99 |
+| `IMG_2144` | clip +0.43% → 0.00% | 0.21…0.75 → 0.24…0.81 |
+
+**The paired corpus's +0.08 is three pulled Cannon Beach frames** (`_DSC6873` +3.0, `_DSC6811`
++2.3, `_DSC6810` +0.3 ΔE): real range 0.69–0.72 after the pull, read by 0.7.4 as 0.59–0.60, and the
+stretch it no longer applies was putting back the brightness the pull took — the photographer's
+edits of that overcast are punchier. Nothing clipped in either arm. Accepted: the alternative is a
+rule that is right on those three by clipping skies elsewhere. Exact-for-pulls-only was also built:
+identical on the pairs, 0.07 worse on the degradation sample (`IMG_2354__underexposed` 2.05 → 8.56).
+
+**B — skin re-opened the whole-frame exposure band** (`KELVIN_SUBJECT_REOPEN`). `exposure()`
+let a subject 0.12 darker than the median re-open the 0.30–0.60 leave-alone band, and with a face in
+frame that subject luma is metered SKIN — so a correctly exposed darker-skinned person moved the
+whole picture (median 0.58 → −0.20 EV) and a lighter-skinned one did not: D20's mechanism on the
+whole frame. Now skin never re-opens it, a luma nobody vouched for is treated as skin, and a re-open
+only lifts. `DarkFrameExposureTests.testSkinToneDoesNotMoveTheWholeFrame` pins it through
+`candidate(…masks:)`. Paired: 7 frames move, 3 worse (`_DSC6832` +1.9, `IMG_2284` +1.1,
+`IMG_2296` +0.6), 4 better (up to −1.15). `=lift` (keep skin, only lift) measured 7.30, better, and
+was not shipped because it still lifts a dim frame harder for darker skin.
+⚠️ **Not yet wired for non-skin subjects:** `CandidateGeneration.candidate` calls
+`exposure(p, s, subjectLuma:)` without the flag it already receives, so every subject reads as
+"unknown" and no subject re-opens the band — `_DSC6832` (a sea stack) is that cost. Passing
+`subjectLumaIsSkin: subjectLumaIsSkin` there restores the re-open for silhouettes, animals and rocks.
+
+**C — a lit wall read as sky** (`KELVIN_SKY_WARM`). Since D27 the scene is always `.other`, so
+`SkyMask` alone decides "outdoors", and its overcast cue (bright, desaturated, smooth, touching the
+top edge) also describes a cream living-room wall: `_DSC3164` got a sky mask above the family's heads
+and Dramatic put −1.4 EV into it — a grey smudge on the wall, and the caption "with a deeper sky".
+A region whose score-weighted mean (R − B)/max exceeds 0.16 is now refused. Chosen from a gap:
+every outdoor region measured −0.79…+0.11 (warmest a Lincoln City evening), the three walls
+0.21–0.24; nothing else separated them. `sky-metrics`, same binary:
+
+| set | sky found, 0.7.4 | 0.7.5 |
+|---|---|---|
+| 60 outdoor frames with sky (Cannon Beach ×22, Sunriver ×13, Ocean Shores ×6, tulips ×4 incl. `_DSC5069`, wedding ×6, lake ×5, Lincoln City ×2, …) | 59 | 59 (every mask identical) |
+| 41 interiors (Thanksgiving, Sunriver, wedding reception, cats, Jacks Nana) | 10 | 7 |
+
+The seven left are windows — six blown Sunriver windows and a real sky through a reception window
+(`_DSC6332`) — which are the outdoors and keep the sky treatment. **Named, not fixed:** a daylit
+neutral wall or ceiling would still pass, and a frame with a strong warm cast loses its sky: 9 of the
+22 synthetic 4000 K casts (all scored better for it, −0.03…−0.52 ΔE).
+
+**D — the low-key bound read luma** (`KELVIN_HEADROOM_CHANNEL`). Firelight is saturated red, and
+luma reads a face whose red is at 0.95 as ~0.6, so the 0.7.1 bound still let `_DSC0495` take +0.48 EV.
+`ImageStatistics.channelWhitePoint` (p99.5 of max(R, G, B)) now sizes it — and the stretch obeys
+the same headroom, because without that `_DSC0500` got the lift back through the stretch (faces
+1.9% → 10.6% flat). Both ramped on `shadowMass` 0.30 → 0.45: no corpus frame can move. The firelit
+shoot, 49 frames × 8 looks, 0.7.4 → 0.7.5 (47 frames with faces):
+
+| look | mean face flat | frames > 5% |
+|---|---|---|
+| Natural | 0.63% → 0.06% | 2 → 0 |
+| Vivid | 1.89% → 0.84% | 5 → 3 |
+| Warm | 1.05% → 0.13% | 2 → 0 |
+| Dramatic | 1.14% → 0.23% | 2 → 0 |
+
+No (frame, look) got worse. `_DSC0495` Natural 17.8% → 0.0%, Warm 20.4% → 0.0%; `_DSC0494` Warm
+18.1% → 0.0%. The lifted frames render darker (they read as night), mean luma 0.239 → 0.235.
+
+**E — white balance corrected a frame with nothing grey in it** (`KELVIN_WB_MAGENTA`). On a
+lavender field the least-chromatic 15% is still flower, and it read as a magenta cast: `_DSC0294`
+a+8.5/b+4.4 → 4950 K / tint +16 on Vivid, acid-yellow stems. A light runs blue to amber (with a
+green excursion); none is magenta. So a gate reading more than 1.5× as magenta as it is blue-or-amber
+is scene, not light. `wb-probe` over 201 library JPEGs: the gate fired on 13; this takes out the 8
+lavender frames (a/|b| 1.9–2.7) and nothing else. 19 synthetic warm casts read a/|b| ≤ 0.59; the
+same cast over lavender reads 1.26 (`_DSC0294`, still corrected) and 2.07 (`_DSC0203`, not — +3.1
+ΔE, the price). The suggested rule, "the least-chromatic set is itself strongly chromatic", was
+measured and does not separate: its chroma is 9.4–14.3 on lavender and 4.6–17.4 on genuine casts;
+its coherence (|mean| / mean |c|) overlaps too (0.63–0.91 against 0.85–1.0). The paired corpus
+cannot see this at all — its gate never passes 5.0. By eye the stems go green-yellow and the bloom
+purple; the flat metric rises on `_DSC0203`/`_DSC0234` (up to 14.5% on Vivid), all of it the bloom's
+BLUE channel at 250 — the flower's own colour, which the warm shift had been suppressing. The
+engine's tint-sign test moved to a green (fluorescent) fixture: its old flat purple (a/|b| 1.56) is,
+by this rule, a scene.
+
+Across a 61-frame library sample (every 8th audited frame, all looks), 0.7.4 → 0.7.5: mean flat
+0.18% → 0.09%, the opener changed on no frame.
+
 ## A read that changes is not an edit that changes
 
 ⚠️ **Before blaming a prompt change for a quality complaint, measure whether it reached the
