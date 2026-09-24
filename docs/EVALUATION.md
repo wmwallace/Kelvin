@@ -741,6 +741,91 @@ The frames render darker (luma median 35 → 23 on `_DSC0507` Natural) and read 
 are untouched by construction: the bound is ramped on `shadowMass` from 0.30, and no corpus frame
 exceeds 0.24.
 
+## Light sources held as shot (engine 0.7.3, 24 September 2026)
+
+The firelit shoot again (`2023-07-29 Family at Jacks Parents`), after 0.7.1/0.7.2 fixed the faces:
+where a look still lifts a frame, the fire itself goes wrong. `_DSC0486` Natural (+0.43 EV) turns
+the flame's orange edge white and the glowing bed of rocks round it into posterised flat red;
+`look-audit --ablate` puts all of it on `exposure_ev` (flat 2.84% of the frame, 0.00% with the lift
+removed), and the global `highlights` guard was already at its −85 clamp. A global lever cannot
+hold back one region, so 0.7.3 adds a mask that does.
+
+**What it is.** `LightsMask` (in `LocalMasks.measure`, so the canvas, export, batch and iPhone all
+get it) finds small islands whose source MAX CHANNEL is ≥ 0.94 — luma misses a flame's orange edge
+— that are white-hot somewhere (luma ≥ 0.90), warm around them ((R − B)/max ≥ 0.20), ≤ 10% of the
+frame, outside any person (Vision person segmentation, hard exclusion — D20) and not touching the
+sky, plus bright cells (max ≥ 0.80) within ~3.5% of the short edge: the lit rocks. The engine emits
+a `lights` mask on every candidate whose exposure plus range stretch lifts the frame by ≥ 0.15 EV.
+The renderer composites it from the frame *as it entered exposure*, straight after highlight/shadow
+recovery: inside it, neither the lift nor the recovery sized for the lift applies; everything after
+(tone, colour, masks, detail) does. `KELVIN_PROTECT_LIGHTS=0` switches it off; it and every constant
+are in `tuningSignature`.
+
+**Three designs were built and looked at before this one.**
+
+1. *Pull `exposure_ev` back in the mask stage.* Dead on arrival: every tone stage clamps at 1.0
+   (`CIToneCurve` maps 1.23 to 1.0), so the flame is flat before a mask can see it.
+2. *Pull it back straight after exposure.* The lift is undone exactly, but the global recovery then
+   lands on an unlifted flame: `_DSC0486` Natural's light region went from 58.5% clipped as shot to
+   4.1% — a white flame rendered flat light grey with its orange edge gone. Hence "as shot": the
+   recovery is withheld too.
+3. *Also counter the style's `whites`/contrast.* It fired on every Vivid and Dramatic of unlifted
+   frames, and on a Lincoln City sunset (`20250618-_DSC5417`, Dramatic) the pull outran the S-curve
+   and dimmed the sun, 20.6% of its region clipped as shot → 4.6%. The look's own tone reaches the
+   light now; only exposure and the stretch (which lift the whole top end) summon the mask.
+
+Two false positives found by eye and closed by rule: a firelit forearm Vision's person segmentation
+missed (`_DSC0487`, `_DSC0488` — never white-hot, peak luma 0.73–0.77 against 0.96–1.00 for every
+flame), and overcast seen through branches on a campsite (Ocean Shores `_DSC6034`/`6043`, 2.75% of
+the frame held, rendering grey patches in a white sky — neutral, warmth −0.01 to 0.06). One engine
+bug found on the daytime sample and fixed: `IMG_1746` (Dog) has exposure −0.42 and a stretch, and a
+hold "as shot" undid the darkening (+0.38% clip on Vivid); the net lift now gates it and a darkening
+is carried into the mask.
+
+**Measured**, `look-audit` on the 1200 px canvas route, every look, ON against
+`KELVIN_PROTECT_LIGHTS=0` on the same binary. "Light region" is the lights bitmap ≥ 0.5, measured in
+both arms; flat = one channel ≥ 250 while another ≤ 150; added clip is against the neutral render.
+
+| set | frames (emitting) | (frame, look) pairs with the mask | whole-frame flat | added clip | light region clipped (as shot) | light region flat (as shot) | faces |
+|---|---|---|---|---|---|---|---|
+| firelit shoot | 38 (10) | 80 of 304 | 1.59% → **1.32%** | +0.41% → **+0.04%** | 46.5% → **34.4%** (40.2%) | 23.4% → **14.4%** (13.5%) | unchanged (clip 2.226% → 2.225%) |
+| daytime sample, 12 shoots | 60 (5) | 40 of 480 | 0.60% → **0.37%** | +0.23% → **−0.10%** | 37.6% → **16.0%** (11.0%) | 18.9% → **4.1%** (2.8%) | unchanged |
+| lamps, windows, sunsets, camping | 24 (1) | 8 of 192 | 1.44% → **1.33%** | +8.33% → **+7.75%** | 42.4% → **17.6%** (4.5%) | 8.7% → **4.0%** (2.5%) | (none in frame) |
+
+Every (frame, look) without the mask renders identically in both arms (the neutral no-op and the
+0.7.2 recipe both hold by construction). Curation and the opener changed on no frame of the 122.
+
+Per frame, Natural (the opener), light region clipped OFF → ON (as shot):
+
+| frame | lift | lights | region clipped | region flat | whole-frame flat |
+|---|---|---|---|---|---|
+| `_DSC0474` fire pit, wide | +0.56 | 0.41% | 61.1 → 43.8 (37.4) | 37.3 → 22.3 (16.3) | 1.20 → 1.00 |
+| `_DSC0475` | +0.53 | 1.14% | 62.3 → 36.6 (35.1) | 47.6 → 21.2 (19.3) | 1.98 → 1.20 |
+| `_DSC0482` close-up fire | +0.17 | 9.54% | 66.4 → 63.2 (62.9) | 19.2 → 15.2 (14.7) | 3.08 → 2.51 |
+| `_DSC0486` fire + rock bed | +0.43 | 3.34% | 58.2 → 54.7 (54.1) | 22.4 → 16.7 (15.7) | 2.84 → 2.46 |
+| `_DSC0497` marshmallow | +0.53 | 0.08% | 43.8 → 27.6 (21.4) | 33.0 → 20.8 (14.7) | 0.48 → 0.41 |
+| `_DSC4393` a tail light (San Juan) | +0.50 | 0.61% | 59.1 → 6.0 (4.2) | 49.4 → 16.9 (13.8) | 0.87 → 0.38 |
+| `_DSC3935` sunlit deck through a window (Sunriver) | +0.64 | 0.40% | 56.7 → 21.2 (19.2) | 27.3 → 0.3 (0.0) | 0.82 → 0.31 |
+
+Worst (frame, look) against OFF: `_DSC0482` Dramatic, +0.59% more of the frame clipped — the held
+flame no longer gets the −78 recovery and Dramatic's contrast whitens more of its core — and three
+Airy renders (`_DSC0482`/`0486`/`0483`) +0.13 to +0.41% flat, which is the flame's own orange coming
+back where Airy's recovery had washed it pastel: their light regions read 10.0–10.5% flat against
+14.7–16.1% as shot, and 0% clipped in both arms. By eye both read as fire rather than damage; the side-by-sides are in the session scratchpad.
+
+By eye (source | OFF | ON with a crop of the light, on `_DSC0482`, `0483`, `0474`, `0486`, `0487`,
+`0497`, `_DSC4393`, `_DSC2879`): the red fringe round every flame tongue and the posterised red rock
+bed are gone, the flame's edge is orange again, a tail light keeps its lens texture instead of going
+flat red; no edge or halo at the feather at 8, 20 or 40 (10 ships: one grid cell). Unchanged, and
+out of this mask's reach: firelit SKIN still goes flat red where a look lifts it (`_DSC0486`'s
+forearm), because a person is excluded by design.
+
+**Not covered, named:** a neutral bulb or a daylit window (the warm rule drops them; the global
+headroom guard is what they have), a warm-lit window with no white core (`_DSC0502`: its peak max
+channel is 0.925), and any fire larger than 10% of the frame. Not run: the two ΔE corpora, which
+need a rebuild; both have frames lifted by exposure, so the mask can fire there, and that price is
+still to be taken.
+
 ## A read that changes is not an edit that changes
 
 ⚠️ **Before blaming a prompt change for a quality complaint, measure whether it reached the

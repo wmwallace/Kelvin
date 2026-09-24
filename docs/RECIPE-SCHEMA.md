@@ -178,13 +178,15 @@ These are tests, not suggestions.
 5. **Order of operations is fixed and documented in code**, not implied by JSON key
    order. As implemented in `Renderer.render`:
 
-   heal → white balance → exposure → highlight/shadow → whites/blacks →
+   heal → white balance → exposure → highlight/shadow → **`lights` masks** → whites/blacks →
    range stretch (`range_low`/`range_high`) → contrast/saturation → dehaze → clarity →
    vibrance → luma curve → RGB curves → HSL → black & white → masks → detail → **geometry**.
 
-   One deliberate exception: when the recipe carries `black_and_white`, the RGB curves run
+   Two deliberate exceptions. When the recipe carries `black_and_white`, the RGB curves run
    *after* the conversion, where they tone the grey print (selenium, sepia) instead of
-   re-weighting which grey each colour becomes. Colour recipes are unaffected.
+   re-weighting which grey each colour becomes. Colour recipes are unaffected. And a mask of
+   type `lights` is composited straight after highlight/shadow recovery, wherever it sits in
+   `masks` — see the mask kinds below.
 
    Note geometry runs *last*, not first as an earlier draft of this doc said. Framing is
    layered on top of the edit, which buys a useful property: **mask coordinates are in
@@ -210,6 +212,14 @@ caller supplies for that `id`/`type`).
 | `radial`, `linear` | `shape` | `{kind, cx, cy, radius, angle, softness}` — a soft ellipse or a graduated edge. Normalised, top-left origin. |
 | `brush` | `stamps` | `[{x, y, radius, hardness}]` — the union of soft circular dabs along a stroke. A caller may supply a pre-baked stroke under the mask's `id` to avoid recompositing every frame; it must render identically. |
 | `color`, `luminance` | `selection` | `{kind, center, range, softness}` baked into a cube that keys hue or luma → white-where-selected. Near-grey pixels are excluded from a colour selection. |
+| `lights` | *(none)* | The light sources in frame (engine 0.7.3): small, white-hot, warm islands near clipping in the source, outside any person and any sky; caller supplies the bitmap (`LocalMasks` → `LightsMask`). **Rendered differently from every other kind:** its layer is the frame as it entered exposure, composited straight after highlight/shadow recovery — so inside it neither the global `exposure_ev` nor the global recovery applies, and its own `adjustments` are relative to the frame *as shot* (empty = as shot). Everything after that stage (tone, colour, detail) reaches it like anywhere else. |
+
+**`lights` is an additive value of `type`, not a new field** (engine 0.7.3, 24 September 2026).
+No existing recipe contains one, so nothing on disk changes meaning. A build older than 0.7.3
+reading a recipe that does contain one finds no bitmap for it and skips it — the rule for any
+mask it cannot resolve — so it renders the edit without the protection, which is exactly what
+that build would have produced for the photograph itself. The one semantic novelty is the render
+stage above, and it is confined to masks of this type.
 
 `heal` sits outside `masks`: a list of `{x, y, radius, dx, dy, feather}` spots, each patched
 from `(dx, dy)` away. Non-generative and applied first, so downstream tone treats the

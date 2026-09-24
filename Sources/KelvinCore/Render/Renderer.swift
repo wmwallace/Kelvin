@@ -4,11 +4,13 @@ import CoreImage
 /// Render: buffer + recipe → buffer. Pure. No I/O, no UI, no model (ARCHITECTURE.md).
 ///
 /// Applies, in this order: heal → white balance → exposure fusion → exposure → highlight/shadow →
-/// whites/blacks → range stretch → contrast/saturation → dehaze → clarity → vibrance → luma curve
-/// → per-channel RGB curves (colour grade) → per-colour HSL → black & white → masked local
-/// adjustments → detail (NR + sharpen) → geometry (straighten + crop). Every schema field is now rendered. One exception,
-/// deliberate: on a recipe with a black-and-white conversion, the per-channel curves run AFTER
-/// the conversion, where they tone the print instead of re-weighting it.
+/// light sources held as shot (`lights` masks) → whites/blacks → range stretch →
+/// contrast/saturation → dehaze → clarity → vibrance → luma curve → per-channel RGB curves (colour
+/// grade) → per-colour HSL → black & white → masked local adjustments → detail (NR + sharpen) →
+/// geometry (straighten + crop). Every schema field is now rendered. Two exceptions, deliberate:
+/// on a recipe with a black-and-white conversion, the per-channel curves run AFTER the conversion,
+/// where they tone the print instead of re-weighting it; and a `lights` mask is composited at the
+/// exposure stage, not with the other masks (see `render`).
 ///
 /// Load-bearing property: a field at its neutral value contributes NO filter to the chain, so
 /// a fully-neutral recipe returns the input image unchanged — "neutral is a byte-identical
@@ -71,6 +73,15 @@ public enum Renderer {
             img = ExposureFusion.fuse(img, strength: g.fusion / 100.0)
         }
 
+        // The frame as it enters the exposure-and-recovery stage — kept only when a `lights` mask
+        // will need it (see below), so every other recipe builds exactly the graph it always did.
+        let held = (recipe.masks ?? []).compactMap { mask -> (Mask, CIImage)? in
+            guard mask.type == LightsMask.maskType, mask.opacity > 0,
+                  let bitmap = maskBitmaps[mask.id] ?? maskBitmaps[mask.type] else { return nil }
+            return (mask, bitmap)
+        }
+        let enteringExposure = img
+
         // Exposure (EV).
         if g.exposureEV != 0 {
             img = img.applyingFilter("CIExposureAdjust", parameters: [
@@ -94,6 +105,38 @@ public enum Renderer {
                 "inputHighlightAmount": 1.0 + (min(0, g.highlights) / 100.0),
                 "inputShadowAmount": g.shadows / 100.0
             ])
+        }
+
+        // LIGHT SOURCES, HELD AS SHOT — the one mask kind composited here rather than in the mask
+        // stage at the end, wherever it sits in `masks`, and the one whose layer is built from the
+        // frame as it ENTERED exposure rather than from the running image.
+        //
+        // A `lights` mask says "the lift does not reach this flame or lamp"
+        // (`RecipeEngine.lightsMask`). Two things make that impossible anywhere else:
+        //
+        //   • In the mask stage it is too late. Every tone stage between here and there — the
+        //     endpoint and lift curves, the range stretch's clamp, the colour cubes — clamps at 1.0
+        //     (measured: `CIToneCurve` maps an input of 1.23 to 1.0), so a flame lifted past white
+        //     arrives flat, and a pull applied to flat white only makes flat grey.
+        //   • Cancelling the lift with an opposite `exposure_ev` straight after exposure is not
+        //     enough either, and this was built first and looked at. The global `highlights`
+        //     recovery is sized for the LIFTED frame (`RecipeEngine.highlightHeadroom` buys back
+        //     the lift's overshoot), so a flame un-lifted and then recovered by −85 came out a flat
+        //     light grey with its orange edge gone: `_DSC0486` Natural, 58.5% of the light region
+        //     clipped in the source and 4.1% after — a white flame rendered as a grey one.
+        //
+        // So inside the region, exposure AND recovery are both the camera's: the layer is the frame
+        // as it entered this stage, and the mask's own adjustments are edits relative to THAT —
+        // an empty `adjustments` means "as shot". The feather blends it into the lifted frame
+        // around it. Everything after this point (tone, colour, masks, detail) applies to the
+        // region like anywhere else, so the look still reaches the light; only the lift does not.
+        //
+        // An older build reading a recipe with a `lights` mask has no bitmap for it and skips it
+        // (its rule for any mask it cannot resolve), so the protection degrades to 0.7.2's render
+        // and nothing worse. No mask of this type builds no filter: neutral is still a
+        // byte-identical no-op.
+        for (mask, bitmap) in held {
+            img = applyMaskedAdjustments(img, mask: mask, maskBitmap: bitmap, layerFrom: enteringExposure)
         }
 
         // ---- DISPLAY-REFERRED TONE STAGE ----
@@ -330,7 +373,8 @@ public enum Renderer {
         // Masked local adjustments (schema order: … HSL → masks). Applied only when the caller
         // supplied the mask bitmap for that mask.
         for mask in recipe.masks ?? [] {
-            guard mask.opacity > 0 else { continue }
+            // `lights` masks were applied at the exposure stage (see there), and only there.
+            guard mask.opacity > 0, mask.type != LightsMask.maskType else { continue }
             // Parametric masks (colour/luma selection, brush stamps, gradients) generate their own
             // bitmap here; segmentation masks (subject/sky) use the bitmap the caller supplied.
             // ONE PRIMITIVE: a region, from a source, optionally narrowed by a refinement.
@@ -561,9 +605,13 @@ public enum Renderer {
     }
 
     /// Composite a locally-adjusted layer over `base` through a feathered mask.
-    static func applyMaskedAdjustments(_ base: CIImage, mask: Mask, maskBitmap: CIImage) -> CIImage {
+    /// - Parameter layerFrom: the image the masked layer is BUILT from, when that is not `base` —
+    ///   a `lights` mask builds its layer from the frame as it entered exposure and composites it
+    ///   over the recovered frame (see `render`). Nil for every other mask: the layer is `base`.
+    static func applyMaskedAdjustments(_ base: CIImage, mask: Mask, maskBitmap: CIImage,
+                                       layerFrom: CIImage? = nil) -> CIImage {
         let a = mask.adjustments
-        var layer = base
+        var layer = layerFrom ?? base
         if let ev = a["exposure_ev"], ev != 0 {
             layer = layer.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: ev])
         }
@@ -643,7 +691,7 @@ public enum Renderer {
                 // handful left, so metering the prepared mask would return nil and fall back to
                 // 0.5 for every mask under about 40% strength.
                 let metered = mask.invert ? maskBitmap.applyingFilter("CIColorInvert") : maskBitmap
-                let pivot = SubjectMask.maskedMeanLuma(image: base, mask: metered) ?? 0.5
+                let pivot = SubjectMask.maskedMeanLuma(image: layerFrom ?? base, mask: metered) ?? 0.5
                 pivotShift = (gain - 1.0) * (0.5 - pivot)
             }
             layer = layer

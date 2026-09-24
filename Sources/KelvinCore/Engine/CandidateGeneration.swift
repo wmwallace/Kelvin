@@ -32,14 +32,16 @@ public extension RecipeEngine {
         perceptionHash: String? = nil,
         generatedAt: String? = nil,
         subjectLumaIsSkin: Bool = false,
-        focus: FocusMeasure.Reading? = nil
+        focus: FocusMeasure.Reading? = nil,
+        lightsCoverage: Double? = nil
     ) -> [Recipe] {
         CandidateStyle.all.map { style in
             candidate(
                 perception: p, statistics: s, style: style,
                 subjectLuma: subjectLuma, skyLuma: skyLuma, subjectOrigin: subjectOrigin, iso: iso,
                 engineVersion: engineVersion, perceptionHash: perceptionHash,
-                generatedAt: generatedAt, subjectLumaIsSkin: subjectLumaIsSkin, focus: focus
+                generatedAt: generatedAt, subjectLumaIsSkin: subjectLumaIsSkin, focus: focus,
+                lightsCoverage: lightsCoverage
             )
         }
     }
@@ -57,7 +59,8 @@ public extension RecipeEngine {
         perceptionHash: String? = nil,
         generatedAt: String? = nil,
         subjectLumaIsSkin: Bool = false,
-        focus: FocusMeasure.Reading? = nil
+        focus: FocusMeasure.Reading? = nil,
+        lightsCoverage: Double? = nil
     ) -> Recipe {
         var g = GlobalAdjustments.neutral
 
@@ -145,6 +148,18 @@ public extension RecipeEngine {
         // too — a corrective style lifts less, and should therefore buy back less.
         g.highlights = roundedClamp(g.highlights + highlightHeadroom(g, s), to: -85...0, step: 1)
 
+        // The subject lift is corrective and shared; the SKY carries the style's opinion. It
+        // used to be shared too, which meant Dramatic and Soft emitted the same sky mask.
+        var masks = localMasks(p, s, subjectLuma: subjectLuma, skyLuma: skyLuma,
+                               subjectOrigin: subjectOrigin, style: style,
+                               subjectLumaIsSkin: subjectLumaIsSkin) ?? []
+        // LAST OF ALL, for the same reason as the highlight guard above: the light-source mask is
+        // sized from what this candidate's finished globals do to the top of the range, so it can
+        // only be decided once they are. Appended after subject and sky — the renderer applies it
+        // at the exposure stage regardless of position (see `Renderer.render`), and it never
+        // overlaps a person or the sky: `LightsMask` multiplies both out of it.
+        if let lights = lightsMask(g, lightsCoverage: lightsCoverage) { masks.append(lights) }
+
         return Recipe(
             schemaVersion: Recipe.currentSchemaVersion,
             id: style.id,
@@ -158,11 +173,7 @@ public extension RecipeEngine {
             global: g,
             curve: curve,
             hsl: memoryColorHSL(p),
-            // The subject lift is corrective and shared; the SKY carries the style's opinion. It
-            // used to be shared too, which meant Dramatic and Soft emitted the same sky mask.
-            masks: localMasks(p, s, subjectLuma: subjectLuma, skyLuma: skyLuma,
-                              subjectOrigin: subjectOrigin, style: style,
-                              subjectLumaIsSkin: subjectLumaIsSkin),
+            masks: masks.isEmpty ? nil : masks,
             detail: detail(p, iso: iso),
             geometry: nil
         )
