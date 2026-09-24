@@ -407,7 +407,11 @@ struct MediaCache: Sendable {
     ///
     /// Raw readings only; no `concerns` field, by design — see `verdict(for:)`.
     private struct StoredVerdict: Codable {
-        static let currentVersion = 1
+        /// 2 (24 Sep 2026): `channelWhitePoint` and `neutralSetChroma` joined `ImageStatistics` (engine
+        /// 0.7.5) and were not stored, so a cached verdict came back with the first reset to the luma
+        /// white point and the second recomputed from the wrong pixels — caught by
+        /// `testAStoredVerdictRoundTripsExactly`. A version-1 entry is a miss and is re-derived.
+        static let currentVersion = 2
         var version = currentVersion
 
         // FocusMeasure.Reading
@@ -437,6 +441,8 @@ struct MediaCache: Sendable {
         var neutralChromaB: Double
         var edgeChromaA: Double
         var edgeChromaB: Double
+        var channelWhitePoint: Double
+        var neutralSetChroma: Double
 
         init(_ verdict: PhotoTriage.Verdict) {
             acuity = verdict.focus.acuity
@@ -461,6 +467,8 @@ struct MediaCache: Sendable {
             neutralChromaB = s.neutralChromaB
             edgeChromaA = s.edgeChromaA
             edgeChromaB = s.edgeChromaB
+            channelWhitePoint = s.channelWhitePoint
+            neutralSetChroma = s.neutralSetChroma
         }
 
         var verdict: PhotoTriage.Verdict {
@@ -472,7 +480,8 @@ struct MediaCache: Sendable {
                 shadowMass: shadowMass, shadowRegion: shadowRegion,
                 saturationClip: saturationClip,
                 neutralChromaA: neutralChromaA, neutralChromaB: neutralChromaB,
-                edgeChromaA: edgeChromaA, edgeChromaB: edgeChromaB)
+                edgeChromaA: edgeChromaA, edgeChromaB: edgeChromaB,
+                channelWhitePoint: channelWhitePoint, neutralSetChroma: neutralSetChroma)
             let focus = FocusMeasure.Reading(acuity: acuity, measurable: measurable)
             let signature = PhotoTriage.Signature(bits: signatureBits,
                                                   contrast: signatureContrast)
