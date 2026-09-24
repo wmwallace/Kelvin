@@ -212,11 +212,12 @@ public enum ShippedCandidates {
         generatedAt: String? = nil,
         opening: OpeningRule.Configuration? = nil,
         premeasured: Premeasured? = nil,
-        options: Options = .instrument
+        options: Options = .instrument,
+        mattes: CameraMattes.Found? = nil
     ) throws -> Composition {
         let measureOn = premeasured?.measuredOn ?? PerceptionProxy.downsample(image)
         let stats = try premeasured?.statistics ?? ImageStatistics.compute(measureOn)
-        let masks = premeasured?.masks ?? LocalMasks.measure(in: measureOn)
+        let masks = premeasured?.masks ?? LocalMasks.measure(in: measureOn, mattes: mattes)
         let focus = premeasured.map { $0.focus } ?? FocusMeasure.engineReading(for: measureOn)
 
         let recipes = RecipeEngine.candidates(
@@ -316,9 +317,10 @@ public enum ShippedCandidates {
     /// when rendering several recipes onto the same frame — measuring is the expensive half
     /// (2.7 s on a 60 MP frame) and it does not depend on the recipe.
     public static func deliver(_ recipe: Recipe, on image: CIImage,
-                              masks: [String: CIImage]? = nil) -> CIImage {
+                              masks: [String: CIImage]? = nil,
+                              mattes: CameraMattes.Found? = nil) -> CIImage {
         let bitmaps = masks ?? (recipe.masks?.isEmpty == false
-                                ? LocalMasks.measureForDelivery(in: image)
+                                ? LocalMasks.measureForDelivery(in: image, mattes: mattes)
                                 : [:])
         return Renderer.render(image, with: recipe, maskBitmaps: bitmaps)
     }

@@ -89,8 +89,11 @@ enum Pipeline {
 
         await onStage("Making four looks")
         let iso = decoded.2
+        // The masks the iPhone made when it took the photo (`CameraMattes`), used instead of
+        // detecting them where present — a quarter of iPhone photographs carry a sky matte.
         let composition = try await Lane.render.run { () throws -> ComposedBox in
-            ComposedBox(try ShippedCandidates.compose(for: canvas, perception: perception, iso: iso))
+            ComposedBox(try ShippedCandidates.compose(for: canvas, perception: perception, iso: iso,
+                                                      mattes: CameraMattes.read(from: url)))
         }.value
 
         // The picker's looks, rendered at canvas size WITH the masks — a look shown without its
@@ -145,7 +148,8 @@ enum Pipeline {
         let perception = try await VisionPerceptionProvider().perceive(proxy)
         let composed = try await Lane.render.run { () throws -> ComposedBox in
             ComposedBox(try ShippedCandidates.compose(for: proxy, perception: perception, iso: iso,
-                                                      requestedStyleID: styleID))
+                                                      requestedStyleID: styleID,
+                                                      mattes: CameraMattes.read(from: url)))
         }.value
         guard let recipe = composed.chosen?.recipe else { throw PipelineError.render }
         guard let intent, !intent.isNeutral else { return recipe }
@@ -185,7 +189,7 @@ enum Pipeline {
                 .appendingPathExtension("heic")
             // With the RAW's own headroom as the HEIC's gain map when there is any (D28) — the
             // Photos app shows it as HDR, and every other viewer sees the edit exactly as chosen.
-            let sdr = ShippedCandidates.deliver(recipe, on: full)
+            let sdr = ShippedCandidates.deliver(recipe, on: full, mattes: CameraMattes.read(from: source))
             try ImageWriter.write(sdr, to: out, format: .heic(quality: 0.92), metadata: .asShot,
                                   colorSpace: .displayP3,
                                   hdr: HDRDelivery.companion(forEdit: sdr, from: source))
