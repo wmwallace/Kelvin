@@ -50,6 +50,7 @@ func printUsage() {
       \(tool) look-audit --in <image> [--perception <p.json>] | --list <frames.tsv>
                      [--out <audit.jsonl>] [--edge <n>] [--dump-dir <dir>] [--looks <id,id,…>]
                      [--ablate]
+      \(tool) look-gate --baseline <audit.jsonl> --current <audit.jsonl>
       \(tool) fix-probe --in <image> [--recipe <recipe.json>] [--perception <p.json>]
       \(tool) match-probe --corpus <paired corpus> [--heroes <n>] [--out <rows.jsonl>]
                      [--dump-dir <dir>]
@@ -3748,6 +3749,11 @@ case "look-audit":
     } catch {
         fail("\(error)")
     }
+
+case "look-gate":
+    // The release gate: two `look-audit --out` runs over the same frames, and a failure when a look
+    // someone would see got visibly worse. See `LookGate` and scripts/look-gate.sh.
+    exit(LookGate.run(arguments: Array(arguments.dropFirst())))
 
 default:
     fail("unknown subcommand '\(subcommand)'. Try `\(tool) --help`.")
