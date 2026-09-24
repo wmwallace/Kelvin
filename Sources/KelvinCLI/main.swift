@@ -352,6 +352,13 @@ case "candidates":
             print("dropped: " + composed.droppedStyleIDs.joined(separator: ", "))
         }
         print("opens in: " + (composed.chosen?.recipe.label ?? "nothing"))
+        // The picker's captions, word for word — the sentence the app shows and VoiceOver reads.
+        let naturalRecipe = composed.candidate(styleID: CandidateStyle.natural.id)?.recipe ?? .neutral
+        let subjectNoun = CandidateDescription.subjectNoun(for: perception.subject)
+        for item in composed.curated {
+            print("  \(item.recipe.label ?? "?"): " + CandidateDescription.sentence(
+                for: item.recipe, relativeTo: naturalRecipe, subject: subjectNoun))
+        }
 
         let labels = composed.all.map { $0.recipe.label ?? "?" }.joined(separator: ", ")
         let sky = composed.masks.skyLuma.map { String(format: "sky luma %.2f", $0) } ?? "no sky"
@@ -3305,6 +3312,10 @@ case "look-audit":
                 let curated = Set(composed.curatedStyleIDs)
                 let culled = Set(composed.culledStyleIDs)
                 let opener = composed.chosen?.recipe.id
+                // The picker's caption for each look, against the same reference the app uses.
+                let naturalRecipe = composed.candidate(styleID: CandidateStyle.natural.id)?.recipe
+                    ?? .neutral
+                let subjectNoun = CandidateDescription.subjectNoun(for: perception.subject)
                 print("\(url.lastPathComponent) · \(perception.scene.rawValue)"
                       + " · subject \(perception.subject.present ? perception.subject.type.rawValue : "-")"
                       + " · \(faces.count) face(s) · curated \(composed.curatedStyleIDs.joined(separator: ","))"
@@ -3317,8 +3328,11 @@ case "look-audit":
                     let d = damage(try pixels(rendered, over: extent), source: source, face: faceMask)
                     let flags = redFlags(recipe)
                     let tag = (look == opener ? "OPEN" : curated.contains(look) ? "shown" : "     ")
+                    let caption = CandidateDescription.sentence(for: recipe, relativeTo: naturalRecipe,
+                                                                subject: subjectNoun)
                     print("  \(look.padding(toLength: 8, withPad: " ", startingAt: 0)) \(tag) \(d.line)"
                           + (flags.isEmpty ? "" : " ⚑ " + flags.joined(separator: ", ")))
+                    print("           “\(caption)”")
                     if let dumpDir {
                         try ImageWriter.write(rendered.cropped(to: extent),
                                               to: dumpDir.appendingPathComponent("\(stem)-\(look).jpg"),
@@ -3326,7 +3340,7 @@ case "look-audit":
                     }
                     var row: [String: Any] = [
                         "path": url.path, "look": look, "curated": curated.contains(look),
-                        "opener": look == opener, "culled": culled.contains(look),
+                        "opener": look == opener, "culled": culled.contains(look), "caption": caption,
                         "score": candidate.score.overall,
                         "issues": candidate.score.issues.map(\.rawValue),
                         "scene": perception.scene.rawValue,

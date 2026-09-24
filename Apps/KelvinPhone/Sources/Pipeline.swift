@@ -106,10 +106,14 @@ enum Pipeline {
         }
         let original = try await Lane.render.run { Image(image: try cgImage(canvas)) }
 
+        // The subject is named from the read's closed vocabulary ("the people", "the animal"),
+        // never its free-text label — see `CandidateDescription.subjectNoun`.
+        let subject = CandidateDescription.subjectNoun(for: perception.subject)
         let looks = rendered.map { r in
             Composed.Look(id: r.recipe.id ?? UUID().uuidString,
                           name: r.recipe.label ?? "Look",
-                          description: CandidateDescription.sentence(for: r.recipe, relativeTo: natural),
+                          description: CandidateDescription.sentence(for: r.recipe, relativeTo: natural,
+                                                                     subject: subject),
                           recipe: r.recipe, preview: r.image)
         }
         return Composed(looks: looks,
