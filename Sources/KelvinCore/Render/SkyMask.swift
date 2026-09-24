@@ -67,6 +67,23 @@ public enum SkyMask {
     static let brightRamp = ProcessInfo.processInfo.environment["KELVIN_SKY_RAMP"]
         .flatMap(Double.init).map { min(0.6, max(0.05, $0)) } ?? 0.20
 
+    /// The warmest a found region may be, on average, and still be called sky: mean (R − B) / max
+    /// over its cells, weighted by their score. `KELVIN_SKY_WARM`; 1 switches the gate off.
+    ///
+    /// **0.16, from a gap, not a sweep.** Since D27 the scene is always `.other`, so nothing but
+    /// this file decides whether a frame is outdoors, and the bright-and-desaturated overcast cue
+    /// also describes a lit interior wall. On `_DSC3164` (Thanksgiving, a living room) it found a
+    /// "sky" in the cream wall above the family's heads, and Dramatic put −1.4 EV into it. Measured
+    /// with `sky-metrics --dump-dir` over 60 outdoor frames with sky (Cannon Beach, Sunriver, Ocean
+    /// Shores, tulips, the wedding, a lake, Lincoln City) and 41 interiors: every outdoor region
+    /// reads −0.79…+0.11 (the warmest a Lincoln City evening sky), the three living-room walls
+    /// 0.21…0.24. Nothing else separated them — the walls touch the top edge, are smooth, and sit
+    /// as far above their frame's median as a sky does. A wall lit by the room's own light is warm;
+    /// a sky is lit by the sky. Not caught, named: a daylit white wall or ceiling (neutral), and a
+    /// window, which is the outdoors and keeps the sky treatment.
+    static let warmCeiling = ProcessInfo.processInfo.environment["KELVIN_SKY_WARM"]
+        .flatMap(Double.init).map { min(1.0, max(0.0, $0)) } ?? 0.16
+
     /// Grayscale sky mask (white = sky) at `image`'s extent, or nil when the frame holds little
     /// or no sky (coverage below `coverageFloor`, 0…1 fraction of the frame).
     public static func detect(in image: CIImage, coverageFloor: Double = 0.015) -> CIImage? {
@@ -81,6 +98,7 @@ public enum SkyMask {
 
         var luma = [Double](repeating: 0, count: gw * gh)
         var colour = [Double](repeating: 0, count: gw * gh)
+        var warmth = [Double](repeating: 0, count: gw * gh)
         data.withUnsafeBytes { rp in
             let px = rp.bindMemory(to: UInt8.self)
             for i in 0..<(gw * gh) {
@@ -89,6 +107,7 @@ public enum SkyMask {
                 luma[i] = l
                 let maxc = max(r, g, b), minc = min(r, g, b)
                 let sat = maxc <= 0 ? 0 : (maxc - minc) / maxc
+                warmth[i] = maxc <= 0 ? 0 : (r - b) / maxc
                 // Clear sky: blue leads the other channels and the pixel is at least mid-bright.
                 let blue = l > 0.30 ? min(1, max(0, (b - max(r, g)) * 3.0)) : 0
                 // Overcast / hazy sky: bright and desaturated. Ramp brightness in from
@@ -137,11 +156,16 @@ public enum SkyMask {
                 if !keep[ni] && skyish(ni) { keep[ni] = true; stack.append(ni) }
             }
         }
-        var coverage = 0.0
+        var coverage = 0.0, warm = 0.0
         for i in 0..<(gw * gh) {
-            if keep[i] { coverage += Double(score[i]) / 255 } else { score[i] = 0 }
+            if keep[i] {
+                coverage += Double(score[i]) / 255
+                warm += warmth[i] * Double(score[i]) / 255
+            } else { score[i] = 0 }
         }
         guard coverage / Double(gw * gh) >= coverageFloor else { return nil }
+        // A warm region is a lit wall, not a sky. See `warmCeiling`.
+        guard warm / coverage <= warmCeiling else { return nil }
 
         // Deliver through a one-component pixel buffer (row r → row r), matching how Vision hands
         // back the subject mask, so the scale-and-align below needs no vertical flip.
