@@ -3615,6 +3615,9 @@ final class AppState {
             let curated = composition.curated
             let naturalRecipe = recipes.first { $0.id == CandidateStyle.natural.id }
                 ?? curated.first?.recipe ?? .neutral
+            // Named from the read's closed vocabulary, never its free-text label — see
+            // `CandidateDescription.subjectNoun`.
+            let subjectNoun = CandidateDescription.subjectNoun(for: perceptionForCompose.subject)
             self.candidates = curated.compactMap { item in
                 let key = item.recipe.id ?? ""
                 guard let image = previews[key] else { return nil }
@@ -3623,7 +3626,8 @@ final class AppState {
                     label: item.recipe.label ?? key,
                     baseRecipe: item.recipe,
                     previewImage: image,
-                    summary: CandidateDescription.sentence(for: item.recipe, relativeTo: naturalRecipe))
+                    summary: CandidateDescription.sentence(for: item.recipe, relativeTo: naturalRecipe,
+                                                           subject: subjectNoun))
             }
             let models = self.candidates
             // This is what makes applying a look to a folder mean anything: the style was chosen
