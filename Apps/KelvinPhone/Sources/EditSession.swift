@@ -181,14 +181,25 @@ final class EditSession {
     ///
     /// Each photo is resolved on its own (`Pipeline.resolve`): the look is the same, the exposure and
     /// white balance under it are that frame's, so a frame shot into the sun and the next one shot
-    /// away from it both come out as "Soft" rather than as copies of the first frame's sliders. The
-    /// adjustments ride on top as offsets, as they do on the photo you chose them on. Each result is
-    /// saved to Photos as a new photo; originals are never touched.
+    /// away from it both come out as "Soft" rather than as copies of the first frame's sliders. Each
+    /// result is saved to Photos as a new photo; originals are never touched.
+    ///
+    /// The adjustments are carried as what they DID (`ResultMatch`), not as offsets. They used to
+    /// ride on top as `LookAdjustments` — "+0.3 EV, +8 mired" added to every frame — which is the
+    /// slider copying the whole design refuses (D13), and it showed: the same +0.3 EV that lifted a
+    /// dark hero pushed an already-bright frame into clipping. Now the hero's change is measured
+    /// once on its canvas and each frame's own levers are solved to make the same change (D29).
     func apply(to items: [PhotosPickerItem]) {
         guard let look = selectedLook, !items.isEmpty, batch == nil else { return }
-        let style = look.id, adjustments = self.adjustments, name = look.name
+        let style = look.id, name = look.name
+        let finished = selectedRecipe, composed = self.composed
         batchTask = Task { [weak self] in
             guard let self else { return }
+            // Measured once, on the hero, before any other photograph is touched.
+            var intent: ResultMatch.Intent?
+            if let finished, let composed, !self.adjustments.isNeutral {
+                intent = try? await Pipeline.intent(of: finished, over: look.recipe, in: composed)
+            }
             let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
             guard status == .authorized || status == .limited else {
                 self.notice = "To save, allow \(Branding.displayName) to add photos in Settings"
@@ -202,13 +213,16 @@ final class EditSession {
                     guard let picked = try await item.loadTransferable(type: PickedPhoto.self) else {
                         throw OpenError.unreadable
                     }
-                    let recipe = adjustments.applied(to: try await Pipeline.resolve(style: style, on: picked.url))
+                    let recipe = try await Pipeline.resolve(style: style, on: picked.url, matching: intent)
                     let file = try await Pipeline.export(recipe, from: picked.url)
                     try await Self.addToLibrary(file)
                     try? FileManager.default.removeItem(at: file)
                     try? FileManager.default.removeItem(at: picked.url)
+                    // The style only. The hero's adjustments were solved into THIS frame's own
+                    // numbers above; filing them here as offsets would reapply the hero's sliders
+                    // the next time this photograph is opened.
                     if let key = item.itemIdentifier {
-                        PhoneEditStore.save(PhoneEdit(styleId: style, adjustments: adjustments), for: key)
+                        PhoneEditStore.save(PhoneEdit(styleId: style, adjustments: LookAdjustments()), for: key)
                     }
                     saved += 1
                 } catch {

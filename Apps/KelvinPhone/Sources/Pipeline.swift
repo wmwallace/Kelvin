@@ -130,7 +130,13 @@ enum Pipeline {
     /// style requested, the way the Mac's batch adapts a shoot look — the style is held, the
     /// corrective baseline underneath it is this frame's own. If the curator drops the style for
     /// this frame, its fallback is what comes back — the same rule the Mac's export follows.
-    static func resolve(style styleID: String, on url: URL) async throws -> Recipe {
+    ///
+    /// `matching`, when there is one, is the hero photograph's finish measured as a result
+    /// (`ResultMatch`): this frame's own levers are then solved to make the same change here. That
+    /// is what "a bit brighter" on the photo you chose it on has to mean on the next one — the same
+    /// visible change, not the same slider, which on a darker or brighter frame is a different one.
+    static func resolve(style styleID: String, on url: URL,
+                        matching intent: ResultMatch.Intent? = nil) async throws -> Recipe {
         let decoded = try await Lane.decode.run { () throws -> (Pixels, Double?) in
             let full = try ImageDecoder.decode(url: url)
             return (Pixels(image: try materialise(PerceptionProxy.downsample(full))), ExifReader.iso(url: url))
@@ -142,7 +148,22 @@ enum Pipeline {
                                                       requestedStyleID: styleID))
         }.value
         guard let recipe = composed.chosen?.recipe else { throw PipelineError.render }
-        return recipe
+        guard let intent, !intent.isNeutral else { return recipe }
+        let masks = composed.masks.bitmaps
+        return try await Lane.render.run {
+            ResultMatch.apply(intent, to: recipe, proxy: proxy, maskBitmaps: masks)
+        }
+    }
+
+    /// What the adjustments on the open photograph DID, measured on its canvas: the chosen look as
+    /// the engine made it against the look as it will be saved. Nil when there is nothing to carry.
+    static func intent(of finished: Recipe, over look: Recipe, in composed: Composed) async throws -> ResultMatch.Intent? {
+        let canvas = composed.canvas, masks = composed.canvasMasks
+        let intent = try await Lane.render.run {
+            IntentBox(value: ResultMatch.intent(proxy: canvas, baseline: look, finished: finished,
+                                                maskBitmaps: masks))
+        }.value
+        return intent.flatMap { $0.isNeutral ? nil : $0 }
     }
 
     /// One look, re-rendered on the canvas with adjustments on top. On the render lane.
@@ -178,6 +199,7 @@ enum Pipeline {
         let value: ShippedCandidates.Composition
         init(_ v: ShippedCandidates.Composition) { value = v }
     }
+    private struct IntentBox: Sendable { let value: ResultMatch.Intent? }
     private struct RenderedLook: @unchecked Sendable { let recipe: Recipe; let image: CGImage }
     private struct Image: @unchecked Sendable { let image: CGImage }
 
