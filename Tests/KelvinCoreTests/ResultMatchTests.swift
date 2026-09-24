@@ -139,3 +139,23 @@ final class ResultMatchTests: XCTestCase {
         XCTAssertEqual(back, i)
     }
 }
+
+extension ResultMatchTests {
+    /// A carried creative look is measured through, not solved against: the style's levers move so
+    /// that style + look shows the hero's change, and the look itself is left to the caller.
+    func testTheFinishIsSeenButNotSolvedInto() {
+        var intent = ResultMatch.Intent()
+        intent.lightness = 5
+        let frame = TestSupport.pixels(size: 160) { x, y in
+            let v = UInt8(60 + (x + y) / 3); return (v, v, v)
+        }
+        let masks: [String: CIImage] = [:]
+        var look = Recipe.neutral
+        look.global.contrast = 30                     // stands in for a film look's contrast
+        let finish: (Recipe) -> Recipe = { r in var o = r; o.global.contrast += 30; return o }
+        let matched = ResultMatch.apply(intent, to: .neutral, proxy: frame, maskBitmaps: masks, finishing: finish)
+        XCTAssertEqual(matched.global.contrast, 0, "the look's contrast is not written into the style")
+        XCTAssertGreaterThan(matched.global.exposureEV, 0)
+        _ = look
+    }
+}
