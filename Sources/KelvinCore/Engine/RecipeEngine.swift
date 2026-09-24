@@ -30,8 +30,8 @@ public enum RecipeEngine {
     /// 0.7.2 (23 Sep 2026): that bound no longer switches off when a light source clips. A fire in
     /// frame had been exempting its own firelit faces from it.
     ///
-    /// 0.7.3 (24 Sep 2026): a sky the recipe lifts into clipping is held down in the sky mask,
-    /// measured on the render (`SkyGuard`), so the foreground keeps its lift.
+    /// 0.7.3 (24 Sep 2026): a look's lift is held back from the light sources in frame — the
+    /// `lights` mask (`lightsMask`, `LightsMask`). Frames with no light source are unchanged.
     public static let version = "0.7.3"
 
     /// Below this confidence the engine drops all *stylistic* moves (contrast shaping,
@@ -123,6 +123,9 @@ public enum RecipeEngine {
             "skyGuard:\(SkyGuard.enabled ? "on" : "off")",
             "subjectDeficit:\(subjectDeficitFloor)",
             "faceCap:\(faceLiftCapEV)",
+            // The light-source mask: the switch, every constant that decides which islands count
+            // (they move the bitmap's existence, which gates the mask), and its feather.
+            "lights:\(protectLights ? "on" : "off")/\(LightsMask.coreFloor)/\(LightsMask.hotFloor)/\(LightsMask.warmFloor)/\(LightsMask.componentCap)/\(LightsMask.dilationCells)/\(LightsMask.glowFloor)/\(LightsMask.glowRadiusCells)/\(lightsFeather)",
             // The opener does not change what the engine emits — it changes which candidate a
             // photograph RESOLVES to, which is exactly what `ResolvedRecipeStore` caches against
             // this signature. Constant while disabled, so floor sweeps with the rule off cannot
@@ -576,6 +579,101 @@ public enum RecipeEngine {
             feather: SkyLever.feather, opacity: (veiled && !blown) ? 0.85 : 1.0, adjustments: adj
         )
     }
+
+    // MARK: - Light sources (engine 0.7.3)
+
+    /// Whether the engine holds a look's lift off the light sources in frame. On unless
+    /// `KELVIN_PROTECT_LIGHTS=0`, which exists for the A/B in docs/EVALUATION.md and is in
+    /// `tuningSignature`.
+    public static let protectLights: Bool =
+        ProcessInfo.processInfo.environment["KELVIN_PROTECT_LIGHTS"] != "0"
+
+    /// Below this many stops of lift, no `lights` mask is emitted: a look that does not brighten
+    /// the frame has nothing to hold back, and a mask that changes nothing visible would still be
+    /// listed in the mask panel as an edit.
+    static let lightsDeadbandEV = 0.15
+
+    /// How far the D26 range stretch lifts a pixel sitting at a light's level, in stops of LINEAR
+    /// light (the unit of a mask's `exposure_ev`). Zero when there is no stretch.
+    ///
+    /// The stretch is the one lever besides exposure that LIFTS the top of the range — an affine
+    /// remap that can put a 0.8 white point at 0.88 — and it runs after the point where a `lights`
+    /// mask holds its region, so the mask has to pull its share back itself. Predicted at the level
+    /// a light is defined by (`LightsMask.coreFloor`), with the renderer's own formula; the remap
+    /// is linear, so a pulled core is expanded straight back toward white and stays white.
+    ///
+    /// Deliberately NOT counted: `whites`, contrast, the S-curve — a style's own shaping of its
+    /// top end. They are the look, and the look should reach the light. Counting them was built
+    /// and measured: it fired on every Vivid and Dramatic of an unlifted frame (−0.13 / −0.20 EV),
+    /// and on a Lincoln City sunset (`20250618-_DSC5417`, Dramatic) the pull outran what the
+    /// S-curve does to the top and dimmed the sun — 20.6% of the light region clipped in the
+    /// source, 4.6% after: a grey sun. With exposure and stretch only, the mask fires on lifted
+    /// frames alone, and every unlifted frame renders exactly as 0.7.2 rendered it.
+    static func stretchLiftEV(_ g: GlobalAdjustments) -> Double {
+        let low = g.rangeLow ?? 0, high = g.rangeHigh ?? 1
+        guard high > low, low != 0 || high != 1 else { return 0 }
+        let level = LightsMask.coreFloor
+        let d = (level - low) / (high - low)
+        guard d > level else { return 0 }
+        func linear(_ v: Double) -> Double {
+            v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+        }
+        return log2(linear(d) / linear(level))
+    }
+
+    /// Hold a lifted look off the light sources in frame — the `lights` mask.
+    ///
+    /// Emitted only when BOTH are true: `LocalMasks` found a light source (`lightsCoverage`
+    /// non-nil: small, white-hot, warm islands outside any person and any sky — see
+    /// `LightsMask`), and THIS candidate lifts its frame by at least `lightsDeadbandEV` — its own
+    /// exposure plus its own `stretchLiftEV`, net. So a frame with no light source, or one no look
+    /// lifts, gets no mask at all, and its recipe is byte for byte what 0.7.2 wrote. Nothing is
+    /// asked of the scene read (non-negotiable #1).
+    ///
+    /// What the mask does is mostly the renderer's: inside the region the frame is held at its
+    /// exposure AS SHOT — neither the global lift nor the global recovery sized for that lift
+    /// reaches it (see `Renderer.render` for why both, measured). The one number the engine adds is
+    /// the stretch's share, which runs after the hold: `exposure_ev = −stretchLiftEV`, from this
+    /// recipe's own numbers (plus any exposure the recipe pulled DOWN, which the hold must not
+    /// undo). Below 0.05 EV it is left out, and the mask carries no adjustments at all — which
+    /// reads, correctly, as "as shot".
+    ///
+    /// Exposure is shared by every style, so on a lifted frame every look carries the same mask:
+    /// holding a light is corrective, like the subject lift, not a style's opinion.
+    ///
+    /// Fed only through `candidate`, which every shipping path runs (`ShippedCandidates`); the
+    /// single-recipe `recipe()` path the app never calls does not emit it.
+    static func lightsMask(_ g: GlobalAdjustments, lightsCoverage: Double?) -> Mask? {
+        guard protectLights, lightsCoverage != nil else { return nil }
+        let stretch = stretchLiftEV(g)
+        // The NET lift: a frame exposure pulls down and the stretch pushes back up may not lift its
+        // top end at all, and then there is nothing to hold.
+        guard g.exposureEV + stretch >= lightsDeadbandEV else { return nil }
+        // The hold undoes exposure in both directions, so a DARKENING has to be put back: inside
+        // the region the lift is withheld, never a protection. Found on `IMG_1746` (2025-04-26
+        // Dog, sunlit sand): exposure −0.42 with a stretch to 0.914, and a hold that restored the
+        // as-shot level made the light region brighter than the look around it — +0.38% clipped
+        // on Vivid. So the pull is the stretch's share plus any exposure pulled DOWN.
+        let pull = roundedClamp(stretch - min(0, g.exposureEV), to: 0...2, step: 0.01)
+        return Mask(
+            id: LightsMask.maskType, type: LightsMask.maskType, source: "measurement",
+            invert: false,
+            feather: lightsFeather, opacity: 1.0,
+            adjustments: pull >= 0.05 ? ["exposure_ev": -pull] : [:]
+        )
+    }
+
+    /// The `lights` mask's feather (0…100). `KELVIN_LIGHTS_FEATHER`, in `tuningSignature`.
+    ///
+    /// 10 is one of `LightsMask`'s grid cells, the rule the subject mask's 6 and the sky's 16
+    /// already follow: `Renderer.prepareMask` blurs by feather/100 × minEdge × 0.06, so 10 is 0.6%
+    /// of the short edge, and a 256-wide grid cell on a 3:2 frame is 0.585% of it. That smooths the
+    /// grid's stair-step and stops. Compared by eye on `_DSC0486` and `_DSC0474` at 8, 20 and 40:
+    /// no edge was visible at any of them — the region is bright and its surround is the light's
+    /// own falloff — but every step wider let more of the lift back onto the glow (the light
+    /// region's clip on `_DSC0474` Natural: 43% at 8, 47% at 20, 51% at 40, against 37% as shot).
+    static let lightsFeather: Double = ProcessInfo.processInfo.environment["KELVIN_LIGHTS_FEATHER"]
+        .flatMap(Double.init).map { min(100, max(0, $0)) } ?? 10
 
     /// A subject whose colour needs holding back: people, and animals too. Warm fur — golden
     /// retrievers, ginger cats, bay horses — sits in the *same hue range as skin*, so a Vivid push

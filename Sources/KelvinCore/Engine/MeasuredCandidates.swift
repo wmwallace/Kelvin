@@ -27,7 +27,8 @@ public extension RecipeEngine {
         candidates(perception: p, statistics: s,
                    subjectLuma: m.subjectLuma, skyLuma: m.skyLuma, subjectOrigin: m.subjectOrigin,
                    iso: iso, perceptionHash: perceptionHash, generatedAt: generatedAt,
-                   subjectLumaIsSkin: m.subjectLumaIsSkin, focus: focus)
+                   subjectLumaIsSkin: m.subjectLumaIsSkin, focus: focus,
+                   lightsCoverage: m.lightsCoverage)
     }
 
     /// One style for a frame, with its local measurements passed whole.
@@ -41,7 +42,8 @@ public extension RecipeEngine {
     ) -> Recipe {
         candidate(perception: p, statistics: s, style: style,
                   subjectLuma: m.subjectLuma, skyLuma: m.skyLuma, subjectOrigin: m.subjectOrigin,
-                  iso: iso, subjectLumaIsSkin: m.subjectLumaIsSkin, focus: focus)
+                  iso: iso, subjectLumaIsSkin: m.subjectLumaIsSkin, focus: focus,
+                  lightsCoverage: m.lightsCoverage)
     }
 }
 
@@ -58,16 +60,20 @@ public extension LocalMasks {
         public let skyLuma: Double?
         public let subjectOrigin: SubjectMask.Origin?
         public let subjectLumaIsSkin: Bool
+        /// See `Measured.lightsCoverage`.
+        public let lightsCoverage: Double?
 
         public init(subjectLuma: Double?, skyLuma: Double?,
-                    subjectOrigin: SubjectMask.Origin?, subjectLumaIsSkin: Bool) {
+                    subjectOrigin: SubjectMask.Origin?, subjectLumaIsSkin: Bool,
+                    lightsCoverage: Double? = nil) {
             self.subjectLuma = subjectLuma
             self.skyLuma = skyLuma
             self.subjectOrigin = subjectOrigin
             self.subjectLumaIsSkin = subjectLumaIsSkin
+            self.lightsCoverage = lightsCoverage
         }
 
-        /// Nothing measured: no subject, no sky. What the engine sees for a frame Vision found
+        /// Nothing measured: no subject, no sky, no lights. What the engine sees for a frame Vision found
         /// nothing in.
         public static let none = Summary(subjectLuma: nil, skyLuma: nil,
                                          subjectOrigin: nil, subjectLumaIsSkin: false)
@@ -77,6 +83,7 @@ public extension LocalMasks {
 public extension LocalMasks.Measured {
     var summary: LocalMasks.Summary {
         .init(subjectLuma: subjectLuma, skyLuma: skyLuma,
-              subjectOrigin: subjectOrigin, subjectLumaIsSkin: subjectLumaIsSkin)
+              subjectOrigin: subjectOrigin, subjectLumaIsSkin: subjectLumaIsSkin,
+              lightsCoverage: lightsCoverage)
     }
 }

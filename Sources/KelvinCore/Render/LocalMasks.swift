@@ -6,14 +6,15 @@ import Foundation
 @preconcurrency import CoreImage
 
 /// One place that segments an image into the local masks the pipeline understands (subject, sky,
-/// and their derived complement, background) and measures each region's mean luminance. Both the
-/// numbers the *engine* needs to size a local correction (`subjectLuma`, `skyLuma`,
-/// `backgroundLuma`) and the bitmaps the *renderer* needs to apply it come from the same pass —
-/// so the app, the CLI, and batch never drift in how a mask is produced.
+/// their derived complement, background, and the light sources in frame) and measures each
+/// region's mean luminance. Both the numbers the *engine* needs to size a local correction
+/// (`subjectLuma`, `skyLuma`, `backgroundLuma`, `lightsCoverage`) and the bitmaps the *renderer*
+/// needs to apply it come from the same pass — so the app, the CLI, and batch never drift in how a
+/// mask is produced.
 public enum LocalMasks {
 
     public struct Measured: Sendable {
-        /// Keyed by mask `id`/`type` ("subject", "sky", "background"); ready for
+        /// Keyed by mask `id`/`type` ("subject", "sky", "background", "lights"); ready for
         /// `Renderer.render(_:with:maskBitmaps:)`.
         public let bitmaps: [String: CIImage]
         public let subjectLuma: Double?
@@ -37,15 +38,22 @@ public enum LocalMasks {
         /// this is set; see `RecipeEngine.subjectMask`.
         public let subjectLumaIsSkin: Bool
 
+        /// The share of the frame `LightsMask` found near clipping in small islands, outside any
+        /// person and any sky — nil when it found none worth protecting. The engine reads it only
+        /// as "there is a light source here"; how hard the mask pulls is sized from the recipe's
+        /// own lift (`RecipeEngine.lightsMask`), never from this.
+        public let lightsCoverage: Double?
+
         public init(bitmaps: [String: CIImage], subjectLuma: Double?, skyLuma: Double?,
                     subjectOrigin: SubjectMask.Origin? = nil, backgroundLuma: Double? = nil,
-                    subjectLumaIsSkin: Bool = false) {
+                    subjectLumaIsSkin: Bool = false, lightsCoverage: Double? = nil) {
             self.bitmaps = bitmaps
             self.subjectLuma = subjectLuma
             self.skyLuma = skyLuma
             self.subjectOrigin = subjectOrigin
             self.backgroundLuma = backgroundLuma
             self.subjectLumaIsSkin = subjectLumaIsSkin
+            self.lightsCoverage = lightsCoverage
         }
     }
 
@@ -83,6 +91,20 @@ public enum LocalMasks {
             skyLuma = SubjectMask.maskedMeanLuma(image: image, mask: sky)
         }
 
+        // Light sources, measured on THIS image — the source, never a render — so what a look is
+        // kept from lifting is what was already at the ceiling before anyone edited it. Only a
+        // PERSON mask is excluded (see `LightsMask`: the salient fallback can be the fire itself).
+        // Not part of the subject/sky/background partition: it overlaps the background by design,
+        // and nothing below derives from it.
+        var lightsCoverage: Double?
+        if let lights = LightsMask.detect(
+            in: image,
+            excludingPerson: subjectOrigin == .person ? bitmaps["subject"] : nil,
+            sky: bitmaps["sky"]) {
+            bitmaps[LightsMask.maskType] = lights.mask
+            lightsCoverage = lights.coverage
+        }
+
         // The rest of the frame. Always present, so a recipe mask of `type: "background"` renders
         // with no renderer or engine change the moment it is asked for. Deriving it is a pure CI
         // graph — nothing is evaluated here; the only forced evaluation added to this pass is the
@@ -94,7 +116,7 @@ public enum LocalMasks {
 
         return Measured(bitmaps: bitmaps, subjectLuma: subjectLuma, skyLuma: skyLuma,
                         subjectOrigin: subjectOrigin, backgroundLuma: backgroundLuma,
-                        subjectLumaIsSkin: subjectLumaIsSkin)
+                        subjectLumaIsSkin: subjectLumaIsSkin, lightsCoverage: lightsCoverage)
     }
 
     /// The derived background: `1 − subject − sky`, pointwise. The three masks partition the

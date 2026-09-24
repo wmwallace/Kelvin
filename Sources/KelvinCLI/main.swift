@@ -3406,6 +3406,11 @@ case "look-audit":
             var faceFlat = 0.0, faceFlatSource = 0.0, faceClip = 0.0, faceClipSource = 0.0
             var faceLumaHigh = 0.0, faceLumaLow = 0.0, faceLuma = 0.0, faceLumaSource = 0.0
             var faceHue: Double?, faceSat: Double?, faceHueSource: Double?, faceSatSource: Double?
+            // Inside the `lights` bitmap (≥ 0.5), measured whether or not the look carries the mask,
+            // so an A/B of `KELVIN_PROTECT_LIGHTS` compares the same pixels.
+            var lightPixels = 0
+            var lightClip = 0.0, lightClipSource = 0.0, lightFlat = 0.0, lightFlatSource = 0.0
+            var lightLuma = 0.0, lightLumaSource = 0.0
 
             var json: [String: Any] {
                 var j: [String: Any] = [
@@ -3415,6 +3420,12 @@ case "look-audit":
                     "crush": crush, "crushSource": crushSource, "crushNew": crushNew,
                     "meanLuma": meanLuma, "meanLumaSource": meanLumaSource, "facePixels": facePixels
                 ]
+                if lightPixels > 0 {
+                    j["lightPixels"] = lightPixels
+                    j["lightClip"] = lightClip; j["lightClipSource"] = lightClipSource
+                    j["lightFlat"] = lightFlat; j["lightFlatSource"] = lightFlatSource
+                    j["lightLuma"] = lightLuma; j["lightLumaSource"] = lightLumaSource
+                }
                 if facePixels > 0 {
                     j["faceFlat"] = faceFlat; j["faceFlatSource"] = faceFlatSource
                     j["faceClip"] = faceClip; j["faceClipSource"] = faceClipSource
@@ -3429,6 +3440,11 @@ case "look-audit":
                 var s = String(format: "flat %5.2f%% (+%5.2f%% new) clip +%5.2f%% crush +%5.2f%%",
                                flat * 100, flatNew * 100, (clip - clipSource) * 100,
                                (crush - crushSource) * 100)
+                if lightPixels > 0 {
+                    s += String(format: " · lights clip %5.1f%% (was %4.1f%%) flat %5.1f%% luma %.2f (was %.2f)",
+                                lightClip * 100, lightClipSource * 100, lightFlat * 100,
+                                lightLuma, lightLumaSource)
+                }
                 if facePixels > 0 {
                     s += String(format: " · face flat %5.1f%% (was %4.1f%%) clip %5.1f%% hue %3.0f° sat %.2f",
                                 faceFlat * 100, faceFlatSource * 100, faceClip * 100,
@@ -3447,9 +3463,9 @@ case "look-audit":
             }
             return (h < 0 ? h + 360 : h, mx <= 0 ? 0 : d / mx)
         }
-        func damage(_ px: [UInt8], source src: [UInt8], face: [Bool]) -> Damage {
+        func damage(_ px: [UInt8], source src: [UInt8], face: [Bool], light: [Bool]) -> Damage {
             var d = Damage()
-            var n = 0.0, fn = 0.0
+            var n = 0.0, fn = 0.0, ln = 0.0
             var fr = 0.0, fg = 0.0, fb = 0.0, sr = 0.0, sg = 0.0, sb = 0.0
             var i = 0, p = 0
             while i < px.count {
@@ -3469,6 +3485,12 @@ case "look-audit":
                 if clip { d.clip += 1 }; if clip0 { d.clipSource += 1 }; if clip && !clip0 { d.clipNew += 1 }
                 if crush { d.crush += 1 }; if crush0 { d.crushSource += 1 }; if crush && !crush0 { d.crushNew += 1 }
                 d.meanLuma += luma; d.meanLumaSource += luma0
+                if light[p] {
+                    ln += 1
+                    if clip { d.lightClip += 1 }; if clip0 { d.lightClipSource += 1 }
+                    if flat { d.lightFlat += 1 }; if flat0 { d.lightFlatSource += 1 }
+                    d.lightLuma += luma; d.lightLumaSource += luma0
+                }
                 if face[p] {
                     fn += 1
                     if flat { d.faceFlat += 1 }; if flat0 { d.faceFlatSource += 1 }
@@ -3484,6 +3506,13 @@ case "look-audit":
                       \.clipSource, \.clipNew, \.crush, \.crushSource, \.crushNew, \.meanLuma,
                       \.meanLumaSource] as [WritableKeyPath<Damage, Double>] {
                 d[keyPath: k] /= max(1, n)
+            }
+            d.lightPixels = Int(ln)
+            if ln > 0 {
+                for k in [\Damage.lightClip, \.lightClipSource, \.lightFlat, \.lightFlatSource,
+                          \.lightLuma, \.lightLumaSource] as [WritableKeyPath<Damage, Double>] {
+                    d[keyPath: k] /= ln
+                }
             }
             d.facePixels = Int(fn)
             if fn > 0 {
@@ -3615,6 +3644,18 @@ case "look-audit":
                         for x in max(0, x0) ..< min(width, max(x0, x1)) { faceMask[y * width + x] = true }
                     }
                 }
+                // The light-source region, from the bitmap the engine's mask renders with.
+                var lightMask = [Bool](repeating: false, count: width * height)
+                if let lights = masks[LightsMask.maskType] {
+                    let lp = try pixels(lights, over: extent)
+                    for i in 0 ..< width * height { lightMask[i] = lp[i * 4] >= 128 }
+                    if let dumpDir {
+                        let stem = url.deletingPathExtension().lastPathComponent
+                        try ImageWriter.write(lights.cropped(to: extent),
+                                              to: dumpDir.appendingPathComponent("\(stem)-lightsmask.jpg"),
+                                              format: .jpeg(quality: 0.9))
+                    }
+                }
                 let source = try pixels(Renderer.render(canvas, with: .neutral, maskBitmaps: [:]),
                                         over: extent)
                 let stem = url.deletingPathExtension().lastPathComponent
@@ -3631,19 +3672,21 @@ case "look-audit":
                 let subjectNoun = CandidateDescription.subjectNoun(for: perception.subject)
                 print("\(url.lastPathComponent) · \(perception.scene.rawValue)"
                       + " · subject \(perception.subject.present ? perception.subject.type.rawValue : "-")"
-                      + " · \(faces.count) face(s) · curated \(composed.curatedStyleIDs.joined(separator: ","))"
+                      + " · \(faces.count) face(s)"
+                      + (composed.masks.lightsCoverage.map { String(format: " · lights %.2f%%", $0 * 100) } ?? "")
+                      + " · curated \(composed.curatedStyleIDs.joined(separator: ","))"
                       + " · opens \(opener ?? "-")")
                 for candidate in composed.all {
                     let look = candidate.styleID
                     if let only, !only.contains(look) { continue }
                     let recipe = candidate.recipe
                     let rendered = Renderer.render(canvas, with: recipe, maskBitmaps: masks)
-                    let d = damage(try pixels(rendered, over: extent), source: source, face: faceMask)
+                    let d = damage(try pixels(rendered, over: extent), source: source, face: faceMask, light: lightMask)
                     let flags = redFlags(recipe)
                     let tag = (look == opener ? "OPEN" : curated.contains(look) ? "shown" : "     ")
-                    let caption = CandidateDescription.sentence(for: recipe, relativeTo: naturalRecipe,
-                                                                subject: subjectNoun)
+                    let held = recipe.masks?.first { $0.type == LightsMask.maskType }
                     print("  \(look.padding(toLength: 8, withPad: " ", startingAt: 0)) \(tag) \(d.line)"
+                          + (held.map { String(format: " ◐ lights held %+.2f EV", $0.adjustments["exposure_ev"] ?? 0) } ?? "")
                           + (flags.isEmpty ? "" : " ⚑ " + flags.joined(separator: ", ")))
                     print("           “\(caption)”")
                     if let dumpDir {
@@ -3677,13 +3720,14 @@ case "look-audit":
                                   "shadowMass": composed.statistics.shadowMass]
                     ]
                     row.merge(d.json) { a, _ in a }
+                    row["lightsCoverage"] = composed.masks.lightsCoverage
                     try emit(row)
 
                     if ablate {
                         for (lever, variant) in levers(of: recipe) {
                             let v = damage(try pixels(Renderer.render(canvas, with: variant,
                                                                       maskBitmaps: masks), over: extent),
-                                           source: source, face: faceMask)
+                                           source: source, face: faceMask, light: lightMask)
                             print("      − \(lever.padding(toLength: 16, withPad: " ", startingAt: 0)) \(v.line)")
                             var arow: [String: Any] = ["path": url.path, "look": look, "ablate": lever]
                             arow.merge(v.json) { a, _ in a }
