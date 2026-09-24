@@ -150,17 +150,9 @@ struct PhotoSession {
     var userMasks: [UserMaskVM]
     var straighten: Double
     var hsl: [String: HSLAdjustment]
-
-    /// Whether the user actually changed anything from the candidate Kelvin generated — drives the
-    /// "edited" dot in the strip.
-    var isEdited: Bool {
-        edit != editBaseline || !userMasks.isEmpty || straighten != 0 || !hsl.isEmpty
-            || !healSpots.isEmpty
-            || activeLookId != nil
-            || !maskAdjustments.isEmpty || !maskFeather.isEmpty
-            || !maskTightness.isEmpty || !maskInvert.isEmpty
-            || !maskEnabled.isEmpty || !maskStrength.isEmpty
-    }
+    // Whether this session is "edited" is `AppState.isTouched`, asked of the live state at stash
+    // time. A second copy of that test lived here and was retired with D29: it could not tell a
+    // creative look the shoot carried onto the frame from one somebody clicked.
 }
 
 /// A horizontal strip of the folder's photos under the preview. Bottom placement is the

@@ -655,6 +655,11 @@ look claims as well as frames edited by hand.
 non-negotiable that the old path quietly violated, and it is why the record stores a style id and
 nothing else.
 
+> **Amended 24 September 2026 by D29.** The record now stores a style id **and a look preset id**
+> (Portrait film, Mono…), because a preset is a fixed creative choice rather than one frame's
+> sliders, and leaving it out silently halved what the photographer chose. Sliders still never
+> travel; the precedence rule below is unchanged.
+
 ### The precedence rule, which is the part worth remembering
 
 1. A **hand-made edit** wins, always. It is the one thing in the app that is not a guess.
@@ -1515,3 +1520,51 @@ colour-space rules and its atomic write all apply unchanged.
 on samples sent 23 September — not a ΔE, since the references are SDR. Open questions for that look:
 the 4× cap, the 50–90% release ramp, and whether it should be the default for RAW exports or a toggle.
 If it passes, it ships as an export option on Mac and iPhone (iOS 18+/macOS 15+ write gain maps).
+
+---
+
+## D29 — A shoot's look carries its creative look, not its sliders · **Decided 24 September 2026** (amends D13; built under the owner's instruction to build the feature — "build it all")
+
+**What was wrong.** "Apply to shoot" carried only the style. A photographer who chose Soft + Portrait
+film on the hero frame got Soft on every other frame, with the film look silently dropped — the
+status line said "This shoot is in Soft", which was true and was not what anyone had chosen. D13's
+record stored "a style id and nothing else", and the creative looks (`LookPreset`: Portrait film,
+Mono, Selenium, Teal & orange…) were simply not in it.
+
+**The record now stores the style id and the look preset id.** `ShootLook` gains `lookId` for the
+shoot and `overrideLooks` beside `overrides`; both are optional on the wire and read with
+`decodeIfPresent`, so every record already on disk decodes unchanged and means exactly what it
+meant (a style, no look). `version` stays 1 — the change is additive, an older build reads the
+style and ignores the look, and nothing branches on the number. An **override is a whole choice**:
+a frame singled out with no look gets no look, rather than inheriting the shoot's.
+
+**Why D13's objection does not apply.** D13 forbade carrying one frame's *sliders* — `manualTweaks()`,
+the offsets dialled on the hero — because that is copying, not adapting. A look preset is not that.
+It is a fixed, named creative choice, the same kind of decision as the style, and it is composed
+onto each frame's *own* resolved development by the one rule there is for it
+(`LookPreset.applied(to:)`; the canvas applies the same limbs piecewise through the same
+`curve(composedOnto:)`). Its deltas season frame 12's Soft and frame 13's Soft, which are
+different recipes; nothing measured on the hero frame travels. The hero's exposure, per-band
+colour and masks still stay where they were made.
+
+**How it lands.**
+
+- *Canvas:* on a claimed frame with no hand edit, the carried look goes up with the candidate
+  (`selectCandidate` → `composeLook`, the body a click on the look runs), including when the curator
+  dropped the shoot's style and the frame fell back — a preset is chosen on its own terms, and a
+  frame that could not be Soft is still in Portrait film. "Untouched" now means *candidate + carried
+  look*, so opening a frame does not turn it into a hand edit (which would outrank the shoot forever
+  after); taking the look off or moving a slider over it is an edit, and Reset puts the shoot's look
+  back.
+- *Export:* `ShootLook.finished` composes the look **after** `ResolvedRecipeStore`'s photograph +
+  style resolve, so the cache key is unchanged and switching a shoot's look re-exports from cache.
+  Files are named for the look when one is carried, by the same rule the single-photo export uses.
+- *Clearing* removes both, and takes a carried look off the open frame and out of cached sessions.
+
+**Precedence unchanged** (D13): a hand-made edit, then the frame's override (now style + look), then
+the shoot's style + look, then the engine's ranking. A shoot with no look is still byte-for-byte the
+old behaviour.
+
+**Not changed.** The iPhone has no creative look presets — its "looks" are the candidate styles, and
+its apply already carries the style plus `LookAdjustments` offsets. That carry is untouched here; it
+is being reworked separately ("result matching").

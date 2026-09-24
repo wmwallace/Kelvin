@@ -743,13 +743,17 @@ final class AppState {
     /// Which folder `shootLook` describes, so opening a different shoot doesn't inherit the last
     /// one's look. One folder at a time, for the same reason `captureIndex` is.
     @ObservationIgnored private var shootLookFolder: URL?
+    /// Where shoot records are read and written. Always `ShootLookStore.directory` in the app; a
+    /// test points it at a temporary folder so that exercising `applyLookToShoot` end to end never
+    /// writes a record into the real Application Support folder.
+    @ObservationIgnored var shootLookDirectory: URL = ShootLookStore.directory
 
     /// Point the shoot look at a folder, reading whatever was applied to it before. Cheap — one
     /// small JSON read, and only when the folder actually changes.
     func loadShootLook(for folder: URL) {
         guard shootLookFolder != folder else { return }
         shootLookFolder = folder
-        shootLook = ShootLookStore.load(for: folder)
+        shootLook = ShootLookStore.load(for: folder, in: shootLookDirectory)
     }
 
     /// The style a photograph should open in, before any hand-made edit is restored on top.
@@ -759,6 +763,30 @@ final class AppState {
     /// to. A frame with its own override beats the shoot's style; see `ShootLook.style(for:)`.
     func effectiveStyle(for photo: URL) -> String? {
         shootLook?.style(for: photo)
+    }
+
+    /// The creative look the shoot's record carries onto a photograph — Portrait film, Mono — or
+    /// nil. It rides on `effectiveStyle`, never without it, and the same precedence applies: a
+    /// hand-made edit restored on top replaces it entirely (`apply(_:)`). D29.
+    ///
+    /// Resolved through the library, so a record naming a preset a later build no longer ships
+    /// carries nothing rather than something the name no longer describes.
+    func effectiveLook(for photo: URL) -> LookPreset? {
+        shootLook?.lookId(for: photo).flatMap(LookPreset.named)
+    }
+
+    /// The look the shoot carries onto the photograph whose pixels are in memory.
+    ///
+    /// This is part of what "untouched" MEANS on a claimed frame, which is why it is read by
+    /// `selectCandidate` and `resetToCandidate` (the app putting a frame up) and by `isTouched`
+    /// (the app deciding whether someone changed it). Were the carried look counted as a hand edit
+    /// — `activeLookId != nil`, which is how an untouched frame used to be told apart — merely
+    /// opening a frame of a Portrait-film shoot would write it an `EditStore` record on the way
+    /// out, and that record would outrank the shoot's look from then on (D13, precedence #1): the
+    /// next apply, or a clear, would silently stop reaching every frame anyone had looked at.
+    /// Keyed on `loadedURL` for the reason `isTouched` documents — it is the frame the state is of.
+    private var carriedLook: LookPreset? {
+        loadedURL.flatMap(effectiveLook(for:))
     }
 
     /// Put the chosen look on the shoot — or on just the selected frames.
@@ -782,12 +810,25 @@ final class AppState {
             return
         }
 
+        // THE WHOLE CHOICE, not half of it (D29). The creative look on the open frame goes with
+        // the style: before, Soft + Portrait film applied as Soft, and every other frame came back
+        // without the film look while the status line said the shoot was "in Soft" — true, and
+        // not what anyone had chosen. Only the preset's id travels, never this frame's sliders.
+        let lookId = activeLookId.flatMap(LookPreset.named)?.id
+        let choice = ShootLook.choiceLabel(style: style.label, look: lookId)
+
+        // Read BEFORE the record changes. "Untouched" is measured against what the shoot carries
+        // (see `carriedLook`), so asked after the assignment below it would compare the frame on
+        // screen with the look it is ABOUT to get — and a frame showing the old record's Portrait
+        // film, untouched, would read as hand-edited and be left standing in the old look.
+        let openWasUntouched = !isTouched
+
         let scope = applyScope()
         let coversWholeShoot = ShootLook.covers(scope, folderPhotos)
         var look = (shootLook ?? ShootLook())
-            .applying(styleId, to: scope, inShootOf: folderPhotos)
+            .applying(styleId, look: lookId, to: scope, inShootOf: folderPhotos)
         look.appliedAt = ISO8601DateFormatter().string(from: Date())
-        ShootLookStore.save(look, for: folder)
+        ShootLookStore.save(look, for: folder, in: shootLookDirectory)
         shootLook = look
         shootLookFolder = folder
 
@@ -798,7 +839,9 @@ final class AppState {
         //
         // Keyed on `loadedURL`, not `imageURL`: `candidates` and `isTouched` describe the frame
         // whose pixels are actually in memory, and mid-decode those are two different photographs.
-        if let open = loadedURL, scope.contains(open), !isTouched {
+        if let open = loadedURL, scope.contains(open), openWasUntouched {
+            // `selectCandidate` puts the new record's creative look up with the style, so both
+            // branches arrive at candidate + look — the fallback included (see `loadPhoto`).
             if candidates.contains(where: { $0.id == styleId }) {
                 selectCandidate(id: styleId)
             } else if let first = candidates.first {
@@ -831,12 +874,12 @@ final class AppState {
         let n = scope.count, s = scope.count == 1 ? "" : "s"
         let base: String
         if coversWholeShoot {
-            base = "This shoot is in \(style.label) — \(n) photo\(s), each adapted to its own frame"
+            base = "This shoot is in \(choice) — \(n) photo\(s), each adapted to its own frame"
         } else if selectedPhotos.isEmpty {
-            base = "\(n) kept photo\(s) set to \(style.label) — rejected and undecided frames are "
+            base = "\(n) kept photo\(s) set to \(choice) — rejected and undecided frames are "
                 + "unchanged"
         } else {
-            base = "\(n) selected frame\(s) set to \(style.label) — the rest of the shoot is unchanged"
+            base = "\(n) selected frame\(s) set to \(choice) — the rest of the shoot is unchanged"
         }
         let settled = base + ". Export edited writes the files"
         statusMessage = settled
@@ -1213,9 +1256,31 @@ final class AppState {
     /// Hand-made edits are deliberately left alone: they were never part of the look, and this is a
     /// button someone presses to undo an experiment, not to lose an afternoon's work.
     func clearShootLook() {
-        guard let folder = currentShootFolder, shootLook != nil else { return }
-        ShootLookStore.remove(for: folder)
+        guard let folder = currentShootFolder, let old = shootLook else { return }
+        // Before the record goes, for the reason `applyLookToShoot` reads it first: "untouched"
+        // is measured against what the shoot carries, and once it carries nothing a frame still
+        // showing its Portrait film would count as hand-edited — and be SAVED as one.
+        let openWasUntouched = !isTouched
+        let openCarriedALook = carriedLook != nil
+        ShootLookStore.remove(for: folder, in: shootLookDirectory)
         shootLook = nil
+
+        // The creative look comes off with the record (D29) — on the frame on screen, if it was
+        // only there because the shoot put it there. The style is left standing, as it always
+        // was: nothing is lost by it, and reopening the frame gives the engine's own ranking.
+        if openWasUntouched, openCarriedALook, let id = selectedCandidateId {
+            selectCandidate(id: id)
+        }
+        // And from every cached frame that was carrying one. A cached session is restored exactly
+        // as it was stashed, look included, and with the record gone that look would read as a
+        // hand edit on the way back out and be written to disk as one — a cleared look that
+        // resurrects itself frame by frame as the shoot is browsed. Frames the old record gave
+        // only a style keep their sessions: restoring them costs nothing and saves nothing.
+        let carried = folderPhotos.filter { old.lookId(for: $0) != nil }
+        for url in staleSessionURLs(coveredBy: carried, cached: cachedSessionURLs) {
+            sessions.removeValue(forKey: url)
+            sessionOrder.removeAll { $0 == url }
+        }
         statusMessage = "Look removed from this shoot — hand-made edits are untouched"
     }
 
@@ -1236,9 +1301,11 @@ final class AppState {
     }
 
     var applyButtonHelp: String {
+        // The whole choice, named the way the apply will record it: "Soft + Portrait film" when a
+        // creative look is on, so the tooltip cannot promise less than the shoot will get (D29).
         let style = selectedCandidateId.flatMap { id in
             CandidateStyle.all.first { $0.id == id }
-        }?.label ?? "the chosen look"
+        }.map { ShootLook.choiceLabel(style: $0.label, look: activeLookId) } ?? "the chosen look"
         let scope = applyScope()
         let n = scope.count, s = n == 1 ? "" : "s"
         let adapted = " Each frame is read and corrected on its own — the style is adapted, never "
@@ -2566,11 +2633,21 @@ final class AppState {
     /// photo, so a folder of exports is searchable instead of a wall of `kelvin-edit`.
     func suggestedExportName(ext: String = "jpg") -> String {
         guard let url = imageURL else { return "\(Branding.exportStem)." + ext }
-        let look = activeLookId.flatMap { LookPreset.named($0)?.name }
-            ?? candidates.first { $0.id == selectedCandidateId }?.label
+        let look = Self.exportLookName(lookId: activeLookId,
+                                       style: candidates.first { $0.id == selectedCandidateId }?.label)
         return ExportNaming.filename(for: url, perception: perception, look: look, ext: ext,
                                      scheme: exportNaming, label: exportLabel,
                                      prefix: exportPrefix, suffix: exportSuffix)
+    }
+
+    /// The look token an export's filename carries: the creative look's name when one is on the
+    /// frame ("Portrait film"), otherwise the style's. One rule for the single export, a hand-edited
+    /// frame in a batch and a frame the shoot's look carries (D29) — so the same choice exported
+    /// three ways lands under one name, rather than `_portrait-film` from the canvas and `_soft`
+    /// from the batch for identical pixels. The preset wins because it is the more specific thing
+    /// the photographer chose; the style is the default underneath every frame.
+    static func exportLookName(lookId: String?, style: String?) -> String? {
+        lookId.flatMap(LookPreset.named)?.name ?? style
     }
 
     /// "12 Mar, 14:03" from an ISO timestamp — a restored edit should say *when*, not show a
@@ -2723,13 +2800,15 @@ final class AppState {
     ///
     /// One property, so the next thing added to the edit surface has one place to be declared
     /// rather than three places to be forgotten.
+    ///
+    /// "Changed" means changed from what the APP put up — the candidate, plus the creative look the
+    /// shoot carries onto this frame, if any (D29, `carriedLook`). On a frame nobody claimed that
+    /// is the bare candidate, exactly as before.
     var isTouched: Bool {
-        edit != editBaseline
+        candidateStateDiffersFromPutUp
             || !userMasks.isEmpty
             || straighten != 0
-            || !hsl.isEmpty
             || !healSpots.isEmpty
-            || activeLookId != nil
             || !maskAdjustments.isEmpty
             || !maskFeather.isEmpty
             || !maskTightness.isEmpty
@@ -2738,6 +2817,21 @@ final class AppState {
             // photo has no entries here at all.
             || !maskEnabled.isEmpty
             || !maskStrength.isEmpty
+    }
+
+    /// Whether the globals, the per-band colour or the creative look differ from what the app put up
+    /// for the candidate on screen: its own values, with the shoot's carried look composed on top
+    /// when there is one. The part of "touched" that `isTouched` and the candidate-parking test
+    /// share, so the two cannot disagree about what a carried look is.
+    ///
+    /// The carried look is composed by `LookPreset.apply(to:)` onto the same `editBaseline`
+    /// `composeLook` starts from, so a frame the app put up compares equal to itself exactly — and
+    /// a photographer who takes the look off, swaps it, or moves a slider on top of it is editing.
+    private var candidateStateDiffersFromPutUp: Bool {
+        let carried = carriedLook
+        var putUp = editBaseline
+        carried?.apply(to: &putUp)
+        return edit != putUp || hsl != (carried?.hsl ?? [:]) || activeLookId != carried?.id
     }
 
     /// Restore a saved edit onto the freshly-generated candidates. Internal rather than private
@@ -2817,7 +2911,11 @@ final class AppState {
         sessions[url] = session
         sessionOrder.removeAll { $0 == url }
         sessionOrder.append(url)
-        if session.isEdited { editedURLs.insert(url) } else { editedURLs.remove(url) }
+        // `isTouched`, the one definition, read off the live state the session was just built
+        // from. `PhotoSession` used to carry a longhand copy of it, and that copy could not know
+        // that a look the shoot carried onto this frame (D29) is not an edit — so every frame of a
+        // Portrait-film shoot would have been dotted as edited the moment you stepped off it.
+        if isTouched { editedURLs.insert(url) } else { editedURLs.remove(url) }
         persistEdit(for: url)
         while sessionOrder.count > Self.maxSessions, let oldest = sessionOrder.first {
             sessions.removeValue(forKey: oldest); sessionOrder.removeFirst()
@@ -3655,11 +3753,21 @@ final class AppState {
                 editedURLs.insert(url)
                 statusMessage = "Ready · restored your edit from \(Self.friendlyDate(saved.savedAt))\(statusNote)"
             } else if let shootStyle {
-                statusMessage = "Ready · \(shootStyle.label), adapted to this frame from the shoot's look\(statusNote)"
+                // Names the creative look too when one was carried — `selectCandidate` put it up
+                // with the style — so "Soft" is never said over a frame showing Soft + Portrait film.
+                let carried = effectiveLook(for: url)?.id
+                statusMessage = "Ready · \(ShootLook.choiceLabel(style: shootStyle.label, look: carried)), "
+                    + "adapted to this frame from the shoot's look\(statusNote)"
             } else if let wanted, let style = CandidateStyle.all.first(where: { $0.id == wanted }) {
-                // Say so rather than quietly showing a different look than the strip implies.
-                statusMessage = "Ready · the shoot is in \(style.label), but that look is wrong for "
-                    + "this frame — showing \(models.first?.label ?? "the best fit") instead\(statusNote)"
+                // Say so rather than quietly showing a different look than the strip implies. The
+                // creative look is NOT dropped with the style: a preset is a choice made on its own
+                // terms, and `selectCandidate` has already put it on the fallback — so the sentence
+                // names it on both sides, and the export (`ShootLook.finished`) writes the same.
+                let carried = effectiveLook(for: url)?.id
+                let shown = models.first.map { ShootLook.choiceLabel(style: $0.label, look: carried) }
+                statusMessage = "Ready · the shoot is in \(ShootLook.choiceLabel(style: style.label, look: carried)), "
+                    + "but \(style.label) is wrong for this frame — showing \(shown ?? "the best fit") "
+                    + "instead\(statusNote)"
             } else if let ruleStyle {
                 // D18: a photograph may open off Natural ONLY if the app says on screen that it
                 // chose. The panel line under the candidates is the durable half of that sentence;
@@ -3724,6 +3832,14 @@ final class AppState {
         maskStrength = Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, $0.opacity * 100) })
         maskAdjustments = [:]; maskFeather = [:]; maskInvert = [:]
         maskTightness = [:]      // omitted here while `resetMask` cleared it — a slip, not a policy
+        // THE SHOOT'S CREATIVE LOOK GOES UP WITH THE CANDIDATE (D29). On a frame the shoot's record
+        // claims, "the candidate as the app puts it up" is the candidate plus the carried preset —
+        // Soft + Portrait film — and it is the same whichever candidate that is: the curator's
+        // fallback when it dropped the shoot's style for this frame, or a tile the photographer
+        // clicks to compare. A preset is a creative choice made independently of the style, so a
+        // frame that could not be Soft is still in Portrait film. Composed by the same code a click
+        // on the look runs, so there is one composition, not a second copy of it.
+        if let carried = carriedLook { composeLook(carried.id) }
         updateActiveRecipe()
         resetHistory()          // the chosen candidate is the new base for undo
         // NOTE: selecting/browsing candidates does NOT record a pick — only a deliberate
@@ -3783,14 +3899,17 @@ final class AppState {
     /// Narrower than `isTouched`, which also counts hand-drawn masks and heals — those belong to the
     /// photograph and survive a candidate switch, so they are not the candidate's to park.
     private var isCandidateWorkTouched: Bool {
-        edit != editBaseline || straighten != 0 || !hsl.isEmpty || activeLookId != nil
+        candidateStateDiffersFromPutUp || straighten != 0
             || !maskAdjustments.isEmpty || !maskFeather.isEmpty
             || !maskInvert.isEmpty || !maskTightness.isEmpty
             || maskEnabled != Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, true) })
             || maskStrength != Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, $0.opacity * 100) })
     }
 
-    /// Revert every manual edit back to the candidate as Kelvin generated it.
+    /// Revert every manual edit back to the candidate as Kelvin generated it — with the shoot's
+    /// creative look still on, where the shoot carries one, because that is how Kelvin put this
+    /// frame up. Reset stripping it would leave a frame that differs from the shoot's look, which
+    /// `isTouched` would rightly call an edit and save: pressing Reset must not create one.
     func resetToCandidate() {
         edit = editBaseline
         straighten = 0
@@ -3800,6 +3919,7 @@ final class AppState {
         maskStrength = Dictionary(uniqueKeysWithValues: baseMasks.map { ($0.id, $0.opacity * 100) })
         maskAdjustments = [:]; maskFeather = [:]; maskInvert = [:]
         maskTightness = [:]      // omitted here while `resetMask` cleared it — a slip, not a policy
+        if let carried = carriedLook { composeLook(carried.id) }
         updateActiveRecipe()
     }
 
@@ -4180,6 +4300,15 @@ final class AppState {
     /// deltas on the candidate's baseline, so switching between them never compounds: each one is
     /// applied to the untouched baseline rather than to whatever the last look left behind.
     func applyLook(_ id: String?) {
+        composeLook(id)
+        onEdit()
+    }
+
+    /// The state change a look makes, without the commit: `applyLook` is a person's click and
+    /// records an undo step; the app putting a shoot's carried look up (`selectCandidate`) is part
+    /// of putting the frame up, and must not leave a step that undoes the frame into a look nobody
+    /// chose. One body, so the carried look lands exactly as a click on it would.
+    private func composeLook(_ id: String?) {
         activeLookId = id
         var g = editBaseline
         if let id, let look = LookPreset.named(id) {
@@ -4191,7 +4320,6 @@ final class AppState {
             if let lookHSL = look.hsl { hsl = lookHSL }
         }
         edit = g
-        onEdit()
     }
 
     /// The active look, resolved from the library. Its structured limbs (mono, curve) are
@@ -5632,7 +5760,7 @@ final class AppState {
                     needsReopening.append(url.lastPathComponent); continue
                 }
                 recipe = stored
-                lookName = saved.styleId
+                lookName = Self.exportLookName(lookId: saved.lookId, style: saved.styleId)
             } else if editedURLs.contains(url) {
                 // Counted, not `continue`d silently: a sidecar that exists but won't decode used to
                 // vanish from the arithmetic entirely, and "Exported 0" with no reason attached
@@ -5641,9 +5769,13 @@ final class AppState {
             } else if let styleId = effectiveStyle(for: url),
                       let style = CandidateStyle.all.first(where: { $0.id == styleId }) {
                 statusMessage = "Reading photo \(index + 1) of \(targets.count)…"
+                // The creative look rides on the style (D29) and is composed AFTER the resolve —
+                // `ShootLook.finished` says why the cache key stays photograph + style.
+                let carriedLookId = effectiveLook(for: url)?.id
                 let adapted: Recipe
                 do {
-                    adapted = try await adaptedRecipe(for: url, style: style)
+                    let resolved = try await adaptedRecipe(for: url, style: style)
+                    adapted = ShootLook.finished(resolved, look: carriedLookId)
                 } catch {
                     failed += 1; continue
                 }
@@ -5651,8 +5783,9 @@ final class AppState {
                 wasAdapted = true
                 // The recipe's OWN label, not the requested style's. They differ exactly when the
                 // curator dropped the shoot's style for this frame and it fell back — and a file
-                // named for a look it was not given is a lie that outlives the export.
-                lookName = adapted.label ?? style.label
+                // named for a look it was not given is a lie that outlives the export. A carried
+                // creative look names the file instead, by the rule the canvas's export uses.
+                lookName = Self.exportLookName(lookId: carriedLookId, style: adapted.label ?? style.label)
             } else {
                 continue
             }
