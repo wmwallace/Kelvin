@@ -457,7 +457,14 @@ public enum CraftFix {
             let now = CraftFix.mired(from.temperatureK ?? 6500)
             let coolest = CraftFix.mired(CraftFix.whiteBalanceCorrection.upperBound)
             let warmest = CraftFix.mired(CraftFix.whiteBalanceCorrection.lowerBound)
-            let wanted = -reading.stats.chromaB * RecipeEngine.miredPerChromaB
+            //
+            // SIZED FROM THE ENGINE'S OWN CAST ESTIMATE (`RecipeEngine.castChroma`), not the
+            // whole-frame mean. The mean counts the scene's colours as the light's — on the firelit
+            // `_DSC0507` it read b* +11.5 where the estimator the engine ships reads +2.8 — so a
+            // Fix on firelight or a sunset asked for −61 mired and walked the frame to 12000 K, while
+            // its tint half (`wb.tint`, above) was already sized from the engine's estimate. One
+            // correction, two estimators; now one.
+            let wanted = -RecipeEngine.castChroma(reading.stats).b * RecipeEngine.miredPerChromaB
             s.temperatureMired = min(max(now + wanted, coolest), warmest) - now
             s.tint = wb.tint
         case .shadowDetailLost:

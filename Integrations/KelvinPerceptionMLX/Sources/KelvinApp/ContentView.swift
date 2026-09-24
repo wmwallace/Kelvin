@@ -3618,11 +3618,10 @@ final class AppState {
                 // opening a photo. RAW keeps the real decode — see `PerceptionProxy.fromFile` for
                 // why taking the camera's embedded preview would be wrong rather than merely
                 // faster.
-                let proxy = PerceptionProxy.fromFile(url, maxEdge: 1200, matching: fullRes.extent)
-                    ?? Self.materialiseDecoded(PerceptionProxy.downsample(fullRes, maxEdge: 1200))
-                // Derived from the edit proxy above, and materialised for the same reason it is:
-                // left lazy, every measurement downstream would re-run the 1200 px scale.
-                let perceptionProxy = Self.materialiseDecoded(PerceptionProxy.downsample(proxy))
+                // `proxies(for:decoded:)` — the one route every path builds its images by. The
+                // measurement proxy is derived from the edit proxy and materialised, like it: left
+                // lazy, every measurement downstream would re-run the 1200 px scale.
+                let (proxy, perceptionProxy) = Self.proxies(for: url, decoded: fullRes)
                 let preview = Self.decodeContext.createCGImage(proxy, from: proxy.extent)
                     .map { NSImage(cgImage: $0, size: NSZeroSize) }
                 return DecodedPhoto(fullRes: fullRes, perceptionProxy: perceptionProxy,
@@ -4500,7 +4499,9 @@ final class AppState {
                 case .resolved:
                     self.statusMessage = "Fixed · \(issue.message)"
                 case .notFlagged:
-                    break
+                    // Said, not skipped: a click that changes nothing and says nothing reads as a
+                    // broken button (reported on the global Fix, which had the same silence).
+                    self.statusMessage = "Nothing to fix — \(issue.message) had already cleared"
                 default:
                     // The control has gone as far as it goes. Record it so the button stops being
                     // offered: a fix that provably cannot finish must say so, not invite a
@@ -6192,6 +6193,36 @@ final class AppState {
         statusMessage = message
     }
 
+    /// `resolved` with the shoot's carried finish solved in (D30), or `resolved` itself when the
+    /// frame carries none. Cached like the resolve, under a key that names the intent and the look
+    /// — a change to either is a different answer, and serving the old one would export the
+    /// previous hero's adjustments.
+    func matchedRecipe(for url: URL, resolved: Recipe, style: CandidateStyle,
+                       look lookId: String?, intent: ResultMatch.Intent?) async throws -> Recipe {
+        guard let intent, !intent.isNeutral, ResultMatch.enabled else { return resolved }
+        let modelId = perceptionProvider.activeModelID
+        let key = "\(style.id)|look:\(lookId ?? "-")|match:\(ResultMatch.signature(of: intent))"
+        if let cached = ResolvedRecipeStore.load(for: url, styleId: key, modelId: modelId) {
+            return cached
+        }
+        try await Offload.run(.fetch, qos: .utility) { try CloudFile.materialise(url) }
+        // The same proxy route `adaptedRecipe` measures on, so the solve sees the pixels the style
+        // was resolved against; the masks are measured on it because the cache hit above skipped
+        // the composition that had them.
+        let proxy = try await Offload.run(.decode) { () -> DecodedProxy in
+            DecodedProxy(image: Self.proxies(for: url, decoded: try ImageDecoder.decode(url: url)).measure)
+        }
+        let finish = lookId.flatMap(LookPreset.named)
+        let matched = await Offload.run(.vision) { () -> Recipe in
+            let masks = LocalMasks.measure(in: proxy.image).bitmaps
+            return ResultMatch.apply(intent, to: resolved, proxy: proxy.image, maskBitmaps: masks,
+                                     finishing: { finish?.applied(to: $0) ?? $0 })
+        }
+        ResolvedRecipeStore.save(matched, for: url, styleId: key, modelId: modelId)
+        return matched
+    }
+    private struct DecodedProxy: @unchecked Sendable { let image: CIImage }
+
     /// Resolve the shoot's style against ONE photograph: decode it, read it, measure it, and let the
     /// engine derive this frame's own corrective baseline underneath the style.
     ///
@@ -6214,45 +6245,12 @@ final class AppState {
     /// Dramatic score from 0.572 to 0.523 across a `qualityFloor` of 0.55. Neither number was more
     /// correct than the other; there simply must be one of them.
     ///
-    /// So the proxy is built by the same expression `loadPhoto` uses, not merely to the same size:
-    /// `fromFile` decodes straight from the file and `downsample` scales the decoded frame, and for
-    /// anything that is not RAW those are different pixels at identical dimensions — which would
-    /// have left the same bug with a smaller blast radius, and been much harder to find twice.
+    /// So the proxy is built by the same helper `loadPhoto` uses (`proxies(for:decoded:)`), not
+    /// merely to the same size: until 24 Sep 2026 this comment said so while the code built the
+    /// 768 px image straight from the file and the canvas derived it from its 1200 px proxy.
     ///
     /// Expensive on purpose — a decode, a perception pass and two Vision passes per photograph — so
     /// it runs at export, once, and never while someone is browsing.
-    /// `resolved` with the shoot's carried finish solved in (D30), or `resolved` itself when the
-    /// frame carries none. Cached like the resolve, under a key that names the intent and the look
-    /// — a change to either is a different answer, and serving the old one would export the
-    /// previous hero's adjustments.
-    func matchedRecipe(for url: URL, resolved: Recipe, style: CandidateStyle,
-                       look lookId: String?, intent: ResultMatch.Intent?) async throws -> Recipe {
-        guard let intent, !intent.isNeutral, ResultMatch.enabled else { return resolved }
-        let modelId = perceptionProvider.activeModelID
-        let key = "\(style.id)|look:\(lookId ?? "-")|match:\(ResultMatch.signature(of: intent))"
-        if let cached = ResolvedRecipeStore.load(for: url, styleId: key, modelId: modelId) {
-            return cached
-        }
-        try await Offload.run(.fetch, qos: .utility) { try CloudFile.materialise(url) }
-        // The same proxy route `adaptedRecipe` measures on, so the solve sees the pixels the style
-        // was resolved against; the masks are measured on it because the cache hit above skipped
-        // the composition that had them.
-        let proxy = try await Offload.run(.decode) { () -> DecodedProxy in
-            let image = try ImageDecoder.decode(url: url)
-            return DecodedProxy(image: PerceptionProxy.fromFile(url, matching: image.extent)
-                ?? Self.materialiseDecoded(PerceptionProxy.downsample(image)))
-        }
-        let finish = lookId.flatMap(LookPreset.named)
-        let matched = await Offload.run(.vision) { () -> Recipe in
-            let masks = LocalMasks.measure(in: proxy.image).bitmaps
-            return ResultMatch.apply(intent, to: resolved, proxy: proxy.image, maskBitmaps: masks,
-                                     finishing: { finish?.applied(to: $0) ?? $0 })
-        }
-        ResolvedRecipeStore.save(matched, for: url, styleId: key, modelId: modelId)
-        return matched
-    }
-    private struct DecodedProxy: @unchecked Sendable { let image: CIImage }
-
     func adaptedRecipe(for url: URL, style: CandidateStyle) async throws -> Recipe {
         // PHOTO + STYLE → RECIPE IS DETERMINISTIC, so the answer is worth keeping. On a hit the
         // whole of this function is skipped, decode included — the caller decodes separately for
@@ -6281,12 +6279,9 @@ final class AppState {
             // measurement below would silently re-render all 60 megapixels again — the trap
             // `loadPhoto` documents and avoids.
             //
-            // `fromFile` first, exactly as `loadPhoto` does it. For RAW it returns nil and both
-            // paths fall through to the same downsample; for everything else it is the difference
-            // between the pixels the canvas measured and a second, subtly different set.
-            let proxy = PerceptionProxy.fromFile(url, matching: image.extent)
-                ?? Self.materialiseDecoded(PerceptionProxy.downsample(image))
-            return DecodedForExport(image: image, proxy: proxy)
+            // The canvas's own route (`proxies(for:decoded:)`), so the curator here scores the
+            // pixels the canvas scored.
+            return DecodedForExport(image: image, proxy: Self.proxies(for: url, decoded: image).measure)
         }
         // THE CACHE IS THE WHOLE PERFORMANCE STORY OF THIS FUNCTION. Measured over 25 frames at
         // 24 MP, perception was 6.43s of a 6.72s frame — 96% — and every other stage together was
@@ -6598,6 +6593,18 @@ final class AppState {
     }()
 
     /// `materialiseShared`, through the decode context. For use inside `Offload.run(.decode)` only.
+    /// The two images every path edits and measures on, built ONE way: the 1200 px edit proxy
+    /// (ImageIO's reduced decode for anything that is not RAW, a real decode for RAW), and the 768 px
+    /// measurement proxy DERIVED from it. `loadPhoto` has always built them like this; the export,
+    /// the carried-finish solve and the shoot check each built the 768 px image straight from the
+    /// file instead — close (the same recipe on 78 of 79 frames, `proxy-compare`), and still two
+    /// sets of pixels for one photograph. One helper, so there is one set.
+    nonisolated static func proxies(for url: URL, decoded full: CIImage) -> (edit: CIImage, measure: CIImage) {
+        let edit = PerceptionProxy.fromFile(url, maxEdge: 1200, matching: full.extent)
+            ?? materialiseDecoded(PerceptionProxy.downsample(full, maxEdge: 1200))
+        return (edit, materialiseDecoded(PerceptionProxy.downsample(edit)))
+    }
+
     nonisolated static func materialiseDecoded(_ image: CIImage) -> CIImage {
         guard let cg = decodeContext.createCGImage(image, from: image.extent) else { return image }
         return CIImage(cgImage: cg)

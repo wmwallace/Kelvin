@@ -120,6 +120,7 @@ public enum RecipeEngine {
             "wbDeadband:\(castDeadband)",
             "clipCeiling:\(clipCeiling)",
             "headroomGain:\(headroomGain)/\(headroomCap)",
+            "dehazeYield:\(dehazeYieldsToStretch ? "on" : "off")",
             "skyGuard:\(SkyGuard.enabled ? "on" : "off")",
             "subjectDeficit:\(subjectDeficitFloor)",
             "faceCap:\(faceLiftCapEV)",

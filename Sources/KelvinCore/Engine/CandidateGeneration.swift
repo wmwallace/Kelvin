@@ -92,8 +92,13 @@ public extension RecipeEngine {
         // is the base when there was no correction to make. Styles with no shift keep `nil` and
         // the all-neutral no-op invariant with it.
         if style.temperatureShiftK != 0 {
+            // IN MIRED, where equal steps look equal. The shift is written in Kelvin as it reads at
+            // 6500 (Warm −420 K = +10.7 mired) and applied as that mired step from wherever the
+            // correction left the frame. Added in Kelvin it was 5× too strong on a frame corrected to
+            // 3000 K and nearly inert on one cooled to 12000 K, where Cool then matched Natural and
+            // was curated away. At 6500 — the ordinary frame, no correction — nothing changes.
             let base = wb.temperatureK ?? 6500
-            g.temperatureK = roundedClamp(base + style.temperatureShiftK,
+            g.temperatureK = roundedClamp(shiftedInMired(base, byKelvinAt6500: style.temperatureShiftK),
                                           to: Ranges.temperatureK, step: 10)
         }
 
@@ -110,6 +115,13 @@ public extension RecipeEngine {
         // `+ 0` turns the −0 a fully-damped negative lever rounds to back into a plain 0.
         points.whites = (points.whites * (1 - stretch.load)).rounded() + 0
         points.blacks = (points.blacks * (1 - stretch.load)).rounded() + 0
+        // Dehaze restores the same range the stretch does — lifted blacks, a veiled top end — so it
+        // yields by the same fraction, or the two restore it twice. Found on a lavender field
+        // (`_DSC0203`, Natural): dehaze 35 on top of a full stretch, crunchy and neon, 7.3% of the
+        // frame flat-clipped; either lever alone roughly halves that.
+        if RecipeEngine.dehazeYieldsToStretch {
+            g.dehaze = (g.dehaze * (1 - stretch.load)).rounded() + 0
+        }
         g.whites = points.whites
         g.blacks = points.blacks
 
@@ -202,8 +214,13 @@ public extension RecipeEngine {
         _ p: Perception, _ s: ImageStatistics, _ style: CandidateStyle, exposureEV: Double = 0
     ) -> (whites: Double, blacks: Double) {
         let base = pointPlacement(p, s, exposureEV: exposureEV)
+        // A style's push on the whites obeys the gate the placement itself obeys: nothing pushed
+        // into a top end that is already clipping (`pointPlacement`, `highlightClip < 0.02`). The
+        // bias was added regardless — Airy +10, Dramatic +7, Vivid +6 onto exactly the frames the
+        // placement had declined to touch.
+        let whitesBias = s.highlightClip < 0.02 ? style.whitesBias : min(0, style.whitesBias)
         return (
-            roundedClamp(base.whites + style.whitesBias, to: 0...30, step: 1),
+            roundedClamp(base.whites + whitesBias, to: 0...30, step: 1),
             roundedClamp(base.blacks + style.blacksBias, to: -30...0, step: 1)
         )
     }
@@ -387,4 +404,17 @@ public struct CandidateStyle: Sendable, Equatable {
     public static let all: [CandidateStyle] = [
         .natural, .soft, .vivid, .dramatic, .airy, .rich, .warm, .cool
     ]
+}
+
+extension RecipeEngine {
+    /// `kelvin` moved by the mired step that `shiftK` Kelvin is at 6500 K. Lower Kelvin renders
+    /// warmer on this engine's axis (`WhiteBalanceDirectionTests`), so a negative shift warms.
+    static func shiftedInMired(_ kelvin: Double, byKelvinAt6500 shiftK: Double) -> Double {
+        let step = 1_000_000 / (6500 + shiftK) - 1_000_000 / 6500
+        return 1_000_000 / max(1, 1_000_000 / kelvin + step)
+    }
+
+    /// `KELVIN_DEHAZE_YIELD=0` restores dehaze at full strength under a stretch, for an A/B.
+    static let dehazeYieldsToStretch: Bool =
+        ProcessInfo.processInfo.environment["KELVIN_DEHAZE_YIELD"] != "0"
 }
