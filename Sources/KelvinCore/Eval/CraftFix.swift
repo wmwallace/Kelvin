@@ -136,6 +136,10 @@ public enum CraftFix {
         public var tint = 0.0
         public var vibrance = 0.0
         public var saturation = 0.0
+        /// Exposure, in stops. Only ever NEGATIVE, and only ever taken out of a lift the frame was
+        /// given (see `.blownHighlights`): an automatic fix may hand back brightness the engine
+        /// added, never darken a photograph below how it was shot.
+        public var exposureEV = 0.0
 
         public init() {}
 
@@ -143,7 +147,8 @@ public enum CraftFix {
 
         /// Field-by-field magnitudes, for budget accounting.
         var magnitudes: [Double] {
-            [contrast, highlights, shadows, whites, blacks, temperatureMired, tint, vibrance, saturation]
+            [contrast, highlights, shadows, whites, blacks, temperatureMired, tint, vibrance, saturation,
+             exposureEV * 100]
                 .map(abs)
         }
 
@@ -158,6 +163,7 @@ public enum CraftFix {
             s.tint = tint + other.tint
             s.vibrance = vibrance + other.vibrance
             s.saturation = saturation + other.saturation
+            s.exposureEV = exposureEV + other.exposureEV
             return s
         }
 
@@ -178,6 +184,7 @@ public enum CraftFix {
             s.tint = tint * k
             s.vibrance = vibrance * k
             s.saturation = saturation * k
+            s.exposureEV = exposureEV * k
             return s
         }
 
@@ -193,6 +200,10 @@ public enum CraftFix {
             out.tint = autoClamp(g.tint + tint, from: g.tint, Ceiling.tint, Ranges.tint)
             out.vibrance = autoClamp(g.vibrance + vibrance, from: g.vibrance, Ceiling.vibrance)
             out.saturation = autoClamp(g.saturation + saturation, from: g.saturation, Ceiling.saturation)
+            if exposureEV != 0 {
+                // Never below the frame as shot (0), unless the photographer already went there.
+                out.exposureEV = max(min(0, g.exposureEV), g.exposureEV + exposureEV)
+            }
             if temperatureMired != 0 {
                 // Composed in mired, then converted back. The renderer's neutral is 6500 K and
                 // "as shot" (nil) starts from there. Clamping happens in mired too, before the
@@ -224,6 +235,7 @@ public enum CraftFix {
                 && ok(tint, g.tint, out.tint)
                 && ok(vibrance, g.vibrance, out.vibrance)
                 && ok(saturation, g.saturation, out.saturation)
+                && ok(exposureEV, g.exposureEV, out.exposureEV)
                 && (temperatureMired == 0
                     || ok(temperatureMired,
                           CraftFix.mired(g.temperatureK ?? 6500),
@@ -387,7 +399,21 @@ public enum CraftFix {
         case .crushedShadows:
             s.shadows = 22; s.blacks = 10; s.contrast = -8
         case .blownHighlights:
-            s.highlights = -26; s.whites = -8
+            // FROM WHAT IS STILL REACHABLE, like the colour-cast step below. The fixed −26 / −8 was
+            // refused whole the moment `highlights` sat past its automatic ceiling, and the engine
+            // puts it there itself on a bright sky over a dark foreground: `_DSC5069` (Skagit tulips)
+            // opened at highlights −70 with 12% of the frame clipped, and Fix did nothing at all —
+            // zero passes, no word on screen. Each lever now gives what it has left, and when the
+            // recovery levers are spent the step takes back part of the LIFT the frame was given,
+            // which on those frames is what put the clouds over the top (+0.59 and +0.74 EV).
+            let room = { (value: Double, ceiling: Double) in max(0, value + ceiling) }
+            s.highlights = -min(26, room(from.highlights, Ceiling.highlights))
+            s.whites = -min(8, room(from.whites, Ceiling.whites))
+            if s.highlights == 0, from.exposureEV > 0.05 {
+                // Recovery is spent; the lift is not. A fifth of a stop per pass, never past as-shot.
+                s.whites = 0
+                s.exposureEV = -min(0.2, from.exposureEV)
+            }
         case .flat:
             // `blacks −6` is gone: it is a no-op. The endpoint curve moves the quarter tone by
             // blacks/100 × 0.22, so −6 asks for 0.013 — under the resolution of an 8-bit render.

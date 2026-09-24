@@ -29,7 +29,10 @@ public enum RecipeEngine {
     ///
     /// 0.7.2 (23 Sep 2026): that bound no longer switches off when a light source clips. A fire in
     /// frame had been exempting its own firelit faces from it.
-    public static let version = "0.7.2"
+    ///
+    /// 0.7.3 (24 Sep 2026): a sky the recipe lifts into clipping is held down in the sky mask,
+    /// measured on the render (`SkyGuard`), so the foreground keeps its lift.
+    public static let version = "0.7.3"
 
     /// Below this confidence the engine drops all *stylistic* moves (contrast shaping,
     /// vibrance, point placement) and keeps only *corrective* ones justified purely by
@@ -117,6 +120,7 @@ public enum RecipeEngine {
             "wbDeadband:\(castDeadband)",
             "clipCeiling:\(clipCeiling)",
             "headroomGain:\(headroomGain)/\(headroomCap)",
+            "skyGuard:\(SkyGuard.enabled ? "on" : "off")",
             "subjectDeficit:\(subjectDeficitFloor)",
             "faceCap:\(faceLiftCapEV)",
             // The opener does not change what the engine emits — it changes which candidate a
