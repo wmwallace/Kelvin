@@ -1759,3 +1759,27 @@ sky mask and the sky-suppressed dehaze) before `localMasks` when it says `none`,
 A frame the interior fill gets wrong in a way a photographer sees; an OS update that moves the answers
 (re-run `fm-probe --passes 2` on a hand-labelled list before trusting a new model; the D33 list is
 the owner's own photographs and is deliberately not in this public repository); or the iPhone gaining a read store.
+
+---
+
+## D34 — The scene read carries a sky judgment, and a sky the model does not see is not a sky · **Decided 24 September 2026** (revising the CLAUDE.md "ask before adding perception categories" rule, on the owner's standing instruction to revise decisions when the results justify it)
+
+D33 measured the on-device Foundation Model's `skyVisible` as the best of its three judgments and left it
+out only because carrying it needed a new perception field, which CLAUDE.md reserved for the owner. On
+24 September the owner lifted that ("we can revise decisions even if the decision was reserved for me"),
+so it is carried:
+
+- `Perception.sky: SkyJudgment?` — `visible` or `notVisible` (stored as `"none"`), **absent unless the
+  Foundation Model judged it**. Every stored read and hand label decodes unchanged, as unjudged. Not
+  `case none`: on an optional that is Swift's own absence, and the first version silently wrote "not
+  judged" — caught by `SkyJudgmentTests` before it shipped.
+- Read in exactly two places, both the sky lever: `RecipeEngine.skyMask` emits nothing when the read says
+  `notVisible`, and `ShippedCandidates.compose` does not run `SkyGuard` there (it would otherwise create
+  the sky mask the lever just declined). `KELVIN_FM_SKY=0` turns the fill off; it is in the provider
+  identifier and the tuning signature through `FoundationEnrichment.signature`.
+
+**Measured** on D33's 115 hand-labelled frames: `SkyMask` put a sky on 9 frames with none (a living room
+three times, surf, sand, a lawn, a bird on a field); the judgment removes 7 of them, and of the 54 real
+skies `SkyMask` found it loses **none**. End to end through `candidates`: `IMG_1746` and `_DSC3295` carry a
+sky mask on 8 of 8 looks with the Vision read, 0 of 8 with the enriched one. The two false skies it keeps
+are frames where the model also saw sky at the edge — the ambiguous cases in D33's list.

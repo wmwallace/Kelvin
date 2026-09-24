@@ -39,6 +39,19 @@ public struct Perception: Codable, Equatable, Sendable {
     /// instead of by default.
     public var notes: String?
 
+    /// Whether open sky is visible — a judgment only the on-device Foundation Model makes (D34),
+    /// absent from every Vision-only read and every read stored before it. The one engine reader is
+    /// the sky lever: `none` keeps `SkyMask`'s answer from reaching a recipe (it put a sky on living
+    /// room walls, surf and sand — 8 false skies in 115 labelled frames, 1 with this gate, no real
+    /// sky lost). Absent means "not judged", and changes nothing.
+    public var sky: SkyJudgment?
+
+    public enum SkyJudgment: String, Codable, Sendable {
+        /// Not `none`: on an optional, `.none` is Swift's own "absent", and an assignment of it
+        /// silently meant "not judged" — caught by `SkyJudgmentTests`. The stored value stays "none".
+        case visible, notVisible = "none"
+    }
+
     public static let currentSchemaVersion = 1
 
     public init(
@@ -49,7 +62,8 @@ public struct Perception: Codable, Equatable, Sendable {
         problems: [Problem],
         intent: Intent,
         confidence: Double,
-        notes: String? = nil
+        notes: String? = nil,
+        sky: SkyJudgment? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.scene = scene
@@ -59,11 +73,12 @@ public struct Perception: Codable, Equatable, Sendable {
         self.intent = intent
         self.confidence = confidence
         self.notes = notes
+        self.sky = sky
     }
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
-        case scene, subject, lighting, problems, intent, confidence, notes
+        case scene, subject, lighting, problems, intent, confidence, notes, sky
     }
 
     public init(from decoder: Decoder) throws {
@@ -84,6 +99,8 @@ public struct Perception: Codable, Equatable, Sendable {
         intent = try c.decodeIfPresent(Intent.self, forKey: .intent) ?? .natural
         confidence = clamp(try c.decodeIfPresent(Double.self, forKey: .confidence) ?? 1.0, to: 0...1)
         notes = try c.decodeIfPresent(String.self, forKey: .notes)
+        // An unknown value is "not judged", never an error: this field is advisory.
+        sky = (try? c.decodeIfPresent(SkyJudgment.self, forKey: .sky)) ?? nil
     }
 
     public struct Subject: Codable, Equatable, Sendable {

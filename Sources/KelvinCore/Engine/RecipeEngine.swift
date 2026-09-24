@@ -501,7 +501,8 @@ public enum RecipeEngine {
     static func skyMask(_ p: Perception, _ s: ImageStatistics, skyLuma: Double?,
                         style: CandidateStyle = .natural) -> Mask? {
         let outdoor = p.scene == .landscape || p.scene == .street || p.scene == .other
-        guard outdoor, let luma = skyLuma else { return nil }
+        // D34: a read that judged no sky visible outranks `SkyMask` finding one.
+        guard outdoor, p.sky != Perception.SkyJudgment.notVisible, let luma = skyLuma else { return nil }
 
         // Blown: the sky is near-white or the frame is clipping highlights. Veiled: a bright-ish
         // sky sitting over a lifted black point — the fog signature, measured rather than claimed
