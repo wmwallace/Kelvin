@@ -1618,3 +1618,30 @@ dropped), and an intent that no longer decodes costs the carry, never the shoot'
 
 **What does not travel**: the hero's exposure value, its masks' geometry, its per-band colour, its crop.
 Only outcome differences, and every number that reaches a frame is solved on that frame.
+
+---
+
+## D31 — A look is seen on the shoot's hardest frames before it is applied to them · **Decided 24 September 2026** (owner: "build it all")
+
+The sentence ends "and the chosen one carries across the shoot", and the choice was made on one frame.
+A look chosen on a well-lit hero reached the night end of the same shoot unseen; the first sight of it
+was a folder of exports. With D29 and D30 carrying more of the choice, that got more expensive.
+
+**Now Apply shows the shoot check first** on a shoot of more than eight frames: up to four frames, large,
+in the look about to be applied — style, carried creative look and matched hand finish — each with the
+reason it was picked ("Much darker", "Warmer light") and, where the curator will drop the style for that
+frame, the style it will open in instead. Apply from the sheet commits; Cancel changes nothing.
+"Check before applying" turns it off.
+
+**Chosen by measurement** (`ShootCheck.pick`): each frame placed by the strip's cached thumbnail in a
+space of brightness (stops from mid grey), shadow mass, highlight clip, and the light's colour on the
+engine's own cast estimator; greedy farthest-point sampling from the hero, stopping early rather than
+padding with near-duplicates, so a uniform shoot honestly says there is nothing to check. Frames evicted
+to iCloud are left out — previewing one is a download. A 400-frame shoot is sampled evenly to 160.
+
+**What each tile shows is the export's own path** (`adaptedRecipe` → `matchedRecipe` →
+`ShootLook.finished`), so the check cannot preview something export will not write, and the resolve it
+pays for is the cache the export then hits.
+
+**Not built:** a count of fallbacks across the whole shoot. Knowing it means resolving every frame, which
+is the export's work; the check reports fallbacks on the frames it shows.

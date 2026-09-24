@@ -800,6 +800,14 @@ final class AppState {
     }
     static let carryAdjustmentsKey = "shoot.carryAdjustments"
 
+    /// The shoot check on screen, if one is (D31, `ShootCheckSheet`).
+    var shootCheck: ShootCheckModel?
+    /// Whether Apply shows the shoot check first. On by default: it is the one moment a look is
+    /// about to reach frames nobody has looked at.
+    var checkBeforeApply = UserDefaults.standard.object(forKey: "shoot.checkBeforeApply") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(checkBeforeApply, forKey: "shoot.checkBeforeApply") }
+    }
+
     /// A hero measurement in flight, so a test (or a second apply) can wait for it.
     @ObservationIgnored private(set) var pendingIntent: Task<Void, Never>?
 
@@ -965,25 +973,12 @@ final class AppState {
             shootLook = next
             return
         }
-        guard let candidate = candidates.first(where: { $0.id == styleId }),
-              let finished = activeRecipe, let proxy = proxyCI else { return }
-        // Measured against what the app PUT UP — the style (unmatched), with the creative look the
-        // apply carries — and with geometry and healing left out of both, because a straightened
-        // crop changes what every region measures without being a finishing move.
-        var baseline = candidate.unmatchedRecipe ?? candidate.baseRecipe
-        if let look = lookId.flatMap(LookPreset.named) { baseline = look.applied(to: baseline) }
-        baseline.geometry = nil; baseline.heal = nil
-        var done = finished
-        done.geometry = nil; done.heal = nil
-        let job = IntentJob(proxy: proxy, baseline: baseline, finished: done, masks: proxyMaskBitmaps)
+        guard let job = heroFinishJob(styleId: styleId, lookId: lookId) else { return }
         pendingIntent = Task { [weak self] in
-            let measured = await Offload.run(.render, qos: .userInitiated) {
-                IntentResult(value: ResultMatch.intent(proxy: job.proxy, baseline: job.baseline,
-                                                       finished: job.finished, maskBitmaps: job.masks))
-            }
+            let measured = await Self.measure(job)
             guard let self, self.shootLookFolder == folder, let current = self.shootLook,
                   current.appliedAt == appliedAt,
-                  let intent = measured.value, !intent.isNeutral else { return }
+                  let intent = measured, !intent.isNeutral else { return }
             let next = current.attaching(intent, source: heroName, to: scope, inShootOf: self.folderPhotos)
             ShootLookStore.save(next, for: folder, in: self.shootLookDirectory)
             self.shootLook = next
@@ -997,9 +992,33 @@ final class AppState {
         }
     }
 
+    /// What measuring the open frame's hand finish needs, or nil when there is nothing to measure.
+    ///
+    /// Measured against what the app PUT UP — the style (unmatched), with the creative look the
+    /// apply carries — and with geometry and healing left out of both, because a straightened crop
+    /// changes what every region measures without being a finishing move.
+    func heroFinishJob(styleId: String, lookId: String?) -> IntentJob? {
+        guard isTouched, let candidate = candidates.first(where: { $0.id == styleId }),
+              let finished = activeRecipe, let proxy = proxyCI else { return nil }
+        var baseline = candidate.unmatchedRecipe ?? candidate.baseRecipe
+        if let look = lookId.flatMap(LookPreset.named) { baseline = look.applied(to: baseline) }
+        baseline.geometry = nil; baseline.heal = nil
+        var done = finished
+        done.geometry = nil; done.heal = nil
+        return IntentJob(proxy: proxy, baseline: baseline, finished: done, masks: proxyMaskBitmaps)
+    }
+
+    /// Render the hero twice on the render lane and measure the difference.
+    static func measure(_ job: IntentJob) async -> ResultMatch.Intent? {
+        await Offload.run(.render, qos: .userInitiated) {
+            IntentResult(value: ResultMatch.intent(proxy: job.proxy, baseline: job.baseline,
+                                                   finished: job.finished, maskBitmaps: job.masks))
+        }.value
+    }
+
     /// The hero measurement's inputs, crossing to the render lane. Core Image images are immutable
     /// recipes for pixels; the box says the crossing is deliberate, as `RenderInput` does.
-    private struct IntentJob: @unchecked Sendable {
+    struct IntentJob: @unchecked Sendable {
         let proxy: CIImage
         let baseline: Recipe
         let finished: Recipe
@@ -5932,7 +5951,8 @@ final class AppState {
                     // The hero's carried finish, solved on this frame through the creative look,
                     // BEFORE the look is composed — exactly as the canvas does it (D30).
                     let matched = try await matchedRecipe(for: url, resolved: resolved, style: style,
-                                                          look: carriedLookId)
+                                                          look: carriedLookId,
+                                                          intent: effectiveIntent(for: url))
                     adapted = ShootLook.finished(matched, look: carriedLookId)
                 } catch {
                     failed += 1; continue
@@ -6113,9 +6133,9 @@ final class AppState {
     /// frame carries none. Cached like the resolve, under a key that names the intent and the look
     /// — a change to either is a different answer, and serving the old one would export the
     /// previous hero's adjustments.
-    private func matchedRecipe(for url: URL, resolved: Recipe, style: CandidateStyle,
-                               look lookId: String?) async throws -> Recipe {
-        guard let intent = effectiveIntent(for: url), ResultMatch.enabled else { return resolved }
+    func matchedRecipe(for url: URL, resolved: Recipe, style: CandidateStyle,
+                       look lookId: String?, intent: ResultMatch.Intent?) async throws -> Recipe {
+        guard let intent, !intent.isNeutral, ResultMatch.enabled else { return resolved }
         let modelId = perceptionProvider.activeModelID
         let key = "\(style.id)|look:\(lookId ?? "-")|match:\(ResultMatch.signature(of: intent))"
         if let cached = ResolvedRecipeStore.load(for: url, styleId: key, modelId: modelId) {
@@ -6141,7 +6161,7 @@ final class AppState {
     }
     private struct DecodedProxy: @unchecked Sendable { let image: CIImage }
 
-    private func adaptedRecipe(for url: URL, style: CandidateStyle) async throws -> Recipe {
+    func adaptedRecipe(for url: URL, style: CandidateStyle) async throws -> Recipe {
         // PHOTO + STYLE → RECIPE IS DETERMINISTIC, so the answer is worth keeping. On a hit the
         // whole of this function is skipped, decode included — the caller decodes separately for
         // the render, so nothing below is needed to produce the file.
@@ -6919,6 +6939,9 @@ struct ContentView: View {
         }
         .task { await appState.loadDemoIfRequested() }
         .sheet(isPresented: $showShortcutsSheet) { ShortcutsSheet() }
+        .sheet(item: $appState.shootCheck, onDismiss: { appState.cancelShootCheck() }) { model in
+            ShootCheckSheet(appState: appState, model: model)
+        }
         // The only confirmation in the app, for the only action that touches an original. It names
         // the Trash rather than saying "delete", because where the files go is the reason this is
         // an acceptable thing to offer at all.
@@ -7832,7 +7855,7 @@ struct ContentView: View {
                 // and canvas resolve it per frame from there. Export is what makes files, and it is
                 // one button along.
                 if appState.folderPhotos.count > 1 {
-                    Button(action: { appState.applyLookToShoot() }) {
+                    Button(action: { appState.requestApply() }) {
                         toolbarLabel(appState.applyButtonLabel, filled: false)
                     }
                     .buttonStyle(.plain)
