@@ -723,6 +723,24 @@ are in `tuningSignature`.
 named `A` to `"0 B=0"` — zsh does not word-split — so the "off" arm ran on. Two corpora scored
 identically on and off; identical is a symptom, not a result. Spell the variables out.
 
+**The fire exempted its own faces (engine 0.7.2, same day).** Rule 2 shipped gated on
+`highlightClip < 0.02`, so a frame with the flame itself in shot skipped it and took the full +1 EV.
+Reported on `_DSC0507`: faces and forearms rendered as flat pure red. A white point already at 1.0
+has no headroom, so the gate is gone. Across all 49 frames of the shoot only the seven with the
+flame clipping ≥ 2% in a low-key frame move (`_DSC0482`–`0486`, `0505`, `0507`); the three
+clipping 1.3–1.7% (`0479`, `0501`, `0504`) were already bounded to 0 EV, so the gate had also made
+neighbouring frames of one scene disagree. Share of the frame at R ≥ 250 with G < 150:
+
+| | Natural before → after | Vivid before → after |
+|---|---|---|
+| `_DSC0507` | 4.34% → 0.34% | 5.12% → 0.67% |
+| `_DSC0484` | 2.59% → 0.21% | 2.94% → 0.46% |
+| `_DSC0486` (worst after) | 5.79% → 2.02% | 6.83% → 2.91% |
+
+The frames render darker (luma median 35 → 23 on `_DSC0507` Natural) and read as night. Corpora
+are untouched by construction: the bound is ramped on `shadowMass` from 0.30, and no corpus frame
+exceeds 0.24.
+
 ## A read that changes is not an edit that changes
 
 ⚠️ **Before blaming a prompt change for a quality complaint, measure whether it reached the
