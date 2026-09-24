@@ -45,7 +45,12 @@ public enum RecipeEngine {
     ///   • `SkyMask` refuses a warm region — a lit interior wall is not a sky (`KELVIN_SKY_WARM`);
     ///   • the low-key exposure bound reads the brightest channel, not luma (`KELVIN_HEADROOM_CHANNEL`);
     ///   • white balance leaves a frame alone whose greyest pixels read magenta (`KELVIN_WB_MAGENTA`).
-    public static let version = "0.7.5"
+    ///
+    /// 0.7.6 (24 Sep 2026): the candidate path passes `subjectLumaIsSkin` to `exposure`, so a subject
+    /// that is not skin (a sea stack, a silhouette) can re-open the band again while skin never does;
+    /// and the style levers from the render audit — dehaze yields to the stretch, a style's whites
+    /// bias obeys the clip gate, style and look temperature shifts are mired steps.
+    public static let version = "0.7.6"
 
     /// Below this confidence the engine drops all *stylistic* moves (contrast shaping,
     /// vibrance, point placement) and keeps only *corrective* ones justified purely by

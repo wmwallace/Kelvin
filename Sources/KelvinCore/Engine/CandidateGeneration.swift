@@ -65,7 +65,8 @@ public extension RecipeEngine {
         var g = GlobalAdjustments.neutral
 
         // --- Shared corrective baseline (identical across styles) ---
-        g.exposureEV = exposure(p, s, subjectLuma: subjectLuma)
+        // With the flag, so metered skin never re-opens the leave-alone band (0.7.5, `exposure`).
+        g.exposureEV = exposure(p, s, subjectLuma: subjectLuma, subjectLumaIsSkin: subjectLumaIsSkin)
         g.highlights = highlightRecovery(p, s)
         g.shadows = shadowLift(p, s)
         g.dehaze = dehazeAmount(p, s, skyLuma: skyLuma)
