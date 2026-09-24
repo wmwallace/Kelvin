@@ -121,12 +121,15 @@ public enum ShippedCandidates {
         private let lock = NSLock()
         private var next = 0
         private var measured: [(preview: CIImage, stats: ImageStatistics?)?]
+        /// A candidate `SkyGuard` changed, by index; nil where it left the recipe alone.
+        private var guarded: [Recipe?]
 
         init(recipes: [Recipe], measureOn: CIImage, bitmaps: [String: CIImage],
              isCurrent: @escaping @Sendable () -> Bool) {
             self.recipes = recipes; self.measureOn = measureOn; self.bitmaps = bitmaps
             self.isCurrent = isCurrent
             measured = Array(repeating: nil, count: recipes.count)
+            guarded = Array(repeating: nil, count: recipes.count)
         }
 
         func claim() -> Int? {
@@ -137,11 +140,15 @@ public enum ShippedCandidates {
             }
         }
 
-        func store(_ i: Int, preview: CIImage, stats: ImageStatistics?) {
-            lock.withLock { measured[i] = (preview, stats) }
+        func store(_ i: Int, recipe: Recipe, preview: CIImage, stats: ImageStatistics?) {
+            lock.withLock {
+                measured[i] = (preview, stats)
+                if recipe != recipes[i] { guarded[i] = recipe }
+            }
         }
 
         var results: [(preview: CIImage, stats: ImageStatistics?)?] { lock.withLock { measured } }
+        var guardedRecipes: [Recipe?] { lock.withLock { guarded } }
     }
 
     /// Measurements a caller has already taken of the frame, so `compose` does not take them again.
@@ -236,22 +243,28 @@ public enum ShippedCandidates {
         // independent and each is a readback, so the canvas does two at once (its render lane's
         // width); the harness does one, in order. Either way the scores are taken afterwards,
         // serially, against the one face set above, so the concurrency cannot change an answer.
+        // The sky, measured once for every candidate, so each can be held out of clipping its own
+        // levers pushed it into (`SkyGuard`). Nil when there is no sky, or the guard is off.
+        let skyGuard = SkyGuard.frame(proxy: measureOn, bitmaps: masks.bitmaps)
         let work = RenderWork(recipes: recipes, measureOn: measureOn, bitmaps: masks.bitmaps,
                               isCurrent: options.isCurrent)
         DispatchQueue.concurrentPerform(iterations: max(1, min(options.width, recipes.count))) { _ in
             while let i = work.claim() {
+                let recipe = skyGuard.map { SkyGuard.protect(work.recipes[i], on: $0) } ?? work.recipes[i]
                 // WITH the mask bitmaps. Without them the local half of the recipe is silently
                 // discarded and the curator scores a photograph that will never be shown.
-                let preview = Renderer.render(work.measureOn, with: work.recipes[i],
+                let preview = Renderer.render(work.measureOn, with: recipe,
                                               maskBitmaps: work.bitmaps)
-                work.store(i, preview: preview, stats: try? ImageStatistics.compute(preview))
+                work.store(i, recipe: recipe, preview: preview, stats: try? ImageStatistics.compute(preview))
             }
         }
         let measured = work.results
+        let guarded = work.guardedRecipes
         guard options.isCurrent() else { throw CancellationError() }
 
         var all: [Candidate] = []
-        for (recipe, result) in zip(recipes, measured) {
+        for (index, result) in measured.enumerated() {
+            let recipe = guarded[index] ?? recipes[index]
             guard let result, let renderedStats = result.stats else {
                 // An instrument throws rather than skipping: a set that quietly became seven
                 // styles would report a per-style row missing and a curated set chosen from a

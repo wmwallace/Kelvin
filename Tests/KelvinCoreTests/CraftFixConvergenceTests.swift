@@ -300,3 +300,60 @@ final class CraftFixConvergenceTests: XCTestCase {
                       "an automatic correction must stay inside the slider's range, got \(k) K")
     }
 }
+
+/// `_DSC5069` (Skagit tulips): the engine opened a bright sky over a dark foreground at highlights −70
+/// and +0.59 EV, 12% of the frame clipped, and Fix did nothing — the fixed −26 step was refused whole
+/// against the ceiling. The step is now sized from what is reachable, and takes back the lift once
+/// the recovery levers are spent.
+final class BlownHighlightsReachTests: XCTestCase {
+    private func reading() -> CraftFix.Reading {
+        let s = ImageStatistics(meanLuma: 0.5, medianLuma: 0.5, blackPoint: 0.02, shadowLevel: 0.1,
+                                highlightLevel: 0.99, whitePoint: 1.0, highlightClip: 0.12, shadowClip: 0,
+                                chromaA: 0, chromaB: 0)
+        return CraftFix.Reading(stats: s, face: FaceSkin.Reading(
+            faceCount: 0, skinLuma: nil, skinHueDegrees: nil, skinSaturation: nil,
+            skinRange: nil, skinClipHigh: nil, skinClipLow: nil))
+    }
+
+    func testWithRoomTheStepIsTheRecoveryItAlwaysWas() {
+        var g = GlobalAdjustments.neutral
+        g.highlights = -10
+        let s = CraftFix.step(for: .blownHighlights, reading: reading(), from: g)
+        XCTAssertEqual(s?.highlights, -26)
+        XCTAssertEqual(s?.whites, -8)
+        XCTAssertEqual(s?.exposureEV, 0)
+    }
+
+    func testAPartlySpentLeverGivesWhatItHasLeft() {
+        var g = GlobalAdjustments.neutral
+        g.highlights = -50
+        let s = CraftFix.step(for: .blownHighlights, reading: reading(), from: g)!
+        XCTAssertEqual(s.highlights, -10)
+        XCTAssertTrue(s.fullyLands(from: g, to: s.applied(to: g)), "a reachable step always lands")
+    }
+
+    func testSpentRecoveryTakesBackTheLift() {
+        var g = GlobalAdjustments.neutral
+        g.highlights = -70; g.exposureEV = 0.59
+        let s = CraftFix.step(for: .blownHighlights, reading: reading(), from: g)!
+        XCTAssertEqual(s.highlights, 0)
+        XCTAssertEqual(s.exposureEV, -0.2, accuracy: 1e-9)
+        let out = s.applied(to: g)
+        XCTAssertEqual(out.exposureEV, 0.39, accuracy: 1e-9)
+        XCTAssertTrue(s.fullyLands(from: g, to: out))
+    }
+
+    func testNeverDarkerThanAsShot() {
+        var g = GlobalAdjustments.neutral
+        g.highlights = -70; g.exposureEV = 0.1
+        let s = CraftFix.step(for: .blownHighlights, reading: reading(), from: g)!
+        XCTAssertEqual(s.applied(to: g).exposureEV, 0, accuracy: 1e-9)
+    }
+
+    func testNothingLeftToGiveIsNotApplicable() {
+        var g = GlobalAdjustments.neutral
+        g.highlights = -70; g.whites = -40; g.exposureEV = 0
+        XCTAssertNil(CraftFix.step(for: .blownHighlights, reading: reading(), from: g),
+                     "no lever has room: the loop reports it rather than pretending")
+    }
+}

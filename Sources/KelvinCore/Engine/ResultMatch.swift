@@ -119,6 +119,8 @@ public enum ResultMatch {
     struct Sampled {
         var L: [Double], a: [Double], b: [Double]
         var clipped: Double
+        /// Which grid cells have any channel at or above 254.
+        var clippedMask: [Bool]
     }
 
     static func sample(_ image: CIImage) -> Sampled? {
@@ -126,16 +128,17 @@ public enum ResultMatch {
         let n = grid * grid
         var L = [Double](repeating: 0, count: n), A = L, B = L
         var clipped = 0
+        var mask = [Bool](repeating: false, count: n)
         data.withUnsafeBytes { raw in
             let p = raw.bindMemory(to: UInt8.self)
             for i in 0..<n {
                 let r = p[i * 4], g = p[i * 4 + 1], bl = p[i * 4 + 2]
-                if r >= 254 || g >= 254 || bl >= 254 { clipped += 1 }
+                if r >= 254 || g >= 254 || bl >= 254 { clipped += 1; mask[i] = true }
                 let lab = Lab.fromSRGB8(r: r, g: g, b: bl)
                 L[i] = lab.L; A[i] = lab.a; B[i] = lab.b
             }
         }
-        return Sampled(L: L, a: A, b: B, clipped: Double(clipped) / Double(n))
+        return Sampled(L: L, a: A, b: B, clipped: Double(clipped) / Double(n), clippedMask: mask)
     }
 
     /// The least-chromatic fifth of a render's pixels, excluding the very dark and the clipped

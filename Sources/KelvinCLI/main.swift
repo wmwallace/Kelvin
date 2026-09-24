@@ -50,6 +50,7 @@ func printUsage() {
       \(tool) look-audit --in <image> [--perception <p.json>] | --list <frames.tsv>
                      [--out <audit.jsonl>] [--edge <n>] [--dump-dir <dir>] [--looks <id,id,…>]
                      [--ablate]
+      \(tool) fix-probe --in <image> [--recipe <recipe.json>] [--perception <p.json>]
       \(tool) match-probe --corpus <paired corpus> [--heroes <n>] [--out <rows.jsonl>]
                      [--dump-dir <dir>]
 
@@ -3009,6 +3010,58 @@ case "opener-probe":
         print("frame by 3 is not a calibration, it is D19 again. Then confirm the chosen floors")
         print("end to end with KELVIN_OPENER=\(style) through `eval`, where curation still gets")
         print("its veto, and hold them out per docs/EVALUATION.md before shipping them.")
+    } catch {
+        fail("\(error)")
+    }
+
+case "fix-probe":
+    // WHAT THE FIX BUTTON DOES ON THIS PHOTOGRAPH, and why — the app's own loop (`CraftFix.converge`)
+    // on the app's canvas route, one flagged issue at a time. Written because "I click Fix and
+    // nothing happens" is a sentence the app could not answer: the loop returns an outcome and the
+    // app used to throw it away.
+    do {
+        let rest = Array(arguments.dropFirst())
+        guard let inPath = value(for: "--in", in: rest) else { fail("fix-probe requires --in") }
+        let url = URL(fileURLWithPath: inPath)
+        let full = try ImageDecoder.decode(url: url)
+        let ctx = CIContext(options: [.cacheIntermediates: false])
+        func materialise(_ i: CIImage) -> CIImage { ctx.createCGImage(i, from: i.extent).map { CIImage(cgImage: $0) } ?? i }
+        let canvas = PerceptionProxy.fromFile(url, maxEdge: 1200, matching: full.extent)
+            ?? materialise(PerceptionProxy.downsample(full, maxEdge: 1200))
+        let measureOn = materialise(PerceptionProxy.downsample(canvas))
+        let perception = try value(for: "--perception", in: rest).map { try PerceptionIO.load(from: URL(fileURLWithPath: $0)) }
+            ?? VisionPerceptionProvider.read(measureOn)
+        let composed = try ShippedCandidates.compose(for: measureOn, perception: perception, iso: ExifReader.iso(url: url))
+        var recipe = composed.chosen?.recipe ?? .neutral
+        if let r = value(for: "--recipe", in: rest) {
+            // A saved edit (EditStore JSON, whose `recipe` is the composed recipe) or a bare recipe.
+            let data = try Data(contentsOf: URL(fileURLWithPath: r))
+            if let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any], let inner = obj["recipe"] {
+                recipe = try JSONDecoder().decode(Recipe.self, from: JSONSerialization.data(withJSONObject: inner))
+            } else {
+                recipe = try JSONDecoder().decode(Recipe.self, from: data)
+            }
+        }
+        let masks = composed.masks.bitmaps.mapValues { LocalMasks.scale($0, to: canvas.extent) }
+        func reading(_ g: GlobalAdjustments) throws -> CraftFix.Reading {
+            var r = recipe; r.global = g
+            let rendered = Renderer.render(canvas, with: r, maskBitmaps: masks)
+            return CraftFix.Reading(stats: try ImageStatistics.compute(rendered), face: FaceSkin.read(in: rendered))
+        }
+        let start = try reading(recipe.global)
+        print("flagged: \(start.issues.map(\.rawValue).joined(separator: ", "))")
+        let g = recipe.global
+        print(String(format: "start: ev %+.2f highlights %.0f whites %.0f shadows %.0f contrast %.0f · clip %.2f%%",
+                     g.exposureEV, g.highlights, g.whites, g.shadows, g.contrast, start.stats.highlightClip * 100))
+        let isPerson = SubjectMask.person(in: canvas) != nil
+        for issue in start.issues {
+            let result = try CraftFix.converge(issue: issue, from: recipe.global, subjectIsPerson: isPerson, measure: reading)
+            let after = try reading(result.global)
+            let o = result.global
+            print(String(format: "  %@: %@ after %d pass(es) → ev %+.2f highlights %.0f whites %.0f · clip %.2f%% · still flagged: %@",
+                         issue.rawValue, result.outcome.rawValue, result.passes, o.exposureEV, o.highlights, o.whites,
+                         after.stats.highlightClip * 100, after.issues.contains(issue) ? "yes" : "no"))
+        }
     } catch {
         fail("\(error)")
     }

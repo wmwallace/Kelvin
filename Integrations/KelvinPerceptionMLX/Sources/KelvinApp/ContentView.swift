@@ -4208,6 +4208,16 @@ final class AppState {
         if CraftFix.subjectStep(for: issue) != nil { applySubjectFix(issue); return }
 
         guard !fixInProgress, let proxy = proxyCI, let recipe = activeRecipe else { return }
+        // BLOWN HIGHLIGHTS IN THE SKY ARE FIXED IN THE SKY. A global pull takes the lift back off
+        // the foreground too — the people go dark again to save the clouds — when what a
+        // photographer does is hold the sky down with a graduated filter and keep the rest. So the
+        // sky goes first, through its own mask (`SkyGuard`, the same closed loop the engine now
+        // runs at compose); only clipping it does not account for falls through to the global loop.
+        if issue == .blownHighlights, proxyMaskBitmaps["sky"] != nil, !skyFixTried {
+            applySkyFix(proxy: proxy, recipe: recipe)
+            return
+        }
+        skyFixTried = false
         fixInProgress = true
         let start = edit
         // WHICH PHOTOGRAPH THIS RUN IS ABOUT, captured before the work starts.
@@ -4233,24 +4243,105 @@ final class AppState {
                 // segmentation answers honestly, and its cost is one click's worth, not one
                 // render's.
                 let isPerson = SubjectMask.person(in: input.proxy) != nil
-                return (try? CraftFix.converge(issue: issue, from: start,
-                                               subjectIsPerson: isPerson) { g in
+                return try? CraftFix.converge(issue: issue, from: start,
+                                              subjectIsPerson: isPerson) { g in
                     var recipe = input.recipe
                     recipe.global = g
                     let rendered = Renderer.render(input.proxy, with: recipe, maskBitmaps: input.bitmaps)
                     return CraftFix.Reading(stats: try ImageStatistics.compute(rendered),
                                             face: FaceSkin.read(in: rendered))
-                })?.global
+                }
             }
             await MainActor.run {
                 // Cleared even when the result is discarded, or the Fix buttons stay wedged on the
                 // photograph you moved to.
                 self.fixInProgress = false
                 guard self.imageURL == photo else { return }
-                guard let settled, settled != self.edit else { return }
-                self.edit = settled
+                // ALWAYS SAY WHAT HAPPENED. The loop returns why it stopped, and this used to throw
+                // that away and return quietly whenever nothing moved — so a Fix that was refused
+                // looked exactly like a Fix button that was broken. Reported that way.
+                self.statusMessage = Self.fixStatus(issue, settled)
+                guard let settled, settled.global != self.edit else { return }
+                self.edit = settled.global
                 self.onEdit()
             }
+        }
+    }
+
+    /// Set while a sky fix hands over to the global loop, so the second call skips the sky.
+    @ObservationIgnored private var skyFixTried = false
+
+    /// Hold the sky down through its mask until the clipping the edit added there is gone. Falls
+    /// through to the global loop when the sky is not where the clipping is.
+    private func applySkyFix(proxy: CIImage, recipe: Recipe) {
+        fixInProgress = true
+        let photo = imageURL
+        let job = SkyFixJob(proxy: proxy, recipe: recipe, bitmaps: proxyMaskBitmaps)
+        Task { [weak self] in
+            let protected = await Offload.run(.render, qos: .userInitiated) { () -> SkyFixResult in
+                guard let frame = SkyGuard.frame(proxy: job.proxy, bitmaps: job.bitmaps, force: true)
+                else { return SkyFixResult(mask: nil) }
+                let out = SkyGuard.protect(job.recipe, on: frame)
+                return SkyFixResult(mask: out == job.recipe ? nil : out.masks?.first { $0.type == "sky" })
+            }
+            guard let self else { return }
+            self.fixInProgress = false
+            guard self.imageURL == photo else { return }
+            guard let sky = protected.mask else {
+                // Not the sky's clipping: the global loop gets its turn, and says what it did.
+                self.skyFixTried = true
+                self.applyFix(.blownHighlights)
+                return
+            }
+            if !self.baseMasks.contains(where: { $0.id == sky.id }) {
+                self.baseMasks.append(sky)
+                self.maskEnabled[sky.id] = true
+            }
+            self.maskAdjustments[sky.id] = sky.adjustments
+            self.onEdit()
+            self.statusMessage = "Held the sky down to bring its highlights back — the rest of the "
+                + "photo is unchanged"
+        }
+    }
+    private struct SkyFixJob: @unchecked Sendable {
+        let proxy: CIImage
+        let recipe: Recipe
+        let bitmaps: [String: CIImage]
+    }
+    private struct SkyFixResult: @unchecked Sendable { let mask: Mask? }
+
+    /// The sentence a single Fix leaves on the status line — one for every way the loop can stop.
+    static func fixStatus(_ issue: AestheticEvaluator.Issue, _ result: CraftFix.Result?) -> String {
+        guard let result else { return "Couldn't measure this photo — nothing changed" }
+        let what: String
+        switch issue {
+        case .blownHighlights:   what = "the blown highlights"
+        case .crushedShadows:    what = "the crushed shadows"
+        case .flat:              what = "the flatness"
+        case .colorCast:         what = "the colour cast"
+        case .shadowDetailLost:  what = "the lost shadow detail"
+        case .skinOverSaturated: what = "the skin's saturation"
+        case .skinAshy:          what = "the ashy skin"
+        case .skinHue:           what = "the skin's hue"
+        case .subjectFlat:       what = "the flat subject"
+        case .subjectTooDark:    what = "the dark subject"
+        case .subjectBlown:      what = "the subject's highlights"
+        }
+        switch result.outcome {
+        case .resolved:
+            return "Fixed \(what)"
+        case .notFlagged:
+            return "Nothing to fix — \(what) had already cleared"
+        case .notApplicable:
+            return "No automatic fix for \(what) on this photo — the sliders can still reach it"
+        case .noProgress where result.passes == 0:
+            return "Fix couldn't improve \(what) here — that detail isn't in the file to recover"
+        case .wouldHarm where result.passes == 0:
+            return "Didn't fix \(what) — going further would damage the rest of the photo"
+        case .budgetSpent where result.passes == 0:
+            return "Already corrected as far as an automatic fix goes — use the sliders to go further"
+        case .noProgress, .wouldHarm, .budgetSpent:
+            return "Improved \(what), but not all the way — click Fix again, or use the sliders"
         }
     }
 
