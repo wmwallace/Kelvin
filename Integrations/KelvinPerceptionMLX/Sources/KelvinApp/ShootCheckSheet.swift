@@ -205,10 +205,13 @@ struct ShootCheckSheet: View {
                 .toggleStyle(.checkbox)
                 .foregroundColor(Theme.inkDim)
                 .help("Show this before a look goes onto a shoot. Off, Apply puts it on at once.")
+                .accessibilityIdentifier("check.toggle")
                 Button("Cancel") { appState.cancelShootCheck() }
                     .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("check.cancel")
                 Button(appState.applyButtonLabel) { appState.confirmShootCheck() }
                     .keyboardShortcut(.defaultAction)
+                    .accessibilityIdentifier("check.apply")
             }
         }
         .padding(20)
@@ -250,5 +253,6 @@ struct ShootCheckSheet: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(p.reason), \(p.name)" + (p.fellBackTo.map { ", opens in \($0)" } ?? ""))
+        .accessibilityIdentifier(p.image == nil ? "check.tile.pending" : "check.tile.ready")
     }
 }

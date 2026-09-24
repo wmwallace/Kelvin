@@ -12,7 +12,7 @@ BUILD_PATH ?= $(TMPDIR)kelvin-build
 SWIFT := swift
 SWIFTFLAGS := --scratch-path "$(BUILD_PATH)"
 
-.PHONY: build test ratchet release clean bin eval render app open stage-model app-staged delta trace sparkle-guard
+.PHONY: build test ratchet release clean bin eval render app open stage-model app-staged delta trace sparkle-guard ui-test ui-test-build
 
 build:
 	$(SWIFT) build $(SWIFTFLAGS)
@@ -88,3 +88,19 @@ delta:
 app-staged: stage-model sparkle-guard
 	cd Integrations/KelvinPerceptionMLX && \
 	  KELVIN_MODEL_PATH="$(PWD)/Vendor/PerceptionModel" $(SWIFT) run kelvin-app
+
+# The Mac app's UI tests (Apps/KelvinMacUITests): package a dev Kelvin.app, generate the test project,
+# run. ⚠️ They drive the real mouse and keyboard — start them when nobody is at the Mac.
+# `make ui-test-build` compiles them without running anything.
+UI_DD ?= $(TMPDIR)kelvin-uitest-dd
+UI_APP ?= $(TMPDIR)kelvin-uitest-app
+ui-test-build:
+	cd Apps/KelvinMacUITests && xcodegen generate --quiet
+	cd Apps/KelvinMacUITests && xcodebuild -project KelvinMacUITests.xcodeproj -scheme KelvinMacUITests \
+	  -derivedDataPath "$(UI_DD)" build-for-testing
+
+ui-test: ui-test-build
+	KELVIN_DMG=0 scripts/package-app.sh --debug "$(UI_APP)"
+	cd Apps/KelvinMacUITests && TEST_RUNNER_KELVIN_UI_APP="$(UI_APP)/Kelvin.app" xcodebuild \
+	  -project KelvinMacUITests.xcodeproj -scheme KelvinMacUITests -derivedDataPath "$(UI_DD)" \
+	  test-without-building
