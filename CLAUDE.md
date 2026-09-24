@@ -47,7 +47,10 @@ These are load-bearing. Do not violate them without an explicit conversation.
 
 "The model" is whatever reads the scene. Since **D27** that is Apple's Vision framework, not a
 bundled language model — the rule is unchanged, and stricter: Vision's classifier confidences
-decide a category inside `VisionPerceptionProvider` and never reach the engine.
+decide a category inside `VisionPerceptionProvider` and never reach the engine. Where the Mac has
+Apple's on-device Foundation Model, **D33** adds two of its judgments — indoors, and warm outdoor
+light — in fields the vocabulary already had; each was measured on labelled frames first, and its
+other answers are dropped.
 
 The reader outputs **structured judgments only**: scene type, subject, lighting condition,
 likely intent. Classification and description.

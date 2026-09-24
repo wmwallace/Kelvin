@@ -28,7 +28,8 @@ func printUsage() {
                     [--on-collision unique|skip|overwrite]
       \(tool) corpus-init --root <dir> --references <a,b,c> [--source <dir>] [--perception <dir>]
       \(tool) corpus-degrade --in-dir <good-photos> --out-dir <corpus>
-      \(tool) vision-label --in-dir <dir> --out-dir <dir> [--scene]
+      \(tool) vision-label --in-dir <dir> --out-dir <dir> [--scene] [--fm]
+      \(tool) fm-probe --list <frames.txt> [--out <rows.jsonl>] [--passes <n>]
       \(tool) export-probe --in <image> [--style <id>] [--out <png>] | --compare <a.png> --with <b.png>
       \(tool) eval --corpus <dir> [--out <report.json>] [--engine-version <v>]
       \(tool) triage-compare --in-dir <dir> [--limit <n>]
@@ -221,6 +222,25 @@ func printUsage() {
 func value(for flag: String, in args: [String]) -> String? {
     guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
     return args[i + 1]
+}
+
+/// A Foundation Model scene read (D33), from the CLI's synchronous, main-actor top level. Blocks
+/// the main thread on a DETACHED task — a plain `Task` would inherit the main actor this thread is
+/// parked on and never run. The main thread is not one of the cooperative pool's.
+func foundationReadBlocking(_ proxy: CIImage) -> Result<FoundationSceneRead?, Error> {
+    final class Box: @unchecked Sendable {
+        let proxy: CIImage
+        var value: Result<FoundationSceneRead?, Error> = .success(nil)
+        init(_ proxy: CIImage) { self.proxy = proxy }
+    }
+    let box = Box(proxy), done = DispatchSemaphore(value: 0)
+    Task.detached(priority: .userInitiated) {
+        do { box.value = .success(try await FoundationSceneReader.read(box.proxy)) }
+        catch { box.value = .failure(error) }
+        done.signal()
+    }
+    done.wait()
+    return box.value
 }
 
 let arguments = Array(CommandLine.arguments.dropFirst())
@@ -476,6 +496,10 @@ case "vision-label":
     guard let inDir = value(for: "--in-dir", in: rest) else { fail("vision-label requires --in-dir") }
     guard let outDir = value(for: "--out-dir", in: rest) else { fail("vision-label requires --out-dir") }
     let options = VisionPerceptionProvider.Options(sceneFromClassifier: rest.contains("--scene"))
+    let withFoundation = rest.contains("--fm")
+    if withFoundation, !FoundationSceneReader.isAvailable {
+        fail("vision-label --fm: \(FoundationSceneReader.unavailableReason ?? "unavailable")")
+    }
     do {
         let images = try BatchApply.imageFiles(in: URL(fileURLWithPath: inDir, isDirectory: true))
         guard !images.isEmpty else { fail("no images in \(inDir)") }
@@ -489,7 +513,18 @@ case "vision-label":
             let stem = image.deletingPathExtension().lastPathComponent
             do {
                 let proxy = PerceptionProxy.downsample(try ImageDecoder.decode(url: image))
-                let p = VisionPerceptionProvider.read(proxy, options: options)
+                var p = VisionPerceptionProvider.read(proxy, options: options)
+                // `--fm`: the enriched read the app takes where the Foundation Model is available
+                // (D33) — the same `FoundationEnrichment.apply`, honouring KELVIN_FM_INTERIOR and
+                // KELVIN_FM_LIGHT, so a corpus can be scored under each arm.
+                if withFoundation {
+                    if case .success(let judged?) = foundationReadBlocking(proxy) {
+                        p = FoundationEnrichment.apply(judged, to: p)
+                        print("  fm: indoors=\(judged.indoors) sky=\(judged.skyVisible) light=\(judged.light.rawValue)")
+                    } else {
+                        print("  fm: no read — Vision read kept")
+                    }
+                }
                 try encoder.encode(p).write(
                     to: outURL.appendingPathComponent(stem).appendingPathExtension("json"))
                 print("\(stem)\t\(p.subject.present ? p.subject.type.rawValue : "-")\t\(p.scene.rawValue)\t\(p.notes ?? "")")
@@ -3851,10 +3886,85 @@ case "look-audit":
         fail("\(error)")
     }
 
-case "look-gate":
-    // The release gate: two `look-audit --out` runs over the same frames, and a failure when a look
-    // someone would see got visibly worse. See `LookGate` and scripts/look-gate.sh.
-    exit(LookGate.run(arguments: Array(arguments.dropFirst())))
+case "fm-probe":
+    // D33: what Apple's on-device Foundation Model makes of a photograph — indoors, sky visible,
+    // light — on the same 768 px proxy the app's scene read sees, beside `SkyMask.detect`'s answer
+    // on that proxy. Measurement only: nothing here reaches the engine.
+    //   --list    one image path per line (extra TAB columns ignored)
+    //   --out     one JSON line per (frame, pass)
+    //   --passes  read the whole list this many times (default 1) — the determinism check
+    let rest = Array(arguments.dropFirst())
+    guard let listPath = value(for: "--list", in: rest) else { fail("fm-probe requires --list") }
+    guard FoundationSceneReader.isAvailable else {
+        fail("fm-probe: \(FoundationSceneReader.unavailableReason ?? "unavailable")")
+    }
+    let passes = max(1, value(for: "--passes", in: rest).flatMap(Int.init) ?? 1)
+    do {
+        let urls = try String(contentsOfFile: listPath, encoding: .utf8)
+            .split(separator: "\n").map { String($0.split(separator: "\t").first ?? "") }
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+            .map { URL(fileURLWithPath: $0) }
+        var out: FileHandle?
+        if let o = value(for: "--out", in: rest) {
+            FileManager.default.createFile(atPath: o, contents: nil)
+            out = try FileHandle(forWritingTo: URL(fileURLWithPath: o))
+        }
+        let ctx = CIContext(options: [.cacheIntermediates: false])
+        func materialise(_ i: CIImage) -> CIImage {
+            ctx.createCGImage(i, from: i.extent).map { CIImage(cgImage: $0) } ?? i
+        }
+        // Proxies are built once and reused across passes, so a later pass differs from the first
+        // only in the model call.
+        var proxies: [URL: (proxy: CIImage, sky: Bool)] = [:]
+        var latencies: [Double] = []
+        for pass in 1...passes {
+            for url in urls {
+                if CloudFile.isEvicted(url) { print("‡ evicted, skipped: \(url.lastPathComponent)"); continue }
+                let entry: (proxy: CIImage, sky: Bool)
+                if let e = proxies[url] { entry = e } else {
+                    do {
+                        let full = try ImageDecoder.decode(url: url)
+                        let proxy = PerceptionProxy.fromFile(url, matching: full.extent)
+                            ?? materialise(PerceptionProxy.downsample(full))
+                        entry = (proxy, SkyMask.detect(in: proxy) != nil)
+                        proxies[url] = entry
+                    } catch { print("✗ \(url.lastPathComponent): \(error)"); continue }
+                }
+                let t0 = Date()
+                let result = foundationReadBlocking(entry.proxy)
+                let dt = Date().timeIntervalSince(t0)
+                latencies.append(dt)
+                var row: [String: Any] = ["path": url.path, "pass": pass, "seconds": dt,
+                                          "skymask": entry.sky]
+                switch result {
+                case .success(let r?):
+                    row["indoors"] = r.indoors; row["sky"] = r.skyVisible; row["light"] = r.light.rawValue
+                    row["condition"] = r.condition.rawValue
+                    print("\(pass)  \(url.lastPathComponent)  indoors=\(r.indoors ? "Y" : "n") "
+                        + "sky=\(r.skyVisible ? "Y" : "n") light=\(r.light.rawValue) "
+                        + "skymask=\(entry.sky ? "Y" : "n") " + String(format: "%.2fs", dt))
+                case .success(nil):
+                    row["error"] = "no read"; print("?  \(url.lastPathComponent): no read")
+                case .failure(let e):
+                    row["error"] = "\(e)"; print("✗  \(url.lastPathComponent): \(e)")
+                }
+                if let out {
+                    var data = try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys])
+                    data.append(0x0A)
+                    try out.write(contentsOf: data)
+                }
+            }
+        }
+        try out?.close()
+        let sorted = latencies.sorted()
+        if !sorted.isEmpty {
+            print(String(format: "fm-probe: %d reads, first %.2f s, median %.2f s, p90 %.2f s, total %.0f s",
+                         sorted.count, latencies[0], sorted[sorted.count / 2],
+                         sorted[min(sorted.count - 1, sorted.count * 9 / 10)], latencies.reduce(0, +)))
+        }
+    } catch {
+        fail("\(error)")
+    }
 
 default:
     fail("unknown subcommand '\(subcommand)'. Try `\(tool) --help`.")

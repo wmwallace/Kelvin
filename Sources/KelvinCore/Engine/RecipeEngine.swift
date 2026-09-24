@@ -157,7 +157,12 @@ public enum RecipeEngine {
             "clarityFocus:\(FocusMeasure.engineDampingEnabled ? "on" : "off")",
             // The measurement proxy's edge moves every statistic and every mask luma, so a
             // `KELVIN_PROXY_EDGE` sweep would otherwise be served the previous arm's recipes.
-            "proxyEdge:\(PerceptionProxy.defaultMaxEdge)"
+            "proxyEdge:\(PerceptionProxy.defaultMaxEdge)",
+            // D33: which Foundation Model judgments a scene read carries. They reach the engine
+            // through the perception (`FoundationEnrichment`), not an engine constant — but a
+            // `KELVIN_FM_INTERIOR` / `KELVIN_FM_LIGHT` arm must not be served the other arm's
+            // recipes any more than a sky sweep may.
+            "fm:\(EnrichedPerceptionProvider.enrichmentActive ? FoundationEnrichment.signature : "off")"
         ].joined(separator: ";")
     }
 
