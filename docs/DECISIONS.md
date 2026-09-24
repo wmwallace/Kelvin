@@ -1653,76 +1653,109 @@ is the export's work; the check reports fallbacks on the frames it shows.
 
 ---
 
-## D32 — Tap-to-segment masks store taps, regenerated from the file · **Decided 24 September 2026** (schema addition; the owner's instruction: "let's implement")
+## D33 — The on-device Foundation Model reads two things well, and the scene read carries them · **Decided 24 September 2026** (in-project decisions delegated 22 Sep; measured before integrating)
 
-**The gap.** The wand (`Mask.region`, `RegionGrow`) selects by colour, so it leaks wherever the thing
-clicked touches its own colour: on `_DSC6390` a tap on the left sea stack runs along the surf into
-Haystack Rock. `SubjectInstances` is object-aware but offers only what Vision finds salient, and skips
-both smaller stacks. macOS 27 / iOS 27 ship Apple's iterative segmentation
-(`GenerateIterativeSegmentationRequest`): tap a thing and get the thing, then tap to add a part
-and ⌥-tap to take one away.
+macOS 27 / iOS 27 let apps hand Apple's on-device Foundation Model an image. D-model-3 recorded it as
+text-only and D27 reserved it for display prose, "never for an engine input: it changes with the OS".
+Two engine bugs made it worth measuring anyway, both caused by D27's constant read: **the sky lever runs
+indoors** (the scene is always `.other`, which counts as outdoor, so `SkyMask` found a "sky" in the
+Thanksgiving living room and Dramatic/Rich darkened part of the room), and **`warmthIsThePoint` is
+dead** (the light is always `indoor-daylight`, so the Fix button offers to correct firelight and
+sunsets).
 
-**The schema: `Mask.segment: SegmentSeed?`**, holding `include` and `exclude` lists of normalised
-top-left taps. The mask's `type` is `object` and its `source` is `tap-segment`. The field is
-optional, decoded with `decodeIfPresent`, clamped, and capped at 32 taps a list. It is **the taps,
-never a bitmap** (RECIPE-SCHEMA #6). Two things made that safe to decide:
+**The read.** `FoundationSceneReader`: guided generation into two booleans and one word from a closed
+list — `indoors`, `skyVisible`, `light` (daylight, overcast, golden hour, blue hour, firelight, tungsten,
+mixed, flash, night) — on the same 768 px proxy Vision reads, greedy sampling, a fresh session per
+photograph, `SystemLanguageModel.default` only (never Private Cloud Compute). No numbers and no free
+text: non-negotiable #1 holds.
 
-- *It regenerates.* The same taps give byte-identical masks run to run. At different sizes they
-  agree closely: 768 against 2400 px on `_DSC6390` (seed, one exclusion, one addition) disagree on
-  0.04% of pixels. The canvas's 1200 against the export's 2048 disagree on 0.02% (a person,
-  `IMG_2278`), 0.06% (a dog, `IMG_1746`) and 0.03% (`_DSC6390`), with identical coverage.
-- *Order does not matter.* Adding the taps together after the seed, rather than one perform per
-  tap, differs by 0.04%, so two unordered lists are enough.
+### Measured first (`kelvin-cli fm-probe`)
 
-**How it renders.** The renderer cannot make this source itself, because the request is async and
-`Renderer.render` is not. So the caller supplies the bitmap by mask id, and **with no bitmap the mask
-is skipped**. It never falls back to a bitmap filed under the type or to another source.
+115 frames across 21 shoots (beaches, wedding ceremony and reception, a firelit patio, interiors,
+sunsets, tulips, aurora, overcast coast), labelled by eye before the model was run; 113 read on the
+first pass (two transient `ModelManagerError`s under a load average of 300+, both read fine on the
+second).
 
-- *Canvas:* segmented on the edit proxy as decoded (the wand's rule: the photograph that was
-  clicked), on the Vision lane, cached per mask by taps.
-- *Export:* `LocalMasks.measureForDelivery(…, segmenting:)` segments the same taps again on the
-  2048 px delivery image, for both the single export and the batch. A mask whose taps come back
-  empty is reported with the lost subjects, not written as nothing.
-- *CLI:* `kelvin-cli render` does the same.
-
-**D21, and the one exception it now carries.** The request is async-only, and it parks the
-cooperative thread it runs on. Measured with the pool held to one thread
-(`LIBDISPATCH_COOPERATIVE_POOL_STRICT=1`), a ticker task went silent for the whole of each
-perform. Pinning the task to a dispatch-backed `TaskExecutor` did not help: Vision hops back onto
-the pool. It cannot be kept off the pool, so it is kept to **one at a time**.
-`ObjectSegmentation`'s functions block their caller on a semaphore, and the app calls them only
-from the serial Vision lane. That is the MLX token loop's bargain again. The cost is one pool
-thread for 0.12–0.6 s a segmentation, or ~10 s while the model loads.
-
-**Measured against the wand** at the same tap, on the same 1200 px proxies, wand at tolerance 0.10
-(`kelvin-cli segment` / `grow`):
-
-| frame, tap | wand | object |
+| field | result | verdict |
 |---|---|---|
-| `_DSC6390` left sea stack | leaks along the surf into Haystack Rock | the stack alone |
-| `_DSC6390` Haystack Rock | a mottled patch of the green cap | the rock, **plus** the stack beside it (one ⌥-tap removes it) |
-| `IMG_1746` dog | scattered patches of fur | the whole dog, with the leash carved out |
-| `IMG_2278` a man's dark shirt | the shirt, then out into the tree line | the man, head to shoes, not his neighbour |
-| `IMG_2278` Capitol dome | the dome's cap | dome and building |
-| `_DSC0140` a cormorant on a buoy | a miss (below minimum coverage) | the bird; one more tap adds the buoy |
+| indoors | **113/113** — 27/27 interiors, 86/86 exteriors (incl. a car interior, covered porches, firelit patios) | carried |
+| sky visible | 101/113 (89.4%); 98/104 excluding ten frames where the sky is a sliver or through a window | measured well — **not carried, see below** |
+| light, exact | 58/113 (51%); daylight/overcast is a coin the model always calls "daylight" | not used |
+| light, indoors | "tungsten" for **every** room — daylit, flash-lit, lamp-lit alike (9 of 25 right) | never written |
+| light, warm outdoors | golden hour 5/5, firelight 7/7, night 2/2 of what it called; nothing outdoors called warm that was not (3 dusk frames missed) | carried |
 
-The object result was better in every case. It can over-include, as on Haystack, and the answer
-is an ⌥-tap, not a tolerance to guess.
+**Against `SkyMask.detect`** on the same proxies: SkyMask fired on 8 frames with no sky (5 rooms,
+including the Thanksgiving frame, and 3 outdoor frames — water, sand, surf) and missed 15 real skies.
+Gating it on the model's `skyVisible` would take the false positives **8 → 1 and lose no real sky**.
+Gating it on `indoors` takes them 8 → 3 and drops two window skies in rooms, where a sky lever has no
+business anyway.
 
-**Availability.** Every reference to the request sits inside `#if compiler(>=6.4)` (Xcode 27) and
-`#available(macOS 27, iOS 27, *)`. CI's Xcode 16 compiles the feature out. `isSupported` is then
-false and the Mac shows the Object button disabled with "Object needs macOS 27", not a button that
-does nothing. The first use on a Mac downloads Apple's model (~6 s, measured here), and each launch
-pays a model load (~10 s). Picking the tool starts both while the photographer aims, and the status
-line says so.
+**Determinism:** the same 113 frames read twice gave identical answers, 113/113. **Latency** (this Mac,
+load average 300–700 from other work throughout): first read 8.6 s cold, then median 3.0 s, p90 7.8 s;
+on a quiet machine 1.2 s steady. Vision is 0.1 s.
 
-**What it does not change.** `version` stays 1: the change is additive. An older *renderer* ignores
-`segment` and has no bitmap for the mask, so it renders nothing there. An older *app* cannot decode
-a saved edit containing the new `object` mask kind, which is closed, like `.wand` when it arrived.
-It opens that photograph unedited. Taps are coordinates on one frame, so an object mask is not a
-capturable preset and does not travel with a shoot's look (D30: masks' geometry stays put).
+### What is carried, and how
 
-**iPhone.** `ObjectSegmentation` is in KelvinCore and compiles for iOS, so the core is ready. The
-phone app has no masks at all yet: no mask state, no local adjustments, and a `PhoneEdit` that
-stores a style and offsets. Tapping to select would be its first mask feature, not a port of this
-one, so it is not built here.
+`FoundationEnrichment.apply` writes into fields the vocabulary already has — no new category:
+
+- **indoors → `scene: .interior`**, only over the constant `.other`. The sky lever's existing outdoor
+  gate (`RecipeEngine.skyMask`, unedited) then does the rest; so do the engine's other interior rules
+  (exposure target 0.44, clarity 6, no foliage memory colour, no global dehaze), which were written for
+  a model that emitted `interior` before D27.
+- **warm outdoor light → `lighting.condition`**: golden hour → `golden-hour`, firelight or night →
+  `night-ambient`. That feeds `CraftFix.Reading.warmthIsThePoint`, which the app already calls with the
+  read's condition, and it halves `wbStrength` under golden hour as the engine always intended.
+
+`EnrichedPerceptionProvider` is the app's reader (`SceneReader`): the Vision read, then the Foundation
+read where available. Where it is not — Apple Intelligence off, an OS before 27, a CI SDK — it is the
+Vision provider under the Vision identifier, so stored reads keep being served. A failed Foundation read
+returns the Vision read; a cancelled one throws, so it is never stored under the enriched identifier.
+Kill switches: `KELVIN_FM=0` (no Foundation read), `KELVIN_FM_INTERIOR=0`, `KELVIN_FM_LIGHT=0`. All are in
+the provider identifier (so `PerceptionStore` never mixes arms, and every existing Vision read re-reads
+once when the model appears) and in `RecipeEngine.tuningSignature`.
+
+**Read-ahead stays on.** At 1–3 s a read the Foundation read is faster than the retired model the
+neighbourhood and Apply sweeps were built for (5–6 s), the loop yields to the photograph on screen, and
+`PerceptionStore` means each photograph pays it once, ever.
+
+**The iPhone app stays on Vision alone.** It has no read cache: `Pipeline.resolve` re-reads every frame
+of a batch, so it would pay 1–3 s per frame per apply, and the hero's look could be composed on one read
+and resolved on another. Wire it when it has a store.
+
+### Paired corpus (77 frames, only the perception folder differing)
+
+The model judged 11 frames indoors (the reception: cake table, dining room — all correct by eye) and
+none warm outdoors, so on this corpus only the interior fill moves anything; the light fill is unpriced
+here and is a display-and-white-balance change on golden-hour and fire frames only.
+
+| look | Vision | + Foundation | Δ | the 11 interiors: Vision → FM |
+|---|---|---|---|---|
+| engine-default (natural) | 7.2434 | 7.2416 | −0.002 | 8.528 → 8.516 (3 better / 1 worse) |
+| soft | 7.0143 | 7.0109 | −0.003 | 7.670 → 7.646 |
+| vivid | 8.8395 | 8.8348 | −0.005 | 11.113 → 11.080 |
+| dramatic | 9.5499 | 9.5456 | −0.004 | 11.133 → 11.103 |
+| airy | 8.2158 | 8.2089 | −0.007 | 9.081 → 9.033 |
+| rich | 8.4995 | 8.4959 | −0.004 | 10.396 → 10.370 |
+| warm | 8.6515 | 8.6462 | −0.005 | 9.809 → 9.771 |
+| cool | 7.7062 | 7.7024 | −0.004 | 9.722 → 9.694 |
+| engine-best (oracle) | 6.5629 | 6.5599 | −0.003 | 7.654 → 7.633 |
+
+Every look improves slightly; no frame outside the 11 moves; ruined frames (engine-default more than
+1 ΔE worse than doing nothing) 3 → 3. This is the size D19 would predict for a correct scene read —
+the value is not in the mean but in not darkening a room, which a 96 px ΔE barely sees.
+
+### Not carried: sky visibility — an owner decision
+
+The sky judgment measured best of the three as a gate (8 → 1 false skies, none lost) but has no field
+to live in; carrying it means a new perception field, which CLAUDE.md reserves for the owner. The
+proposal, if wanted: `Perception.sky: SkyJudgment?` with values `visible` / `none`, optional and absent
+by default (absent = today's behaviour, so every stored read and hand label decodes unchanged), written
+only by the Foundation read, and read in exactly one place — a layer that drops `skyLuma` (and so the
+sky mask and the sky-suppressed dehaze) before `localMasks` when it says `none`, behind its own
+`KELVIN_*` switch. It would catch the three outdoor false skies `indoors` cannot (water, sand, surf).
+
+### What would reopen it
+
+A frame the interior fill gets wrong in a way a photographer sees; an OS update that moves the answers
+(re-run `fm-probe --passes 2` on a hand-labelled list before trusting a new model; the D33 list is
+the owner's own photographs and is deliberately not in this public repository); or the iPhone gaining a read store.
