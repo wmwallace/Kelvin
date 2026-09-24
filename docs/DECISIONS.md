@@ -1060,6 +1060,11 @@ is actually worth — which is the part that steers masks, and the part worth sp
   median <= 0.60`, so an `underexposed-subject` claim — made on 42% of a real corpus — pulled
   ordinary frames back into the rule, and on 17 of 77 the net effect was to **darken** the
   picture. The deletion fixes that by accident.
+  **Stale since, and corrected 24 Sep 2026 (engine 0.7.5):** a measured dark subject was later
+  allowed to re-open the guard, and when that subject was metered SKIN it re-opened it for a
+  correctly exposed darker-skinned person and not a lighter-skinned one — D20's mechanism on the
+  whole frame. Skin no longer re-opens it, and a re-open can only lift. See EVALUATION.md, "Five
+  engine bugs from the render audit".
 - `soft-focus` clarity damping is the one capability lost. `FocusMeasure` could restore it as a
   measurement; nobody has priced the per-frame cost.
 
