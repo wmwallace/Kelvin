@@ -3718,7 +3718,12 @@ case "look-audit":
                         "stats": ["median": composed.statistics.medianLuma,
                                   "highlightClip": composed.statistics.highlightClip,
                                   "shadowClip": composed.statistics.shadowClip,
-                                  "shadowMass": composed.statistics.shadowMass]
+                                  "shadowMass": composed.statistics.shadowMass,
+                                  "whitePoint": composed.statistics.whitePoint,
+                                  "blackPoint": composed.statistics.blackPoint,
+                                  "channelWhitePoint": composed.statistics.channelWhitePoint,
+                                  "neutralChroma": [composed.statistics.neutralChromaA,
+                                                    composed.statistics.neutralChromaB]]
                     ]
                     row.merge(d.json) { a, _ in a }
                     row["lightsCoverage"] = composed.masks.lightsCoverage

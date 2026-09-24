@@ -110,4 +110,24 @@ final class DarkFrameExposureTests: XCTestCase {
         XCTAssertGreaterThan(RecipeEngine.exposure(perception(), s, subjectLuma: 0.12, subjectLumaIsSkin: false), 0)
         XCTAssertEqual(RecipeEngine.exposure(perception(), s), 0, "and without one the band holds")
     }
+
+    // MARK: - The low-key bound reads the first channel to clip (0.7.5)
+
+    /// Firelight: luma says there is room, the red channel says there is none.
+    func testTheLowKeyBoundReadsTheBrightestChannel() {
+        var s = stats(median: 0.08, white: 0.62, shadowMass: 0.49)
+        let lumaBound = RecipeEngine.exposure(perception(), s)
+        s.channelWhitePoint = 0.93
+        let channelBound = RecipeEngine.exposure(perception(), s)
+        XCTAssertGreaterThan(lumaBound, 0.3)
+        XCTAssertEqual(channelBound, 0, "red at 0.93 is past the 0.88 target: no headroom, no lift")
+    }
+
+    /// And a frame that does not live in the dark is not bounded by it at all.
+    func testTheChannelBoundLeavesOrdinaryFramesAlone() {
+        var s = stats(median: 0.161, white: 0.555, shadowMass: 0.239)
+        let before = RecipeEngine.exposure(perception(), s)
+        s.channelWhitePoint = 0.98
+        XCTAssertEqual(RecipeEngine.exposure(perception(), s), before)
+    }
 }

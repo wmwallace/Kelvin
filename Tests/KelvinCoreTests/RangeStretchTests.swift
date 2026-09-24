@@ -85,6 +85,26 @@ final class RangeStretchTests: XCTestCase {
         XCTAssertLessThan(lifted.load, cold.load, "an exposure lift shrinks what the stretch takes on")
     }
 
+    /// The stretch's prediction of the post-exposure white point has to match what the renderer
+    /// does to it. 0.7.4 scaled the encoded value by 2^EV; for a pull that reads the frame far
+    /// flatter than it renders, and on `_DSC0378` the stretch then clipped a sky flat.
+    func testThePredictedWhitePointMatchesTheRenderAfterAPull() throws {
+        let source = TestSupport.makeGradientImage(width: 96, height: 96)
+        let stats = try ImageStatistics.compute(source)
+        for ev in [-0.6, -0.38, 0.5] {
+            let rendered = try ImageStatistics.compute(Renderer.render(source, with: recipe { $0.exposureEV = ev }))
+            let predicted = RecipeEngine.RangeStretch.afterExposure(stats.whitePoint, ev)
+            XCTAssertEqual(predicted, rendered.whitePoint, accuracy: 0.03, "EV \(ev)")
+        }
+    }
+
+    /// A frame of ordinary range that exposure pulls down is not a flat frame.
+    func testAPullDoesNotMakeAnOrdinaryFrameFlat() throws {
+        let stats = try ImageStatistics.compute(TestSupport.makeGradientImage(width: 96, height: 96))
+        XCTAssertGreaterThan(stats.dynamicRange, 0.8)
+        XCTAssertEqual(RecipeEngine.RangeStretch.placement(perception(), stats, exposureEV: -0.4).load, 0)
+    }
+
     func testArchivalIntentNeverStretches() throws {
         var p = perception(); p.intent = .archival
         let flatStats = try ImageStatistics.compute(flat())
