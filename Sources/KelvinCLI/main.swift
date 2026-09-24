@@ -47,6 +47,33 @@ func printUsage() {
       \(tool) pick-probe --report <report.json> --corpus <dir> [--pair a,b] [--min-margin <dE>]
       \(tool) opener-probe --report <report.json> --corpus <dir> [--style <id>]
                      [--regions <r,r,…>] [--masses <m,m,…>]
+      \(tool) look-audit --in <image> [--perception <p.json>] | --list <frames.tsv>
+                     [--out <audit.jsonl>] [--edge <n>] [--dump-dir <dir>] [--looks <id,id,…>]
+                     [--ablate]
+
+    look-audit options (every look on real frames, measured for damage a photographer would see):
+      --in          One photograph. Or:
+      --list        A TSV of frames, one per line: <image path> TAB <perception.json or ->.
+                    `-` (or a missing column) reads the scene with Apple Vision in-process, the
+                    way the app reads a photograph it has never seen.
+      --perception  With --in: a perception JSON. Omitted: read with Vision, as above.
+      --out         Append one JSON line per (frame, look) — the metrics, the recipe's global
+                    values, its red flags, and whether the look was curated / opened in.
+      --edge        Canvas long edge (default 1200, the Mac canvas). Candidates are still
+                    composed on the 768 px perception proxy exactly as the app composes them.
+      --dump-dir    Write <stem>-source.jpg and <stem>-<look>.jpg, the canvas renders measured.
+      --looks       Only these looks (default: all eight).
+      --ablate      Per look, re-render with each lever neutralised on its own and print the
+                    metrics again — which lever the damage comes from.
+
+      Every look is measured against the SAME canvas rendered through a neutral recipe, so each
+      number is damage the look added, never damage the camera already had:
+        flat   one channel ≥250 while another ≤150 — the flat pure-red skin a warm lift makes
+               when one channel runs out of headroom. Luma statistics cannot see it.
+        clip   any channel ≥254.     crush  luma < 0.08.
+        face*  the same, inside Vision's face boxes (inset like FaceSkin), plus mean skin hue.
+      Evicted (iCloud dataless) files are skipped, never downloaded: a sweep must not pull a
+      shoot back behind the owner's back (CloudFile).
 
     wb-probe options (docs/EVALUATION.md, "Which illuminant estimate is right"):
       --in / --in-dir  One photograph, or a folder of them. Required.
@@ -2973,6 +3000,380 @@ case "opener-probe":
         print("frame by 3 is not a calibration, it is D19 again. Then confirm the chosen floors")
         print("end to end with KELVIN_OPENER=\(style) through `eval`, where curation still gets")
         print("its veto, and hold them out per docs/EVALUATION.md before shipping them.")
+    } catch {
+        fail("\(error)")
+    }
+
+case "look-audit":
+    // WHICH LOOK BREAKS WHICH PHOTOGRAPH — on the owner's real frames, not the corpus.
+    //
+    // Started by a firelit night frame: the engine lifted it +1 EV and faces lit by the fire
+    // rendered FLAT PURE RED (R ≥ 250, G < 150). Every statistic the engine and the curator read
+    // is luma, and a face whose red channel has run out of headroom while green and blue have not
+    // has a perfectly respectable luma — so nothing in the pipeline could see it, and the curator
+    // offered it. The corpus did not catch it either: it scores ΔE to a reference, and a
+    // per-channel clip on a few percent of the frame is a small ΔE. This measures the damage
+    // directly, per look, on the frames a photographer actually shot.
+    //
+    // THE APP'S PATH, NOT A COPY OF IT. A 1200 px canvas materialised once (the Mac canvas's own
+    // size and route: ImageIO's reduced decode for non-RAW, a real `CIRAWFilter` decode for RAW),
+    // the 768 px perception proxy derived from it, `ShippedCandidates.compose` on that proxy —
+    // which decides what is curated and what the frame opens in — and every look then rendered
+    // onto the canvas with the proxy's masks scaled up, the way the canvas draws it. The baseline
+    // is the same canvas through a neutral recipe, so a metric is damage the LOOK added, never
+    // damage the camera already had (v1's rule: never clip worse than the camera did).
+    do {
+        let rest = Array(arguments.dropFirst())
+        var frames: [(url: URL, perception: URL?)] = []
+        if let listPath = value(for: "--list", in: rest) {
+            for line in try String(contentsOfFile: listPath, encoding: .utf8).split(separator: "\n")
+            where !line.hasPrefix("#") {
+                let cols = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+                guard let path = cols.first, !path.isEmpty else { continue }
+                let p = cols.count > 1 && !cols[1].isEmpty && cols[1] != "-" ? cols[1] : nil
+                frames.append((URL(fileURLWithPath: path), p.map { URL(fileURLWithPath: $0) }))
+            }
+        } else if let inPath = value(for: "--in", in: rest) {
+            frames.append((URL(fileURLWithPath: inPath),
+                           value(for: "--perception", in: rest).map { URL(fileURLWithPath: $0) }))
+        } else {
+            fail("look-audit requires --in <image> or --list <frames.tsv>")
+        }
+        let edge = value(for: "--edge", in: rest).flatMap(Int.init) ?? 1200
+        let only = value(for: "--looks", in: rest).map { Set($0.split(separator: ",").map(String.init)) }
+        let dumpDir = value(for: "--dump-dir", in: rest).map { URL(fileURLWithPath: $0, isDirectory: true) }
+        if let dumpDir { try FileManager.default.createDirectory(at: dumpDir, withIntermediateDirectories: true) }
+        let ablate = rest.contains("--ablate")
+        var out: FileHandle?
+        if let outPath = value(for: "--out", in: rest) {
+            if !FileManager.default.fileExists(atPath: outPath) {
+                FileManager.default.createFile(atPath: outPath, contents: nil)
+            }
+            out = try FileHandle(forWritingTo: URL(fileURLWithPath: outPath))
+            try out?.seekToEnd()
+        }
+
+        // The canvas's two contexts, with the app's options: a decode context that keeps nothing,
+        // and a render context that caches intermediates across the looks of one frame.
+        let decodeContext = CIContext(options: [.cacheIntermediates: false, .highQualityDownsample: false])
+        let renderContext = CIContext(options: [.cacheIntermediates: true, .highQualityDownsample: false])
+        func materialise(_ image: CIImage) -> CIImage {
+            decodeContext.createCGImage(image, from: image.extent).map { CIImage(cgImage: $0) } ?? image
+        }
+        /// sRGB RGBA8, row 0 at the TOP — the display pixels, which is where a clip is a clip.
+        func pixels(_ image: CIImage, over extent: CGRect) throws -> [UInt8] {
+            guard let cg = renderContext.createCGImage(image, from: extent, format: .RGBA8,
+                                                       colorSpace: ImageWriter.outputColorSpace)
+            else { throw ImageWriter.Error.rasterFailed }
+            var bytes = [UInt8](repeating: 0, count: cg.width * cg.height * 4)
+            guard let ctx = CGContext(data: &bytes, width: cg.width, height: cg.height,
+                                      bitsPerComponent: 8, bytesPerRow: cg.width * 4,
+                                      space: ImageWriter.outputColorSpace,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { throw ImageWriter.Error.rasterFailed }
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: cg.width, height: cg.height))
+            return bytes
+        }
+
+        /// The damage one render does, relative to the neutral render of the same canvas.
+        struct Damage {
+            var flat = 0.0, flatSource = 0.0, flatNew = 0.0     // one channel ≥250, another ≤150
+            var flatR = 0.0, flatG = 0.0, flatB = 0.0           // …by the channel that ran out
+            var clip = 0.0, clipSource = 0.0, clipNew = 0.0     // any channel ≥254
+            var crush = 0.0, crushSource = 0.0, crushNew = 0.0  // luma < 0.08
+            var meanLuma = 0.0, meanLumaSource = 0.0
+            var facePixels = 0
+            var faceFlat = 0.0, faceFlatSource = 0.0, faceClip = 0.0, faceClipSource = 0.0
+            var faceLumaHigh = 0.0, faceLumaLow = 0.0, faceLuma = 0.0, faceLumaSource = 0.0
+            var faceHue: Double?, faceSat: Double?, faceHueSource: Double?, faceSatSource: Double?
+
+            var json: [String: Any] {
+                var j: [String: Any] = [
+                    "flat": flat, "flatSource": flatSource, "flatNew": flatNew,
+                    "flatR": flatR, "flatG": flatG, "flatB": flatB,
+                    "clip": clip, "clipSource": clipSource, "clipNew": clipNew,
+                    "crush": crush, "crushSource": crushSource, "crushNew": crushNew,
+                    "meanLuma": meanLuma, "meanLumaSource": meanLumaSource, "facePixels": facePixels
+                ]
+                if facePixels > 0 {
+                    j["faceFlat"] = faceFlat; j["faceFlatSource"] = faceFlatSource
+                    j["faceClip"] = faceClip; j["faceClipSource"] = faceClipSource
+                    j["faceLumaHigh"] = faceLumaHigh; j["faceLumaLow"] = faceLumaLow
+                    j["faceLuma"] = faceLuma; j["faceLumaSource"] = faceLumaSource
+                    j["faceHue"] = faceHue; j["faceSat"] = faceSat
+                    j["faceHueSource"] = faceHueSource; j["faceSatSource"] = faceSatSource
+                }
+                return j
+            }
+            var line: String {
+                var s = String(format: "flat %5.2f%% (+%5.2f%% new) clip +%5.2f%% crush +%5.2f%%",
+                               flat * 100, flatNew * 100, (clip - clipSource) * 100,
+                               (crush - crushSource) * 100)
+                if facePixels > 0 {
+                    s += String(format: " · face flat %5.1f%% (was %4.1f%%) clip %5.1f%% hue %3.0f° sat %.2f",
+                                faceFlat * 100, faceFlatSource * 100, faceClip * 100,
+                                faceHue ?? -1, faceSat ?? -1)
+                }
+                return s
+            }
+        }
+        func hueSat(_ r: Double, _ g: Double, _ b: Double) -> (Double, Double) {
+            let mx = max(r, g, b), mn = min(r, g, b), d = mx - mn
+            var h = 0.0
+            if d > 0 {
+                if mx == r { h = 60 * ((g - b) / d).truncatingRemainder(dividingBy: 6) }
+                else if mx == g { h = 60 * ((b - r) / d + 2) }
+                else { h = 60 * ((r - g) / d + 4) }
+            }
+            return (h < 0 ? h + 360 : h, mx <= 0 ? 0 : d / mx)
+        }
+        func damage(_ px: [UInt8], source src: [UInt8], face: [Bool]) -> Damage {
+            var d = Damage()
+            var n = 0.0, fn = 0.0
+            var fr = 0.0, fg = 0.0, fb = 0.0, sr = 0.0, sg = 0.0, sb = 0.0
+            var i = 0, p = 0
+            while i < px.count {
+                let r = Int(px[i]), g = Int(px[i + 1]), b = Int(px[i + 2])
+                let r0 = Int(src[i]), g0 = Int(src[i + 1]), b0 = Int(src[i + 2])
+                let mx = max(r, g, b), mn = min(r, g, b)
+                let mx0 = max(r0, g0, b0), mn0 = min(r0, g0, b0)
+                let flat = mx >= 250 && mn <= 150, flat0 = mx0 >= 250 && mn0 <= 150
+                let clip = mx >= 254, clip0 = mx0 >= 254
+                let luma = (0.299 * Double(r) + 0.587 * Double(g) + 0.114 * Double(b)) / 255
+                let luma0 = (0.299 * Double(r0) + 0.587 * Double(g0) + 0.114 * Double(b0)) / 255
+                let crush = luma < 0.08, crush0 = luma0 < 0.08
+                n += 1
+                if flat { d.flat += 1; if r >= 250 { d.flatR += 1 }; if g >= 250 { d.flatG += 1 }; if b >= 250 { d.flatB += 1 } }
+                if flat0 { d.flatSource += 1 }
+                if flat && !flat0 { d.flatNew += 1 }
+                if clip { d.clip += 1 }; if clip0 { d.clipSource += 1 }; if clip && !clip0 { d.clipNew += 1 }
+                if crush { d.crush += 1 }; if crush0 { d.crushSource += 1 }; if crush && !crush0 { d.crushNew += 1 }
+                d.meanLuma += luma; d.meanLumaSource += luma0
+                if face[p] {
+                    fn += 1
+                    if flat { d.faceFlat += 1 }; if flat0 { d.faceFlatSource += 1 }
+                    if clip { d.faceClip += 1 }; if clip0 { d.faceClipSource += 1 }
+                    if luma > 0.985 { d.faceLumaHigh += 1 }; if luma < 0.02 { d.faceLumaLow += 1 }
+                    d.faceLuma += luma; d.faceLumaSource += luma0
+                    fr += Double(r); fg += Double(g); fb += Double(b)
+                    sr += Double(r0); sg += Double(g0); sb += Double(b0)
+                }
+                i += 4; p += 1
+            }
+            for k in [\Damage.flat, \.flatSource, \.flatNew, \.flatR, \.flatG, \.flatB, \.clip,
+                      \.clipSource, \.clipNew, \.crush, \.crushSource, \.crushNew, \.meanLuma,
+                      \.meanLumaSource] as [WritableKeyPath<Damage, Double>] {
+                d[keyPath: k] /= max(1, n)
+            }
+            d.facePixels = Int(fn)
+            if fn > 0 {
+                for k in [\Damage.faceFlat, \.faceFlatSource, \.faceClip, \.faceClipSource,
+                          \.faceLumaHigh, \.faceLumaLow, \.faceLuma, \.faceLumaSource]
+                        as [WritableKeyPath<Damage, Double>] {
+                    d[keyPath: k] /= fn
+                }
+                (d.faceHue, d.faceSat) = hueSat(fr, fg, fb)
+                (d.faceHueSource, d.faceSatSource) = hueSat(sr, sg, sb)
+            }
+            return d
+        }
+
+        /// Values sitting on a clamp — the schema's, or the engine's ±1 EV exposure ceiling.
+        func redFlags(_ r: Recipe) -> [String] {
+            let g = r.global
+            var flags: [String] = []
+            if abs(g.exposureEV) >= 0.99 { flags.append(String(format: "exposure %+.2f", g.exposureEV)) }
+            if let k = g.temperatureK, k <= Ranges.temperatureK.lowerBound + 1
+                || k >= Ranges.temperatureK.upperBound - 1 { flags.append("temperatureK \(Int(k))") }
+            if abs(g.tint) >= Ranges.tint.upperBound - 0.5 { flags.append("tint \(g.tint)") }
+            for (name, v) in [("contrast", g.contrast), ("highlights", g.highlights),
+                              ("shadows", g.shadows), ("whites", g.whites), ("blacks", g.blacks),
+                              ("vibrance", g.vibrance), ("saturation", g.saturation),
+                              ("clarity", g.clarity), ("texture", g.texture), ("dehaze", g.dehaze)]
+            where abs(v) >= 99.5 { flags.append("\(name) \(Int(v))") }
+            for m in r.masks ?? [] {
+                for (k, v) in m.adjustments where (k.hasPrefix("exposure") && abs(v) >= 0.99)
+                    || (!k.hasPrefix("exposure") && !k.hasPrefix("temperature") && abs(v) >= 99.5) {
+                    flags.append("mask \(m.id).\(k) \(v)")
+                }
+            }
+            return flags
+        }
+        func globalJSON(_ g: GlobalAdjustments) -> [String: Any] {
+            var j: [String: Any] = [
+                "exposure_ev": g.exposureEV, "contrast": g.contrast, "highlights": g.highlights,
+                "shadows": g.shadows, "whites": g.whites, "blacks": g.blacks, "tint": g.tint,
+                "vibrance": g.vibrance, "saturation": g.saturation, "clarity": g.clarity,
+                "texture": g.texture, "dehaze": g.dehaze, "fusion": g.fusion
+            ]
+            if let k = g.temperatureK { j["temperature_k"] = k }
+            if let lo = g.rangeLow { j["range_low"] = lo }
+            if let hi = g.rangeHigh { j["range_high"] = hi }
+            return j
+        }
+        /// One lever off at a time — `RecipeAblation`'s list, plus each mask on its own, because
+        /// "the masks" is three different engine rules and only one of them is usually the culprit.
+        func levers(of recipe: Recipe) -> [(String, Recipe)] {
+            var out: [(String, Recipe)] = []
+            func off(_ name: String, _ mutate: (inout Recipe) -> Void) {
+                var r = recipe; mutate(&r)
+                if r != recipe { out.append((name, r)) }
+            }
+            off("exposure_ev") { $0.global.exposureEV = 0 }
+            off("temperatureK") { $0.global.temperatureK = nil }
+            off("tint") { $0.global.tint = 0 }
+            off("contrast") { $0.global.contrast = 0 }
+            off("whites") { $0.global.whites = 0 }
+            off("blacks") { $0.global.blacks = 0 }
+            off("highlights") { $0.global.highlights = 0 }
+            off("shadows") { $0.global.shadows = 0 }
+            off("vibrance") { $0.global.vibrance = 0 }
+            off("saturation") { $0.global.saturation = 0 }
+            off("clarity") { $0.global.clarity = 0 }
+            off("texture") { $0.global.texture = 0 }
+            off("dehaze") { $0.global.dehaze = 0 }
+            off("fusion") { $0.global.fusion = 0 }
+            off("range") { $0.global.rangeLow = nil; $0.global.rangeHigh = nil }
+            off("curve") { $0.curve = nil }
+            off("hsl") { $0.hsl = nil }
+            off("blackAndWhite") { $0.blackAndWhite = nil }
+            off("detail") { $0.detail = nil }
+            for m in recipe.masks ?? [] {
+                off("mask:\(m.id)") { $0.masks?.removeAll { $0.id == m.id } }
+                // And each of its adjustments alone: a sky mask carrying a recovery AND a style's
+                // lift reads as harmless when removed whole, because the two cancel.
+                for key in m.adjustments.keys.sorted() where m.adjustments.count > 1 {
+                    off("mask:\(m.id).\(key)") { r in
+                        guard let i = r.masks?.firstIndex(where: { $0.id == m.id }) else { return }
+                        r.masks?[i].adjustments[key] = nil
+                    }
+                }
+            }
+            if (recipe.masks?.count ?? 0) > 1 { off("masks (all)") { $0.masks = nil } }
+            return out
+        }
+        func emit(_ object: [String: Any]) throws {
+            guard let out else { return }
+            var data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+            data.append(0x0A)
+            try out.write(contentsOf: data)
+        }
+
+        var scanned = 0, evicted = 0, failed = 0
+        let started = Date()
+        for (url, perceptionURL) in frames {
+            // Never download: a dataless placeholder costs a 40–90 s iCloud fetch per frame.
+            if CloudFile.isEvicted(url) {
+                evicted += 1
+                print("‡ evicted, skipped: \(url.lastPathComponent)")
+                continue
+            }
+            let t0 = Date()
+            do {
+                let full = try ImageDecoder.decode(url: url)
+                let canvas = PerceptionProxy.fromFile(url, maxEdge: edge, matching: full.extent)
+                    ?? materialise(PerceptionProxy.downsample(full, maxEdge: edge))
+                let measureOn = materialise(PerceptionProxy.downsample(canvas))
+                let perception = try perceptionURL.map { try PerceptionIO.load(from: $0) }
+                    ?? VisionPerceptionProvider.read(measureOn)
+                let composed = try ShippedCandidates.compose(
+                    for: measureOn, perception: perception, iso: ExifReader.iso(url: url))
+                let masks = composed.masks.bitmaps.mapValues { LocalMasks.scale($0, to: canvas.extent) }
+                let extent = canvas.extent
+                let width = Int(extent.width), height = Int(extent.height)
+
+                // One face detection, on the proxy the curator's skin score came from; boxes are
+                // normalised, so they place on the canvas unchanged. Inset 18% like FaceSkin.
+                let faces = FaceSkin.detect(in: measureOn)
+                var faceMask = [Bool](repeating: false, count: width * height)
+                for b in faces {
+                    let x0 = Int((b.minX + b.width * 0.18) * Double(width))
+                    let x1 = Int((b.maxX - b.width * 0.18) * Double(width))
+                    let y0 = Int((1 - (b.maxY - b.height * 0.18)) * Double(height))
+                    let y1 = Int((1 - (b.minY + b.height * 0.18)) * Double(height))
+                    for y in max(0, y0) ..< min(height, max(y0, y1)) {
+                        for x in max(0, x0) ..< min(width, max(x0, x1)) { faceMask[y * width + x] = true }
+                    }
+                }
+                let source = try pixels(Renderer.render(canvas, with: .neutral, maskBitmaps: [:]),
+                                        over: extent)
+                let stem = url.deletingPathExtension().lastPathComponent
+                if let dumpDir {
+                    try ImageWriter.write(canvas, to: dumpDir.appendingPathComponent("\(stem)-source.jpg"),
+                                          format: .jpeg(quality: 0.9))
+                }
+                let curated = Set(composed.curatedStyleIDs)
+                let culled = Set(composed.culledStyleIDs)
+                let opener = composed.chosen?.recipe.id
+                print("\(url.lastPathComponent) · \(perception.scene.rawValue)"
+                      + " · subject \(perception.subject.present ? perception.subject.type.rawValue : "-")"
+                      + " · \(faces.count) face(s) · curated \(composed.curatedStyleIDs.joined(separator: ","))"
+                      + " · opens \(opener ?? "-")")
+                for candidate in composed.all {
+                    let look = candidate.styleID
+                    if let only, !only.contains(look) { continue }
+                    let recipe = candidate.recipe
+                    let rendered = Renderer.render(canvas, with: recipe, maskBitmaps: masks)
+                    let d = damage(try pixels(rendered, over: extent), source: source, face: faceMask)
+                    let flags = redFlags(recipe)
+                    let tag = (look == opener ? "OPEN" : curated.contains(look) ? "shown" : "     ")
+                    print("  \(look.padding(toLength: 8, withPad: " ", startingAt: 0)) \(tag) \(d.line)"
+                          + (flags.isEmpty ? "" : " ⚑ " + flags.joined(separator: ", ")))
+                    if let dumpDir {
+                        try ImageWriter.write(rendered.cropped(to: extent),
+                                              to: dumpDir.appendingPathComponent("\(stem)-\(look).jpg"),
+                                              format: .jpeg(quality: 0.9))
+                    }
+                    var row: [String: Any] = [
+                        "path": url.path, "look": look, "curated": curated.contains(look),
+                        "opener": look == opener, "culled": culled.contains(look),
+                        "score": candidate.score.overall,
+                        "issues": candidate.score.issues.map(\.rawValue),
+                        "scene": perception.scene.rawValue,
+                        "subject": perception.subject.present ? perception.subject.type.rawValue : "-",
+                        "lighting": perception.lighting.condition.rawValue,
+                        "perceptionSource": perceptionURL == nil ? "vision-live" : "cache",
+                        "faces": faces.map { [$0.minX, $0.minY, $0.width, $0.height] },
+                        "global": globalJSON(recipe.global), "flags": flags,
+                        "layers": [
+                            "curve": recipe.curve != nil, "hsl": recipe.hsl?.isEmpty == false,
+                            "blackAndWhite": recipe.blackAndWhite != nil,
+                            "masks": (recipe.masks ?? []).map { m -> [String: Any] in
+                                ["id": m.id, "type": m.type, "opacity": m.opacity,
+                                 "adjustments": m.adjustments]
+                            }
+                        ] as [String: Any],
+                        "engine": recipe.provenance?.engineVersion ?? "-",
+                        "stats": ["median": composed.statistics.medianLuma,
+                                  "highlightClip": composed.statistics.highlightClip,
+                                  "shadowClip": composed.statistics.shadowClip,
+                                  "shadowMass": composed.statistics.shadowMass]
+                    ]
+                    row.merge(d.json) { a, _ in a }
+                    try emit(row)
+
+                    if ablate {
+                        for (lever, variant) in levers(of: recipe) {
+                            let v = damage(try pixels(Renderer.render(canvas, with: variant,
+                                                                      maskBitmaps: masks), over: extent),
+                                           source: source, face: faceMask)
+                            print("      − \(lever.padding(toLength: 16, withPad: " ", startingAt: 0)) \(v.line)")
+                            var arow: [String: Any] = ["path": url.path, "look": look, "ablate": lever]
+                            arow.merge(v.json) { a, _ in a }
+                            try emit(arow)
+                        }
+                    }
+                }
+                scanned += 1
+                print(String(format: "  (%.1f s)", Date().timeIntervalSince(t0)))
+            } catch {
+                failed += 1
+                print("✗ \(url.lastPathComponent): \(error)")
+            }
+        }
+        print(String(format: "look-audit: %d scanned, %d evicted (skipped, not downloaded), %d failed, %.0f s",
+                     scanned, evicted, failed, Date().timeIntervalSince(started)))
+        try out?.close()
     } catch {
         fail("\(error)")
     }
