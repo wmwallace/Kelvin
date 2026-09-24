@@ -124,6 +124,7 @@ public enum RecipeEngine {
             "dehazeYield:\(dehazeYieldsToStretch ? "on" : "off")",
             "skyGuard:\(SkyGuard.enabled ? "on" : "off")",
             "subjectDeficit:\(subjectDeficitFloor)",
+            "subjectReopen:\(subjectReopen.rawValue)",
             "faceCap:\(faceLiftCapEV)",
             // The light-source mask: the switch, every constant that decides which islands count
             // (they move the bitmap's existence, which gates the mask), and its feather.
@@ -802,7 +803,8 @@ public enum RecipeEngine {
     /// wins"). Encoded values are closer to how brightness is seen, the targets and the 0.6 pull
     /// were tuned in them, and a ratio of them lifts a dark frame less than the physics would.
     public static func exposure(_ p: Perception, _ s: ImageStatistics,
-                                subjectLuma: Double? = nil) -> Double {
+                                subjectLuma: Double? = nil,
+                                subjectLumaIsSkin: Bool? = nil) -> Double {
         let median = max(0.02, s.medianLuma)
 
         // A subject measurably darker than its own frame re-opens the guard below, and is the
@@ -812,13 +814,24 @@ public enum RecipeEngine {
         // backlit subject needs help, and the reported symptom was exactly that: subjects coming
         // out much darker. The same deficit and the same 0.12 that `subjectMask` calls `backlit`,
         // so the two rules cannot disagree about what a dark subject is.
+        //
+        // NOT FROM SKIN (0.7.5). When a face is found, `subjectLuma` is metered skin, and D20's
+        // mechanism applies to the whole frame here: a correctly exposed darker-skinned person
+        // measures further below the median and re-opened the guard where a lighter-skinned one in
+        // the same scene did not — median 0.58 → −0.20 EV for the whole picture. So skin never
+        // re-opens it, and a luma nobody vouched for (`nil`: the caller did not say) is treated as
+        // skin: where the engine knows least it commits least (D20). And a re-open can only LIFT:
+        // a subject darker than its frame is never a reason to darken the frame.
+        // `KELVIN_SUBJECT_REOPEN=shipped` restores 0.7.4; `=lift` keeps skin but only lifts.
         let deficit = subjectLuma.map { median - $0 } ?? 0
-        let darkSubject = deficit > subjectDeficitFloor
+        let skinBlind = subjectReopen == .notFromSkin && subjectLumaIsSkin != false
+        let darkSubject = !skinBlind && deficit > subjectDeficitFloor
+        let inBand = median >= 0.30 && median <= 0.60
 
         // Leave a reasonably-exposed frame ALONE. A finished photo is already where the
         // photographer wants it; nudging its exposure toward a generic target only fights their
         // intent — unless the thing the photograph is OF is sitting in a hole.
-        if !darkSubject && median >= 0.30 && median <= 0.60 { return 0 }
+        if !darkSubject && inBand { return 0 }
 
         // ⚠️ DELIBERATELY NOT scaled by the deficit. Raising the target with `median - subjectLuma`
         // was tried and reverted the same day: a darker-skinned subject has a lower `subjectLuma`
@@ -833,6 +846,7 @@ public enum RecipeEngine {
         // Gentle pull (0.6), and a deadband so tiny corrections don't happen. Global exposure is
         // a blunt instrument (the real subject fix is a later mask), so cap the swing.
         var ev = log2(target / median) * 0.6
+        if darkSubject && inBand && subjectReopen != .shipped { ev = max(0, ev) }
         // A DARK PICTURE IS NOT AN UNDEREXPOSED ONE. The median says how much of the frame is
         // dark, not whether it was exposed wrong: a firelit night frame (`_DSC0497`, Family at
         // Jacks Parents — median 0.031, white point 0.609, two thirds of it below 0.08) asked for
@@ -862,6 +876,11 @@ public enum RecipeEngine {
         if abs(ev) < 0.12 { return 0 }
         return roundedClamp(ev, to: -1.0...1.0, step: 0.01)
     }
+
+    /// How a dark subject may re-open `exposure`'s leave-alone band. See there.
+    enum SubjectReopen: String { case shipped, lift, notFromSkin = "not-from-skin" }
+    static let subjectReopen: SubjectReopen = ProcessInfo.processInfo
+        .environment["KELVIN_SUBJECT_REOPEN"].flatMap(SubjectReopen.init) ?? .notFromSkin
 
     static func exposureTarget(_ scene: Scene) -> Double {
         switch scene {

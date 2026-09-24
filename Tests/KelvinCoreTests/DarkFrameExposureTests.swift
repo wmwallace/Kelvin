@@ -72,4 +72,42 @@ final class DarkFrameExposureTests: XCTestCase {
         XCTAssertEqual(RecipeEngine.pointPlacement(perception(), s, exposureEV: -0.5).whites,
                        RecipeEngine.pointPlacement(perception(), s).whites)
     }
+
+    // MARK: - Skin does not set the whole frame's exposure (0.7.5)
+
+    private func person(skin: Double) -> LocalMasks.Summary {
+        LocalMasks.Summary(subjectLuma: skin, skyLuma: nil, subjectOrigin: .person,
+                           subjectLumaIsSkin: true)
+    }
+
+    /// Two frames identical but for the skin of the person in them. 0.7.4 re-opened the leave-alone
+    /// band from metered skin, so the darker-skinned subject moved the whole picture (median 0.58
+    /// → −0.20 EV) and the lighter-skinned one did not.
+    func testSkinToneDoesNotMoveTheWholeFrame() {
+        let s = stats(median: 0.58, white: 0.9, shadowMass: 0.02)
+        let evs = [0.25, 0.40, 0.55].map {
+            RecipeEngine.candidate(perception: perception(), statistics: s, style: .natural,
+                                   masks: person(skin: $0)).global.exposureEV
+        }
+        XCTAssertEqual(Set(evs).count, 1, "exposure varied with skin luma: \(evs)")
+        XCTAssertEqual(RecipeEngine.exposure(perception(), s, subjectLuma: 0.25, subjectLumaIsSkin: true),
+                       RecipeEngine.exposure(perception(), s, subjectLuma: 0.55, subjectLumaIsSkin: true))
+        // A dimmer frame, where a re-open would LIFT, is skin-blind too.
+        let dim = stats(median: 0.32, white: 0.8, shadowMass: 0.05)
+        XCTAssertEqual(RecipeEngine.exposure(perception(), dim, subjectLuma: 0.12, subjectLumaIsSkin: true),
+                       RecipeEngine.exposure(perception(), dim, subjectLuma: 0.30, subjectLumaIsSkin: true))
+    }
+
+    /// A subject darker than its frame is never a reason to darken the frame.
+    func testADarkSubjectNeverPullsTheFrameDown() {
+        let s = stats(median: 0.58, white: 0.9, shadowMass: 0.02)
+        XCTAssertEqual(RecipeEngine.exposure(perception(), s, subjectLuma: 0.2, subjectLumaIsSkin: false), 0)
+    }
+
+    /// A dark subject that is NOT skin — a silhouette, an animal — still re-opens the band upward.
+    func testADarkNonSkinSubjectStillLiftsADimFrame() {
+        let s = stats(median: 0.32, white: 0.8, shadowMass: 0.05)
+        XCTAssertGreaterThan(RecipeEngine.exposure(perception(), s, subjectLuma: 0.12, subjectLumaIsSkin: false), 0)
+        XCTAssertEqual(RecipeEngine.exposure(perception(), s), 0, "and without one the band holds")
+    }
 }
