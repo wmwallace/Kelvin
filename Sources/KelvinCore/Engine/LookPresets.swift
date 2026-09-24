@@ -102,7 +102,12 @@ public struct LookPreset: Sendable, Equatable, Identifiable {
             // Subtraction is the fix, not a quirk: positive shift = warmer = LOWER Kelvin target.
             // Clamped to Ranges.temperatureK — a hardcoded 11000 here once disagreed with the
             // schema's 12000, silently capping cooling looks a stop short of the slider.
-            g.temperatureK = c((g.temperatureK ?? 6500) - temperatureShift, Ranges.temperatureK)
+            // Applied in MIRED, as the step `temperatureShift` is at 6500 K — see
+            // `RecipeEngine.shiftedInMired`. On an ordinary frame (as shot, 6500) this is exactly
+            // the old Kelvin subtraction; on a corrected one it is the same visible warmth.
+            g.temperatureK = c(RecipeEngine.shiftedInMired(g.temperatureK ?? 6500,
+                                                           byKelvinAt6500: -temperatureShift),
+                               Ranges.temperatureK)
         }
     }
 

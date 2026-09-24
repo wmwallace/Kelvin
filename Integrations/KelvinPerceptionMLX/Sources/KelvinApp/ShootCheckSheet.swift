@@ -140,9 +140,8 @@ extension AppState {
                 let recipe = ShootLook.finished(matched, look: lookId)
                 let rendered = try await Offload.run(.render, qos: .userInitiated) { () -> RenderedCheck in
                     let full = try ImageDecoder.decode(url: url)
-                    let canvas = PerceptionProxy.fromFile(url, maxEdge: 1200, matching: full.extent)
-                        ?? Self.materialiseDecoded(PerceptionProxy.downsample(full, maxEdge: 1200))
-                    let masks = LocalMasks.measure(in: PerceptionProxy.downsample(canvas)).bitmaps
+                    let (canvas, measureOn) = Self.proxies(for: url, decoded: full)
+                    let masks = LocalMasks.measure(in: measureOn).bitmaps
                         .mapValues { LocalMasks.scale($0, to: canvas.extent) }
                     let out = Renderer.render(canvas, with: recipe, maskBitmaps: masks)
                     return RenderedCheck(image: Self.sharedContext.createCGImage(out, from: out.extent))
