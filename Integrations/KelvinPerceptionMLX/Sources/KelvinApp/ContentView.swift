@@ -7096,6 +7096,8 @@ struct ContentView: View {
                 Text(appState.statusMessage)
                     .font(Theme.mono(11))
                     .foregroundColor(Theme.inkDim)
+                    // Identifiers are for the UI tests (KelvinMacUITests); VoiceOver reads the text.
+                    .accessibilityIdentifier("status")
                 Button(action: { showShortcutsSheet = true }) {
                     HStack(spacing: 4) {
                         Image(systemName: "keyboard").font(.system(size: 10))
@@ -7866,6 +7868,7 @@ struct ContentView: View {
                             .opacity(appState.fixInProgress ? 0.45 : 1)
                             .animation(Motion.gated(Motion.quick, reduceMotion),
                                        value: appState.fixInProgress)
+                            .accessibilityIdentifier("fix-all")
                             // "frame-wide", because subject flags are excluded by construction:
                             // `CraftFix.deferredForSubject` permanently defers .subjectFlat,
                             // .subjectTooDark and .subjectBlown, while this button appears whenever
@@ -7883,6 +7886,7 @@ struct ContentView: View {
                             Image(systemName: "exclamationmark.triangle")
                                 .font(.system(size: 10)).foregroundColor(Theme.warn)
                             Text(issue.message).font(Theme.mono(10)).foregroundColor(Theme.inkDim)
+                                .accessibilityIdentifier("flag.\(issue.rawValue)")
                             Spacer(minLength: 4)
                             // A FIX BUTTON IS A PROMISE. The subject corrections run into hard
                             // ceilings (±2 EV on the mask), and once one is spent, clicking again
@@ -7898,6 +7902,7 @@ struct ContentView: View {
                                 .buttonStyle(.plain)
                                 .disabled(appState.fixInProgress)
                                 .opacity(appState.fixInProgress ? 0.45 : 1)
+                                .accessibilityIdentifier("fix.\(issue.rawValue)")
                             } else {
                                 Text("no fix").font(Theme.mono(9)).foregroundColor(Theme.inkDim)
                                     .padding(.horizontal, 8).padding(.vertical, 3)
@@ -7947,6 +7952,7 @@ struct ContentView: View {
                         toolbarLabel(appState.exportButtonLabel, filled: false)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityIdentifier("export-edited")
                     .help(appState.exportEditedHelp)
                 }
                 // APPLYING A LOOK TO THE SHOOT NO LONGER ASKS FOR A FOLDER, because it no longer
@@ -7958,6 +7964,7 @@ struct ContentView: View {
                         toolbarLabel(appState.applyButtonLabel, filled: false)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityIdentifier("apply")
                     .help(appState.applyButtonHelp)
                     // The Keep scope used to live in the batch panel's accessory. With no panel it
                     // has to be visible before the button is pressed, not after — and it is
@@ -7980,6 +7987,7 @@ struct ContentView: View {
                             Text("With my adjustments").font(Theme.ui(11))
                         }
                         .toggleStyle(.checkbox)
+                        .accessibilityIdentifier("carry-adjustments")
                         .foregroundColor(Theme.inkDim)
                         .help("Carry what you changed on this photo — brighter, warmer, the people "
                               + "lifted — to the rest. Each frame gets the same change made with its own "
@@ -7990,6 +7998,7 @@ struct ContentView: View {
                             toolbarLabel("Clear look", filled: false)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityIdentifier("clear-look")
                         .help("Take the look back off this shoot. Hand-made edits are left alone.")
                     }
                     if !appState.selectedPhotos.isEmpty {
@@ -8535,6 +8544,7 @@ struct SidebarPanel: View {
                                      isSelected: candidate.id == appState.selectedCandidateId) {
                             appState.pickCandidate(id: candidate.id)
                         }
+                        .accessibilityIdentifier("candidate.\(candidate.id)")
                     }
                 }
                 }

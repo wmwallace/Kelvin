@@ -1,0 +1,33 @@
+# The Mac app's UI tests, generated — never edited by hand, never committed (like the iPhone project).
+#
+#   make ui-test        packages a dev Kelvin.app, generates this project, runs the tests
+#
+# The app itself is a SwiftPM executable, so there is no host target here: the tests launch the
+# packaged bundle by path (`XCUIApplication(url:)`), which `make ui-test` passes in as
+# TEST_RUNNER_KELVIN_UI_APP. ⚠️ UI tests drive the real keyboard and mouse while they run — start
+# them when nobody is using the Mac.
+name: KelvinMacUITests
+options:
+  deploymentTarget:
+    macOS: "14.0"
+targets:
+  KelvinMacUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - Tests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.usekelvin.kelvin.uitests
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "-"
+schemes:
+  KelvinMacUITests:
+    build:
+      targets:
+        KelvinMacUITests: [test]
+    test:
+      targets:
+        - KelvinMacUITests
