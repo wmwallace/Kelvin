@@ -67,6 +67,16 @@ final class SkyMaskTests: XCTestCase {
         XCTAssertLessThan(agreement.spillFraction, 0.05, "and none of it may land on the sand")
     }
 
+    /// `_DSC3164` (Thanksgiving): a cream living-room wall above the family's heads, bright and
+    /// smooth and touching the top edge, read as sky, and Dramatic put −1.4 EV into it. A lit wall
+    /// is warm; the warmest real sky measured, a Lincoln City evening, is not this warm.
+    func testAWarmLitWallIsNotSky() {
+        let wall = halfImage(top: (215, 190, 165), bottom: (60, 40, 35))
+        XCTAssertNil(SkyMask.detect(in: wall), "a warm interior wall is not a sky")
+        let eveningSky = halfImage(top: (215, 205, 195), bottom: (60, 40, 35))
+        XCTAssertNotNil(SkyMask.detect(in: eveningSky), "a faintly warm sky still is")
+    }
+
     func testNoSkyForDarkFrame() {
         // A uniformly dark frame has no sky: colour score is ~0 everywhere → coverage below floor.
         let image = halfImage(top: (20, 22, 24), bottom: (18, 20, 18))

@@ -111,6 +111,7 @@ public enum RecipeEngine {
             "skyFeather:\(SkyLever.feather)",
             "maskFloor:\(SkyMask.brightFloor)",
             "maskRamp:\(SkyMask.brightRamp)",
+            "maskWarm:\(SkyMask.warmCeiling)",
             "whiteTarget:\(whitePointTarget)",
             "whitesAfterEV:\(whitesSeeExposure ? "on" : "off")",
             "evHeadroom:\(exposureRespectsHeadroom ? "on" : "off")",
