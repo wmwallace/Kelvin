@@ -213,7 +213,10 @@ struct ShootCheckSheet: View {
             }
         }
         .padding(20)
-        .frame(minWidth: 760, idealWidth: 900, minHeight: 560)
+        // Sized to its content, not to a minimum: a fixed 560 cut the title and the Apply button off
+        // a sheet of four tiles. Two rows of tiles plus header and footer fit a 13-inch window.
+        .frame(width: 880)
+        .fixedSize(horizontal: false, vertical: true)
         .background(Theme.surface)
     }
 
@@ -235,7 +238,7 @@ struct ShootCheckSheet: View {
                     ProgressView().controlSize(.small)
                 }
             }
-            .frame(height: 230)
+            .frame(height: 210)
             .clipShape(RoundedRectangle(cornerRadius: 6))
             HStack(spacing: 6) {
                 Text(p.reason).font(Theme.ui(12, .medium)).foregroundColor(Theme.ink)
