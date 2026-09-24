@@ -96,3 +96,68 @@ final class CarriedFinishTests: XCTestCase {
         XCTAssertEqual(s.effectiveIntent(for: a), intent())
     }
 }
+
+/// When Apply shows the shoot check first (D31), and that cancelling it changes nothing.
+@MainActor
+final class ShootCheckFlowTests: XCTestCase {
+
+    private func state(frames: Int) throws -> AppState {
+        let s = AppState()
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("kelvin-shoots-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: base) }
+        s.shootLookDirectory = base
+        s.folderPhotos = (0..<frames).map { URL(fileURLWithPath: "/shoot/f\($0).ARW") }
+        var soft = Recipe.neutral
+        soft.id = "soft"; soft.label = "Soft"
+        s.candidates = [CandidateViewModel(id: "soft", label: "Soft", baseRecipe: soft, previewImage: NSImage())]
+        s.selectedCandidateId = "soft"
+        addTeardownBlock { s.resetReadAhead() }
+        return s
+    }
+
+    func testASmallShootAppliesAtOnce() throws {
+        let s = try state(frames: 5)
+        let was = s.checkBeforeApply
+        defer { s.checkBeforeApply = was }
+        s.checkBeforeApply = true
+        s.requestApply()
+        XCTAssertNil(s.shootCheck)
+        XCTAssertEqual(s.shootLook?.style, "soft")
+    }
+
+    func testABigShootIsCheckedFirstAndCancellingChangesNothing() throws {
+        let s = try state(frames: 30)
+        let was = s.checkBeforeApply
+        defer { s.checkBeforeApply = was }
+        s.checkBeforeApply = true
+        s.requestApply()
+        XCTAssertNotNil(s.shootCheck, "the check opens before anything is recorded")
+        XCTAssertNil(s.shootLook)
+        s.cancelShootCheck()
+        XCTAssertNil(s.shootCheck)
+        XCTAssertNil(s.shootLook, "cancel applies nothing")
+    }
+
+    func testConfirmingTheCheckApplies() throws {
+        let s = try state(frames: 30)
+        let was = s.checkBeforeApply
+        defer { s.checkBeforeApply = was }
+        s.checkBeforeApply = true
+        s.requestApply()
+        s.confirmShootCheck()
+        XCTAssertNil(s.shootCheck)
+        XCTAssertEqual(s.shootLook?.style, "soft")
+    }
+
+    func testWithTheCheckOffApplyIsOneClick() throws {
+        let s = try state(frames: 30)
+        let was = s.checkBeforeApply
+        defer { s.checkBeforeApply = was }
+        s.checkBeforeApply = false
+        s.requestApply()
+        XCTAssertNil(s.shootCheck)
+        XCTAssertEqual(s.shootLook?.style, "soft")
+    }
+}
