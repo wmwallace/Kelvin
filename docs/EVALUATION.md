@@ -1163,3 +1163,12 @@ Paired corpus (77 frames, Vision reads), mean ΔE per look, same binary with the
 
 Nothing moves the wrong way. The sky guard is worth 0.38 on Airy — the look the library audit found
 clipping on 27% of frames — and the lights hold is worth 0.01 where it fires. `hiClip!` stays 0.
+
+**Merged as 0.7.6, and the first look-gate run on it** (60 of the owner's frames, 480 frame/look
+pairs): two flags, both `_DSC0203` (lavender), flat single-channel 3.89% → 4.64% on Natural and 4.84% →
+5.73% on Vivid — the flowers' own blue channel reaching 250 once the false magenta-cast correction
+stopped suppressing it. Looked at, and better (green stems, purple flowers); accepted as the new
+baseline. The range-stretch fix (A) was re-checked on top of the sky guard, which removes the lake's
+clipping but not its flat cyan: `_DSC0378` Natural still 15.3% flat single-channel without A, 2.5%
+with it. A stays; its 0.08 on the paired corpus is three overcast frames losing punch they only had by
+accident.
