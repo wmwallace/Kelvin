@@ -897,3 +897,46 @@ Photo quality is subjective; there is no every-time. The workable target is:
 > correcting is faster than editing from scratch.
 
 That is measurable, and it is the bar that decides whether people keep using the app.
+
+## Carrying a hand finish across a shoot (24 September 2026)
+
+`kelvin-cli match-probe --corpus <paired corpus>` scores `ResultMatch` (D30) against the photographer's
+own finished shoots: 76 frames, Wedding (53) and Cannon Beach 04-27 (23), mean ΔE to each frame's own
+export, lower is closer. Natural is the baseline in every arm.
+
+**One hero's whole finish does not transfer.** Six heroes per shoot, each hero's measured intent carried
+to every other frame:
+
+| | Wedding | Cannon Beach | all |
+|---|---|---|---|
+| Natural (no carry) | 7.38 | 7.05 | 7.28 |
+| hero intent as a change, solved per frame | 8.10 | 10.33 | 8.77 |
+| hero outcome as an absolute target | 8.82 | 14.38 | 10.50 |
+| each frame's OWN intent (the levers' ceiling) | 5.29 | 4.91 | 5.17 |
+
+`--intents-only` says why. Within a shoot the photographer's per-frame intent varies more than it agrees:
+lightness sd 4.7 (Wedding) and 7.0 (Cannon Beach) L* around means of +2.2 and +1.5. Most of a Lightroom
+edit is per-frame correction, and one frame's correction is noise on the next. Only some fields are the
+shoot's intent — on Wedding, spread (mean −9.0, sd 6.2) and subject separation (+4.6, sd 3.9); on Cannon
+Beach, none.
+
+**A genuinely shoot-wide intent does transfer, and solving beats copying** (`--shoot-wide`: each frame
+carries the mean of every OTHER frame's intent; "slider" solves that intent on a hero and copies the
+hero's slider change, the D13-rejected carry and what the iPhone did with `LookAdjustments`):
+
+| | Wedding | Cannon Beach | all |
+|---|---|---|---|
+| Natural | 7.38 | 7.05 | 7.28 |
+| shoot-wide intent, solved per frame | **6.57** (39/53 better) | 7.45 | **6.84** |
+| same intent, slider change copied | 7.19 | 8.33 | 7.53 |
+| one hero at half strength | 6.99 | 7.95 | 7.28 |
+
+Solved beats copied on 36/53 and 20/23 frames. So the app carries a finish only as a deliberate,
+visible, switchable choice ("With my adjustments"), previews it on the least-alike frames before it
+lands (D31), and never carries a finish nobody made (an untouched hero's intent is neutral).
+
+**In the app, measured** (18 frames of the Auburn shoot, hero +0.4 EV + Portrait film, exported with the
+carry on and with `KELVIN_RESULT_MATCH=0`): every other frame came out +10–12 display luma brighter,
+the hero identical, and no frame clipped more — the firelit ones less (`_DSC0484` 0.75% → 0.00%,
+`_DSC0507` 0.47% → 0.00%), because the lift is reached with each frame's own levers under the clipping
+allowance rather than as a fixed exposure.
