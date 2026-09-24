@@ -53,9 +53,9 @@ public extension LocalMasks {
 
     /// Every mask bitmap a delivery renders with, measured on `deliveryImage` and placed over the
     /// full frame. What `measure(in: full).bitmaps` returned, at a fraction of the cost.
-    static func measureForDelivery(in full: CIImage) -> [String: CIImage] {
+    static func measureForDelivery(in full: CIImage, mattes: CameraMattes.Found? = nil) -> [String: CIImage] {
         let small = deliveryImage(full)
-        return measure(in: small).bitmaps.mapValues { scale($0, to: full.extent) }
+        return measure(in: small, mattes: mattes).bitmaps.mapValues { scale($0, to: full.extent) }
     }
 }
 
@@ -73,9 +73,10 @@ public extension LocalMasks {
     /// `deliveryImage`, and placed over the full frame. The single-photo export and the batch both
     /// call this, so the two cannot measure a frame differently again.
     static func measureForDelivery(in full: CIImage,
-                                   reidentifying references: [SubjectInstances.Reference]) -> Delivery {
+                                   reidentifying references: [SubjectInstances.Reference],
+                                   mattes: CameraMattes.Found? = nil) -> Delivery {
         let small = deliveryImage(full)
-        var bitmaps = measure(in: small).bitmaps
+        var bitmaps = measure(in: small, mattes: mattes).bitmaps
         var unmatched: [String] = []
         if !references.isEmpty {
             let matched = SubjectInstances.reidentify(SubjectInstances.detect(in: small), as: references)

@@ -1554,7 +1554,10 @@ case "mask-coverage":
                 guard let image = try? ImageDecoder.decode(url: url) else { return }
                 // Measure on the perception proxy, which is where the app decides.
                 let proxy = PerceptionProxy.downsample(image, maxEdge: 768)
-                let m = LocalMasks.measure(in: proxy)
+                // `--camera-mattes`: use the masks the iPhone stored in the file where it has any —
+                // the app's route since `CameraMattes`. Without it, detection alone, for the A/B.
+                let m = LocalMasks.measure(in: proxy, mattes: arguments.contains("--camera-mattes")
+                                           ? CameraMattes.read(from: url) : nil)
                 total += 1
 
                 func coverage(_ key: String) -> Double {
@@ -3631,7 +3634,8 @@ case "look-audit":
                 let perception = try perceptionURL.map { try PerceptionIO.load(from: $0) }
                     ?? VisionPerceptionProvider.read(measureOn)
                 let composed = try ShippedCandidates.compose(
-                    for: measureOn, perception: perception, iso: ExifReader.iso(url: url))
+                    for: measureOn, perception: perception, iso: ExifReader.iso(url: url),
+                    mattes: CameraMattes.read(from: url))
                 let masks = composed.masks.bitmaps.mapValues { LocalMasks.scale($0, to: canvas.extent) }
                 let extent = canvas.extent
                 let width = Int(extent.width), height = Int(extent.height)

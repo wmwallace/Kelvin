@@ -59,14 +59,29 @@ public enum LocalMasks {
 
     /// Segment subject + sky once and measure them. Missing regions are simply absent (nil luma,
     /// no bitmap), which the engine reads as "nothing local to do here".
-    public static func measure(in image: CIImage) -> Measured {
+    ///
+    /// - Parameter mattes: the masks the camera stored in the file (`CameraMattes.read`), placed over
+    ///   any image of the same photograph. Where present they are used instead of detecting: the
+    ///   camera's sky matte instead of `SkyMask`, its person matte (hair included) instead of Vision's
+    ///   person segmentation. Nil — every photograph without them — measures exactly as before.
+    public static func measure(in image: CIImage, mattes: CameraMattes.Found? = nil) -> Measured {
+        let mattes = mattes.map { CameraMattes.scaled($0, to: image.extent) }
         var bitmaps: [String: CIImage] = [:]
         var subjectLuma: Double?
         var skyLuma: Double?
         var subjectOrigin: SubjectMask.Origin?
         var subjectLumaIsSkin = false
 
-        if let found = SubjectMask.subjectWithOrigin(in: image) {
+        let detected: (mask: CIImage, origin: SubjectMask.Origin)? = mattes?.person.map { ($0, .person) }
+            ?? SubjectMask.subjectWithOrigin(in: image).map { found in
+                // Vision's person cut-out loses fine hair; the camera's hair matte, when there is one,
+                // puts it back.
+                guard let hair = mattes?.hair, found.origin == .person else { return found }
+                return (hair.applyingFilter("CIMaximumCompositing",
+                                            parameters: [kCIInputBackgroundImageKey: found.mask])
+                            .cropped(to: image.extent), found.origin)
+            }
+        if let found = detected {
             let subject = found.mask
             bitmaps["subject"] = subject
             subjectOrigin = found.origin
@@ -77,7 +92,7 @@ public enum LocalMasks {
             let face = FaceSkin.read(in: image)
             if let skin = face.skinLuma { subjectLuma = skin; subjectLumaIsSkin = true }
         }
-        if var sky = SkyMask.detect(in: image) {
+        if var sky = mattes?.sky ?? SkyMask.detect(in: image) {
             // Subtract the subject from the sky so sky adjustments never touch a person standing
             // against it — otherwise their bright hair/shoulders, poking into the upper frame,
             // could be caught by the sky mask and get the wrong local edit. sky ← sky × (1−subject).
