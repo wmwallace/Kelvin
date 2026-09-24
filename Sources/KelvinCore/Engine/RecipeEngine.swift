@@ -114,7 +114,7 @@ public enum RecipeEngine {
             "maskWarm:\(SkyMask.warmCeiling)",
             "whiteTarget:\(whitePointTarget)",
             "whitesAfterEV:\(whitesSeeExposure ? "on" : "off")",
-            "evHeadroom:\(exposureRespectsHeadroom ? "on" : "off")",
+            "evHeadroom:\(exposureRespectsHeadroom ? "on" : "off")/\(headroomReadsChannels ? "channel" : "luma")",
             "salientLift:\(SalientLift.scale)",
             "wbEstimator:\(estimator.rawValue)",
             "wbEdgeP:\(ImageStatistics.edgeMinkowskiP)",
@@ -133,7 +133,7 @@ public enum RecipeEngine {
             // photograph RESOLVES to, which is exactly what `ResolvedRecipeStore` caches against
             // this signature. Constant while disabled, so floor sweeps with the rule off cannot
             // thrash the cache.
-            "stretch:\(RangeStretch.recovery)/\(RangeStretch.flatThreshold)",
+            "stretch:\(RangeStretch.recovery)/\(RangeStretch.flatThreshold)/\(RangeStretch.predictsLinearExposure ? "linear" : "display")",
             "opener:\(OpeningRule.signature())",
             "clarityFocus:\(FocusMeasure.engineDampingEnabled ? "on" : "off")",
             // The measurement proxy's edge moves every statistic and every mask luma, so a
@@ -189,6 +189,10 @@ public enum RecipeEngine {
     /// Whether `exposure` bounds a lift by the frame's white-point headroom. See there.
     public static let exposureRespectsHeadroom: Bool =
         ProcessInfo.processInfo.environment["KELVIN_EXPOSURE_HEADROOM"] != "0"
+
+    /// Whether `exposure`'s low-key bound reads the brightest channel rather than luma. See there.
+    public static let headroomReadsChannels: Bool =
+        ProcessInfo.processInfo.environment["KELVIN_HEADROOM_CHANNEL"] != "0"
 
     /// Whether `pointPlacement` sizes the white lift after the recipe's exposure. See there.
     public static let whitesSeeExposure: Bool =
@@ -868,13 +872,26 @@ public enum RecipeEngine {
         // it skipped the rule, took the full +1 EV, and 2.1% of the picture — the faces and arms
         // the fire lights — went to flat pure red (R ≥ 250 with G < 150). At 0 EV: 0.0%. A white
         // point already at 1.0 has no headroom, and that is what the rule now says.
+        //
+        // THE FIRST CHANNEL TO RUN OUT, NOT LUMA (0.7.5). Firelight is saturated red, and luma
+        // reads a face whose red sits at 0.95 as ~0.6: bounded on luma, `_DSC0495` still took
+        // +0.48 EV and 17% of each face went flat red (R ≥ 250, G < 150) on Natural. So the
+        // headroom is measured on max(R, G, B). Same `shadowMass` ramp, so no frame of either
+        // corpus (all ≤ 0.24) can move. `KELVIN_HEADROOM_CHANNEL=0` bounds on luma again.
         if exposureRespectsHeadroom, ev > 0, s.whitePoint > 0.05 {
-            let lowKey = clamp((s.shadowMass - 0.30) / 0.15, to: 0...1)
-            let headroom = max(0, log2(whitePointTarget / s.whitePoint))
+            let lowKey = lowKeyWeight(s)
+            let white = headroomReadsChannels ? max(s.whitePoint, s.channelWhitePoint) : s.whitePoint
+            let headroom = max(0, log2(whitePointTarget / white))
             if ev > headroom { ev -= (ev - headroom) * lowKey }
         }
         if abs(ev) < 0.12 { return 0 }
         return roundedClamp(ev, to: -1.0...1.0, step: 0.01)
+    }
+
+    /// How much a frame LIVES in the dark: 0 below `shadowMass` 0.30, 1 from 0.45. Every frame of
+    /// both corpora is at or below 0.24; the firelit night frames run 0.47–0.75. See `exposure`.
+    static func lowKeyWeight(_ s: ImageStatistics) -> Double {
+        clamp((s.shadowMass - 0.30) / 0.15, to: 0...1)
     }
 
     /// How a dark subject may re-open `exposure`'s leave-alone band. See there.
@@ -1060,20 +1077,61 @@ public enum RecipeEngine {
             public var load: Double
         }
 
+        /// Whether the post-exposure points are predicted the way the renderer applies exposure —
+        /// decode, scale, re-encode — rather than as a display value times 2^EV. On unless
+        /// `KELVIN_STRETCH_LINEAR=0`, which restores 0.7.4's prediction for the A/B.
+        public static let predictsLinearExposure: Bool =
+            ProcessInfo.processInfo.environment["KELVIN_STRETCH_LINEAR"] != "0"
+
+        /// Where a display-referred level lands after `exposureEV`, as the renderer puts it there:
+        /// `CIExposureAdjust` multiplies LINEAR light and the stretch then runs on the re-encoded
+        /// frame. Clamped at 1, which is where the display stage clamps.
+        ///
+        /// Exact in both directions. Exact for pulls only was measured too: identical on the paired
+        /// corpus, and 0.07 worse on the degradation sample, all of it underexposed frames the
+        /// display form lifted "past" their range (`IMG_2354__underexposed` 2.05 → 8.56 ΔE).
+        static func afterExposure(_ level: Double, _ exposureEV: Double) -> Double {
+            guard exposureEV != 0 else { return min(1, level) }
+            guard predictsLinearExposure else { return min(1, level * pow(2, exposureEV)) }
+            func decode(_ v: Double) -> Double {
+                v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+            }
+            func encode(_ v: Double) -> Double {
+                v <= 0.0031308 ? v * 12.92 : 1.055 * pow(v, 1 / 2.4) - 0.055
+            }
+            return min(1, encode(decode(max(0, level)) * pow(2, exposureEV)))
+        }
+
         /// `exposureEV` is the lift the recipe has ALREADY decided on. The stretch runs after
         /// exposure in the renderer, so it must be sized on the range exposure leaves behind, not
         /// the range the source had: measured without this, an underexposed frame whose exposure
         /// lever restored its white point got the same range restored a second time by the
-        /// stretch (`_DSC6550-3__underexposed`: 1.6 → 5.7 ΔE). Both points are scaled by the
-        /// exposure gain — an approximation in display space, but the right direction and size.
+        /// stretch (`_DSC6550-3__underexposed`: 1.6 → 5.7 ΔE).
+        ///
+        /// Both points go through `afterExposure`. 0.7.4 scaled the encoded values by 2^EV for
+        /// every move, which is far off for a PULL: −0.38 EV put
+        /// `_DSC0378`'s white point (0.905) at 0.70 where the render has it at 0.80, so the stretch
+        /// loaded against both caps (0.25…0.75) and clipped every channel above 0.75 — a hazy
+        /// lake's sky went flat cyan, 15% of the frame on Natural (2.5% now, range 0.25…0.87). Only this prediction changed: the exposure target and
+        /// `highlightHeadroom` stay in display space, where they were tuned (EVALUATION.md,
+        /// "Display space wins").
         public static func placement(_ p: Perception, _ s: ImageStatistics,
                                      exposureEV: Double = 0) -> Placement {
             guard p.intent != .archival, p.intent != .productAccurate else {
                 return Placement(low: nil, high: nil, load: 0)
             }
-            let gain = pow(2, exposureEV)
-            let white = min(1, s.whitePoint * gain)
-            let black = min(1, s.blackPoint * gain)
+            var white = afterExposure(s.whitePoint, exposureEV)
+            var black = afterExposure(s.blackPoint, exposureEV)
+            // …except a LIFT of a frame that lives in the dark, where the display form's wider
+            // reading is kept: exact, it stretched the firelit `_DSC0477` on top of its +0.81 EV
+            // and Vivid's faces went from 0% to 16% flat red. A dark picture is lifted only to its
+            // headroom (`exposure`); a stretch that re-reads the lift as too little breaks that.
+            // Ramped by `lowKeyWeight`, so no corpus frame (all shadowMass ≤ 0.24) moves.
+            if exposureEV > 0, case let lowKey = lowKeyWeight(s), lowKey > 0 {
+                let gain = pow(2, exposureEV)
+                white += (min(1, s.whitePoint * gain) - white) * lowKey
+                black += (min(1, s.blackPoint * gain) - black) * lowKey
+            }
             let range = max(0, white - black)
             let ramp = clamp((flatThreshold - range) / 0.15, to: 0...1)
             let load = ramp * recovery
@@ -1086,6 +1144,17 @@ public enum RecipeEngine {
             // …blended toward identity by the load, and capped.
             low = clamp(low * load, to: 0...lowCap)
             high = clamp(1 - (1 - high) * load, to: (1 - highCap)...1)
+            // A low-key frame's stretch obeys the same channel headroom its exposure does. Bound on
+            // max(R, G, B), exposure gives firelight less lift, the luma range it leaves reads
+            // flatter, and the stretch took the lift back: `_DSC0500` went from exposure +0.90 /
+            // stretch to 0.954 to +0.33 / 0.75, and its faces from 1.9% to 10.6% flat red. So here
+            // the brightest channel may reach the white target and no further — ramped by the
+            // same `lowKeyWeight`, so no corpus frame can move.
+            if headroomReadsChannels, case let lowKey = lowKeyWeight(s), lowKey > 0 {
+                let channelWhite = afterExposure(max(s.whitePoint, s.channelWhitePoint), exposureEV)
+                let floor = min(1, low + max(0, channelWhite - low) / whitePointTarget)
+                if floor > high { high += (floor - high) * lowKey }
+            }
             let l = (low * 1000).rounded() / 1000, h = (high * 1000).rounded() / 1000
             return Placement(low: l > 0 ? l : nil, high: h < 1 ? h : nil, load: load)
         }

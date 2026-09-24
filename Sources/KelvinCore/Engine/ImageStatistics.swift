@@ -25,6 +25,14 @@ public struct ImageStatistics: Equatable, Sendable {
     public var highlightLevel: Double
     /// p99.5 luma. The effective white point.
     public var whitePoint: Double
+    /// p99.5 of the brightest CHANNEL, max(R, G, B). Where the first channel runs out of room.
+    ///
+    /// `whitePoint` is luma, and luma under-reads saturated light: a firelit face whose red is at
+    /// 0.95 has a luma near 0.6, so a lift sized on luma headroom walks the red channel straight
+    /// into the ceiling while the frame's "white point" says there is room (`_DSC0495`, Family at
+    /// Jacks Parents: 17% of each face flat red on Natural). Defaults to `whitePoint` for
+    /// hand-built fixtures, which describe a neutral frame.
+    public var channelWhitePoint: Double
     /// Fraction of pixels with any channel at/above 254 (blown highlights).
     public var highlightClip: Double
     /// Fraction of pixels with every channel at/below 1 (crushed blacks).
@@ -185,8 +193,10 @@ public struct ImageStatistics: Equatable, Sendable {
         chromaA: Double, chromaB: Double,
         shadowMass: Double = 0, shadowRegion: Double = 0, saturationClip: Double = 0,
         neutralChromaA: Double? = nil, neutralChromaB: Double? = nil,
-        edgeChromaA: Double? = nil, edgeChromaB: Double? = nil
+        edgeChromaA: Double? = nil, edgeChromaB: Double? = nil,
+        channelWhitePoint: Double? = nil
     ) {
+        self.channelWhitePoint = channelWhitePoint ?? whitePoint
         self.shadowMass = shadowMass
         self.shadowRegion = shadowRegion
         self.saturationClip = saturationClip
@@ -312,6 +322,7 @@ public struct ImageStatistics: Equatable, Sendable {
         }
 
         var lumas = [Double](repeating: 0, count: count)
+        var peaks = [UInt8](repeating: 0, count: count)
         var lumaSum = 0.0
         var sa = 0.0, sb = 0.0
         // Per-pixel chroma for the illuminant estimate. Near-black is excluded (chroma there is
@@ -346,6 +357,7 @@ public struct ImageStatistics: Equatable, Sendable {
                 let b = Double(b8) / 255.0
                 let y = 0.299 * r + 0.587 * g + 0.114 * b
                 lumas[j] = y
+                peaks[j] = max(r8, g8, b8)
                 lumaSum += y
                 j += 1
 
@@ -419,6 +431,15 @@ public struct ImageStatistics: Equatable, Sendable {
             let idx = min(lumas.count - 1, max(0, Int(q * Double(lumas.count - 1))))
             return lumas[idx]
         }
+        // The same p99.5, of max(R, G, B), by counting down a 256-bin histogram — no second sort.
+        var peakHistogram = [Int](repeating: 0, count: 256)
+        for v in peaks { peakHistogram[Int(v)] += 1 }
+        let peakIndex = min(count - 1, max(0, Int(0.995 * Double(count - 1))))
+        var below = 0, channelWhite = 255
+        for v in 0..<256 {
+            below += peakHistogram[v]
+            if below > peakIndex { channelWhite = v; break }
+        }
 
         let n = Double(count)
         return ImageStatistics(
@@ -438,7 +459,8 @@ public struct ImageStatistics: Equatable, Sendable {
             neutralChromaA: neutralA,
             neutralChromaB: neutralB,
             edgeChromaA: edge?.a,
-            edgeChromaB: edge?.b
+            edgeChromaB: edge?.b,
+            channelWhitePoint: Double(channelWhite) / 255
         )
     }
 
