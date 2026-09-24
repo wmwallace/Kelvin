@@ -250,3 +250,51 @@ enum Diagnostics {
     /// reliable instrument; this is the explanation when the counter says something is wrong.
     static let printChangesEnabled = ProcessInfo.processInfo.environment["KELVIN_PRINT_CHANGES"] != nil
 }
+
+/// Drives Apply → shoot check → confirm with no hand on the mouse — the counterpart of `StressDrag`
+/// for the apply flow, so the sheet and the carried finish (D30, D31) can be seen, and screenshotted,
+/// from a session without clicking in someone's live desktop. Inert unless asked for.
+///
+///     KELVIN_DEMO_LOOK=portra     put this creative look on the opened frame first
+///     KELVIN_DEMO_ADJUST=0.4      add this much exposure by hand on the opened frame first
+///     KELVIN_DEMO_APPLY=1         then press Apply
+///     KELVIN_DEMO_CONFIRM=8       seconds to leave the finished check on screen before applying
+///     KELVIN_DEMO_EXPORT=<dir>    then Export edited into <dir>
+@MainActor
+enum DemoApply {
+    private static var ran = false
+    static var requested: Bool { ProcessInfo.processInfo.environment["KELVIN_DEMO_APPLY"] != nil }
+
+    static func run(_ state: AppState) async {
+        guard requested, !ran else { return }
+        ran = true
+        let env = ProcessInfo.processInfo.environment
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        if let look = env["KELVIN_DEMO_LOOK"] {
+            state.applyLook(look)
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        if let ev = env["KELVIN_DEMO_ADJUST"].flatMap(Double.init) {
+            state.edit.exposureEV += ev
+            state.onEdit()
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        state.requestApply()
+        // Until the check has finished rendering (or was skipped), then long enough to be seen.
+        for _ in 0..<240 {
+            guard let check = state.shootCheck, check.stage != nil else { break }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        let linger = env["KELVIN_DEMO_CONFIRM"].flatMap(Double.init) ?? 8
+        try? await Task.sleep(nanoseconds: UInt64(linger * 1_000_000_000))
+        if state.shootCheck != nil { state.confirmShootCheck() }
+        await state.pendingIntent?.value
+        FileHandle.standardError.write(Data("demo-apply: applied — \(state.statusMessage)\n".utf8))
+        if let dir = env["KELVIN_DEMO_EXPORT"] {
+            let started = Date()
+            await state.exportEdited(to: URL(fileURLWithPath: dir, isDirectory: true))
+            FileHandle.standardError.write(Data(String(format: "demo-apply: exported in %.0f s — %@\n",
+                                                       Date().timeIntervalSince(started), state.statusMessage).utf8))
+        }
+    }
+}

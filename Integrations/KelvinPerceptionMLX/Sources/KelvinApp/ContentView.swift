@@ -3958,6 +3958,7 @@ final class AppState {
             DefaultAppPrompt.offerIfAppropriate()
             // The automated slider drag, when asked for. Here because it needs what a real drag
             // needs: a photo open and a candidate loaded. See Diagnostics.swift.
+            if DemoApply.requested { Task { [weak self] in if let self { await DemoApply.run(self) } } }
             if let steps = StressDrag.steps {
                 let baseline = edit.exposureEV
                 Task { [weak self] in
