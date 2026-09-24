@@ -1434,6 +1434,10 @@ case "wb-probe":
             let name28 = url.lastPathComponent
             var line = name28 + String(repeating: " ", count: max(1, 30 - name28.count))
             for (_, a, b) in estimates { line += "  " + fmt(a, b) }
+            // How grey the greyest 15% really is, against the size of the cast read from it: equal
+            // when the set is a grey under coloured light, far apart when there is no grey at all.
+            line += String(format: "  set|c| %5.1f gate|v| %5.1f", s.neutralSetChroma,
+                           s.neutralCastMagnitude)
 
             // THE COST OF FIRING ON A PHOTOGRAPH THAT IS ALREADY FINISHED. Restraint measured as a
             // count — "leaves 82% alone" — says nothing about the size of the mistakes it does make,
