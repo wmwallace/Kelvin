@@ -9,11 +9,12 @@ import XCTest
 /// rendered at or above 250 in the red. With both rules: 4% and 0%, and Natural 0% and 0%.
 final class DarkFrameExposureTests: XCTestCase {
 
-    private func stats(median: Double, white: Double, shadowMass: Double) -> ImageStatistics {
+    private func stats(median: Double, white: Double, shadowMass: Double,
+                       highlightClip: Double = 0) -> ImageStatistics {
         ImageStatistics(
             meanLuma: median, medianLuma: median,
             blackPoint: 0.006, shadowLevel: 0.02, highlightLevel: white * 0.9,
-            whitePoint: white, highlightClip: 0, shadowClip: 0, chromaA: 0, chromaB: 0,
+            whitePoint: white, highlightClip: highlightClip, shadowClip: 0, chromaA: 0, chromaB: 0,
             shadowMass: shadowMass, shadowRegion: max(shadowMass, 0.2)
         )
     }
@@ -35,6 +36,14 @@ final class DarkFrameExposureTests: XCTestCase {
         let headroom = log2(RecipeEngine.whitePointTarget / 0.609)
         XCTAssertEqual(ev, headroom, accuracy: 0.011)
         XCTAssertLessThan(ev, 1.0)
+    }
+
+    /// A fire in frame does not exempt the faces it lights. `_DSC0507`, same shoot: the flame clips
+    /// 3.3% of the frame, so the bound used to switch off and the frame took the full +1 EV — 2.1%
+    /// of the picture went to flat pure red. Its white point is already at 1.0: no headroom, no lift.
+    func testAClippedLightSourceDoesNotUnlockTheLift() {
+        let s = stats(median: 0.093, white: 1.0, shadowMass: 0.472, highlightClip: 0.033)
+        XCTAssertEqual(RecipeEngine.exposure(perception(), s), 0)
     }
 
     /// An underexposed frame that does not live in the dark keeps the full pull. Bounded everywhere,

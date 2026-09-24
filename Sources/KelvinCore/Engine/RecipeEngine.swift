@@ -26,7 +26,10 @@ public enum RecipeEngine {
     /// 0.7.1 (23 Sep 2026): a dark picture is not an underexposed one. Exposure stops at the
     /// frame's white-point headroom when most of it lives in the shadows, and `pointPlacement`
     /// sizes the whites after the exposure. See EVALUATION.md, "A night frame lifted twice".
-    public static let version = "0.7.1"
+    ///
+    /// 0.7.2 (23 Sep 2026): that bound no longer switches off when a light source clips. A fire in
+    /// frame had been exempting its own firelit faces from it.
+    public static let version = "0.7.2"
 
     /// Below this confidence the engine drops all *stylistic* moves (contrast shaping,
     /// vibrance, point placement) and keeps only *corrective* ones justified purely by
@@ -740,7 +743,14 @@ public enum RecipeEngine {
         // that shoot runs 0.47–0.75. The ramp sits in the empty space between. Read off the
         // histogram, so it is the same for every subject and every skin. `KELVIN_EXPOSURE_HEADROOM=0`
         // removes it for an A/B.
-        if exposureRespectsHeadroom, ev > 0, s.highlightClip < 0.02, s.whitePoint > 0.05 {
+        //
+        // A CLIPPED LIGHT SOURCE IS NOT A REASON TO LIFT. This was gated on `highlightClip < 0.02`,
+        // which switched the bound off on exactly the frames that need it most: `_DSC0507`, same
+        // shoot, has the fire itself in frame (3.3% clipped, white point 1.0, shadowMass 0.47), so
+        // it skipped the rule, took the full +1 EV, and 2.1% of the picture — the faces and arms
+        // the fire lights — went to flat pure red (R ≥ 250 with G < 150). At 0 EV: 0.0%. A white
+        // point already at 1.0 has no headroom, and that is what the rule now says.
+        if exposureRespectsHeadroom, ev > 0, s.whitePoint > 0.05 {
             let lowKey = clamp((s.shadowMass - 0.30) / 0.15, to: 0...1)
             let headroom = max(0, log2(whitePointTarget / s.whitePoint))
             if ev > headroom { ev -= (ev - headroom) * lowKey }
