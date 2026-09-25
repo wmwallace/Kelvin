@@ -78,7 +78,8 @@ public extension LocalMasks {
     /// for. One whose taps come back empty is reported in `unmatched`, like a lost subject.
     static func measureForDelivery(in full: CIImage,
                                    reidentifying references: [SubjectInstances.Reference],
-                                   segmenting masks: [Mask] = []) -> Delivery {
+                                   segmenting masks: [Mask] = [],
+                                   mattes: CameraMattes.Found? = nil) -> Delivery {
         let small = deliveryImage(full)
         var bitmaps = measure(in: small, mattes: mattes).bitmaps
         var unmatched: [String] = []

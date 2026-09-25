@@ -1653,6 +1653,80 @@ is the export's work; the check reports fallbacks on the frames it shows.
 
 ---
 
+## D32 — Tap-to-segment masks store taps, regenerated from the file · **Decided 24 September 2026** (schema addition; the owner's instruction: "let's implement")
+
+**The gap.** The wand (`Mask.region`, `RegionGrow`) selects by colour, so it leaks wherever the thing
+clicked touches its own colour: on `_DSC6390` a tap on the left sea stack runs along the surf into
+Haystack Rock. `SubjectInstances` is object-aware but offers only what Vision finds salient, and skips
+both smaller stacks. macOS 27 / iOS 27 ship Apple's iterative segmentation
+(`GenerateIterativeSegmentationRequest`): tap a thing and get the thing, then tap to add a part
+and ⌥-tap to take one away.
+
+**The schema: `Mask.segment: SegmentSeed?`**, holding `include` and `exclude` lists of normalised
+top-left taps. The mask's `type` is `object` and its `source` is `tap-segment`. The field is
+optional, decoded with `decodeIfPresent`, clamped, and capped at 32 taps a list. It is **the taps,
+never a bitmap** (RECIPE-SCHEMA #6). Two things made that safe to decide:
+
+- *It regenerates.* The same taps give byte-identical masks run to run. At different sizes they
+  agree closely: 768 against 2400 px on `_DSC6390` (seed, one exclusion, one addition) disagree on
+  0.04% of pixels. The canvas's 1200 against the export's 2048 disagree on 0.02% (a person,
+  `IMG_2278`), 0.06% (a dog, `IMG_1746`) and 0.03% (`_DSC6390`), with identical coverage.
+- *Order does not matter.* Adding the taps together after the seed, rather than one perform per
+  tap, differs by 0.04%, so two unordered lists are enough.
+
+**How it renders.** The renderer cannot make this source itself, because the request is async and
+`Renderer.render` is not. So the caller supplies the bitmap by mask id, and **with no bitmap the mask
+is skipped**. It never falls back to a bitmap filed under the type or to another source.
+
+- *Canvas:* segmented on the edit proxy as decoded (the wand's rule: the photograph that was
+  clicked), on the Vision lane, cached per mask by taps.
+- *Export:* `LocalMasks.measureForDelivery(…, segmenting:)` segments the same taps again on the
+  2048 px delivery image, for both the single export and the batch. A mask whose taps come back
+  empty is reported with the lost subjects, not written as nothing.
+- *CLI:* `kelvin-cli render` does the same.
+
+**D21, and the one exception it now carries.** The request is async-only, and it parks the
+cooperative thread it runs on. Measured with the pool held to one thread
+(`LIBDISPATCH_COOPERATIVE_POOL_STRICT=1`), a ticker task went silent for the whole of each
+perform. Pinning the task to a dispatch-backed `TaskExecutor` did not help: Vision hops back onto
+the pool. It cannot be kept off the pool, so it is kept to **one at a time**.
+`ObjectSegmentation`'s functions block their caller on a semaphore, and the app calls them only
+from the serial Vision lane. That is the MLX token loop's bargain again. The cost is one pool
+thread for 0.12–0.6 s a segmentation, or ~10 s while the model loads.
+
+**Measured against the wand** at the same tap, on the same 1200 px proxies, wand at tolerance 0.10
+(`kelvin-cli segment` / `grow`):
+
+| frame, tap | wand | object |
+|---|---|---|
+| `_DSC6390` left sea stack | leaks along the surf into Haystack Rock | the stack alone |
+| `_DSC6390` Haystack Rock | a mottled patch of the green cap | the rock, **plus** the stack beside it (one ⌥-tap removes it) |
+| `IMG_1746` dog | scattered patches of fur | the whole dog, with the leash carved out |
+| `IMG_2278` a man's dark shirt | the shirt, then out into the tree line | the man, head to shoes, not his neighbour |
+| `IMG_2278` Capitol dome | the dome's cap | dome and building |
+| `_DSC0140` a cormorant on a buoy | a miss (below minimum coverage) | the bird; one more tap adds the buoy |
+
+The object result was better in every case. It can over-include, as on Haystack, and the answer
+is an ⌥-tap, not a tolerance to guess.
+
+**Availability.** Every reference to the request sits inside `#if compiler(>=6.4)` (Xcode 27) and
+`#available(macOS 27, iOS 27, *)`. CI's Xcode 16 compiles the feature out. `isSupported` is then
+false and the Mac shows the Object button disabled with "Object needs macOS 27", not a button that
+does nothing. The first use on a Mac downloads Apple's model (~6 s, measured here), and each launch
+pays a model load (~10 s). Picking the tool starts both while the photographer aims, and the status
+line says so.
+
+**What it does not change.** `version` stays 1: the change is additive. An older *renderer* ignores
+`segment` and has no bitmap for the mask, so it renders nothing there. An older *app* cannot decode
+a saved edit containing the new `object` mask kind, which is closed, like `.wand` when it arrived.
+It opens that photograph unedited. Taps are coordinates on one frame, so an object mask is not a
+capturable preset and does not travel with a shoot's look (D30: masks' geometry stays put).
+
+**iPhone.** `ObjectSegmentation` is in KelvinCore and compiles for iOS, so the core is ready. The
+phone app has no masks at all yet: no mask state, no local adjustments, and a `PhoneEdit` that
+stores a style and offsets. Tapping to select would be its first mask feature, not a port of this
+one, so it is not built here.
+
 ## D33 — The on-device Foundation Model reads two things well, and the scene read carries them · **Decided 24 September 2026** (in-project decisions delegated 22 Sep; measured before integrating)
 
 macOS 27 / iOS 27 let apps hand Apple's on-device Foundation Model an image. D-model-3 recorded it as

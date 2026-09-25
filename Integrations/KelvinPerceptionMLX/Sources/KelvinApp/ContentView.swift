@@ -3863,7 +3863,9 @@ final class AppState {
                     let sampleBytes = try ImageMetrics.sample(measureInputs.measureOn)
                     let stats = ImageStatistics.compute(from: sampleBytes)
                     // Serial, deliberately. Do not turn these into `async let`.
-                    let masks = LocalMasks.measure(in: measureInputs.measureOn)
+                    // The masks the camera stored in the file, where it did (`CameraMattes`).
+                    let masks = LocalMasks.measure(in: measureInputs.measureOn,
+                                                   mattes: CameraMattes.read(from: url))
                     let instances = SubjectInstances.detect(in: measureInputs.proxy)
                     // Free while the switch is off (nil, no render); on the lane when it is on,
                     // because `read` renders — D21's rule.
@@ -6005,10 +6007,12 @@ final class AppState {
                                 hdrSource: exportHDR && exportFormatId == "heic" ? loadedURL : nil)
         // Two lanes: the Vision passes on theirs, the write on the export lane. Neither is on a
         // cooperative thread while it works — see `Offload`.
+        let matteSource = loadedURL
         let measured = await Offload.run(.vision) { () -> ExportMasks in
             guard masksNeeded else { return ExportMasks(bitmaps: [:], lost: []) }
             let delivery = LocalMasks.measureForDelivery(in: input.fullRes, reidentifying: references,
-                                                         segmenting: input.recipe.masks ?? [])
+                                                         segmenting: input.recipe.masks ?? [],
+                                                         mattes: matteSource.flatMap(CameraMattes.read(from:)))
             return ExportMasks(bitmaps: delivery.bitmaps, lost: delivery.unmatched)
         }
         do {
@@ -6390,7 +6394,7 @@ final class AppState {
         }
         let finish = lookId.flatMap(LookPreset.named)
         let matched = await Offload.run(.vision) { () -> Recipe in
-            let masks = LocalMasks.measure(in: proxy.image).bitmaps
+            let masks = LocalMasks.measure(in: proxy.image, mattes: CameraMattes.read(from: url)).bitmaps
             return ResultMatch.apply(intent, to: resolved, proxy: proxy.image, maskBitmaps: masks,
                                      finishing: { finish?.applied(to: $0) ?? $0 })
         }
@@ -6483,7 +6487,8 @@ final class AppState {
             // rest of the pool in hand.
             let iso = ExifReader.iso(url: url)
             let composed = try ShippedCandidates.compose(for: work.proxy, perception: perception,
-                                                         iso: iso, requestedStyleID: style.id)
+                                                         iso: iso, requestedStyleID: style.id,
+                                                         mattes: CameraMattes.read(from: url))
             if let chosen = composed.chosen { return chosen.recipe }
             // Nothing scored at all — a frame the evaluator could not read. Fall back to building
             // the requested style directly rather than failing the export: the photographer asked
@@ -6546,7 +6551,8 @@ final class AppState {
         let measured = needsMasks
             ? await Offload.run(.vision) { () -> ExportMasks in
                 let delivery = LocalMasks.measureForDelivery(in: decoded.image, reidentifying: references,
-                                                             segmenting: job.recipe.masks ?? [])
+                                                             segmenting: job.recipe.masks ?? [],
+                                                             mattes: CameraMattes.read(from: job.source))
                 return ExportMasks(bitmaps: delivery.bitmaps, lost: delivery.unmatched)
             }
             : ExportMasks(bitmaps: [:], lost: [])
