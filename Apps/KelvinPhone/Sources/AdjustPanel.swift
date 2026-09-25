@@ -39,7 +39,7 @@ struct AdjustPanel: View {
     }
 }
 
-private struct AdjustSlider: View {
+struct AdjustSlider: View {
     let title: String
     let low: String
     let high: String
