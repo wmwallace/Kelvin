@@ -3816,6 +3816,8 @@ case "look-audit":
                     let d = damage(try pixels(rendered, over: extent), source: source, face: faceMask, light: lightMask)
                     let flags = redFlags(recipe)
                     let tag = (look == opener ? "OPEN" : curated.contains(look) ? "shown" : "     ")
+                    let caption = CandidateDescription.sentence(for: recipe, relativeTo: naturalRecipe,
+                                                                subject: subjectNoun)
                     let held = recipe.masks?.first { $0.type == LightsMask.maskType }
                     print("  \(look.padding(toLength: 8, withPad: " ", startingAt: 0)) \(tag) \(d.line)"
                           + (held.map { String(format: " ◐ lights held %+.2f EV", $0.adjustments["exposure_ev"] ?? 0) } ?? "")
@@ -3885,6 +3887,11 @@ case "look-audit":
     } catch {
         fail("\(error)")
     }
+
+case "look-gate":
+    // The release gate: two `look-audit --out` runs over the same frames, and a failure when a look
+    // someone would see got visibly worse. See `LookGate` and scripts/look-gate.sh.
+    exit(LookGate.run(arguments: Array(arguments.dropFirst())))
 
 case "fm-probe":
     // D33: what Apple's on-device Foundation Model makes of a photograph — indoors, sky visible,
