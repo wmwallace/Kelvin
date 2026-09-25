@@ -25,6 +25,8 @@ final class EditSession {
     }
 
     private(set) var phase: Phase = .empty
+    /// The photograph as it came in, shown under the progress while its looks are being made.
+    private(set) var workingPreview: CGImage?
     var selectedID: String?
     var showingOriginal = false
     /// A short confirmation after saving, or the reason it failed.
@@ -110,10 +112,14 @@ final class EditSession {
         phase = .working("Opening")
         do {
             let url = try await resolve()
-            let result = try await Pipeline.compose(url) { [weak self] stage in
+            workingPreview = nil
+            let result = try await Pipeline.compose(url, onStage: { [weak self] stage in
                 guard let self, self.request == mine else { return }
                 self.phase = .working(stage)
-            }
+            }, onOriginal: { [weak self] image in
+                guard let self, self.request == mine else { return }
+                self.workingPreview = image
+            })
             guard request == mine else { return }
             showingOriginal = false
             adjustedPreview = nil

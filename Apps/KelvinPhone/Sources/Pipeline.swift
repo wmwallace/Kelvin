@@ -73,7 +73,8 @@ enum Pipeline {
     static let canvasEdge = 1800
 
     /// Decode, read, compose, render. Every step on its lane; the caller only awaits.
-    static func compose(_ url: URL, onStage: @escaping @Sendable @MainActor (String) -> Void) async throws -> Composed {
+    static func compose(_ url: URL, onStage: @escaping @Sendable @MainActor (String) -> Void,
+                        onOriginal: @escaping @Sendable @MainActor (CGImage) -> Void = { _ in }) async throws -> Composed {
         await onStage("Opening")
         let decoded = try await Lane.decode.run { () throws -> (Pixels, Pixels, Double?) in
             let full = try ImageDecoder.decode(url: url)
@@ -82,6 +83,11 @@ enum Pipeline {
             return (Pixels(image: full), Pixels(image: canvas), ExifReader.iso(url: url))
         }
         let canvas = decoded.1.image
+        // The photograph goes up the moment it is decoded, so the wait for the looks is spent
+        // looking at it — on an iPad the empty screen that was here read as a broken app.
+        if let shown = try? await Lane.render.run({ Image(image: try cgImage(canvas)) }) {
+            await onOriginal(shown.image)
+        }
 
         await onStage("Reading the scene")
         let perception = try await VisionPerceptionProvider()
