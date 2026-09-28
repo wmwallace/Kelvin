@@ -21,17 +21,18 @@ removes most of the usual categories. What remains is worth reporting:
 - **Malformed-input crashes or memory-safety problems** reachable by opening a crafted image file.
   RAW decoding goes through Apple's Core Image, so many such issues belong to Apple; report them
   anyway and they will be forwarded.
-- **Any network activity beyond the update check and place names.** Releases ship the perception
-  weights inside the app. A release build is allowed exactly two kinds of outbound traffic:
-  Sparkle's update check against `https://usekelvin.app/appcast.xml` — on by default, turned off in
-  Settings ▸ General, and it fetches the appcast and nothing else — and, for a photograph that
-  carries GPS coordinates, Apple's geocoding and map-snapshot services, which receive that
-  coordinate rounded to about 110 m so the filmstrip can name and map the place (on by default,
-  turned off in Settings ▸ Scene reading, and the coordinate is all that goes — never pixels, a
-  filename, or an identifier). Any other packet leaving a release build is a bug by definition, and
-  a serious one given what the project claims. (A build from source, without `make stage-model`,
-  fetches the weights once from Hugging Face at a pinned revision — that one is expected and
-  documented.)
+- **Any network activity beyond the update check and place names.** No perception model ships and
+  none is downloaded: since 0.9 (D27, D33) scenes are read by Apple's Vision framework and, on a Mac
+  with Apple Intelligence, Apple's on-device Foundation Model — both part of macOS, and the language
+  model is asked for on-device inference only, never Private Cloud Compute. A release build is
+  allowed exactly two kinds of outbound traffic: Sparkle's update check against
+  `https://usekelvin.app/appcast.xml` — on by default, turned off in Settings ▸ General, and it
+  fetches the appcast and nothing else — and, for a photograph that carries GPS coordinates, Apple's
+  geocoding and map-snapshot services, which receive that coordinate rounded to about 110 m so the
+  filmstrip can name and map the place (on by default, turned off in Settings ▸ Perception, and the
+  coordinate is all that goes — never pixels, a filename, or an identifier). Any other packet
+  leaving a release build is a bug by definition, and a serious one given what the project claims.
+  A build from source has no update feed, so it makes only the place-name requests.
 - **Metadata leaking into exported files** beyond what the export settings say. Exports carry the
   source photograph's metadata by default, including its GPS position — that is documented and
   toggleable in the export panel. A case where the toggle does not take effect, or where data
@@ -40,8 +41,8 @@ removes most of the usual categories. What remains is worth reporting:
 
 ## What is not in scope
 
-- The one-time model download itself. It is documented, it fetches weights and nothing else, and it
-  can be avoided entirely with a local copy (`make stage-model`).
+- Traffic that macOS itself generates on Kelvin's behalf and that Kelvin does not initiate — for
+  example, the system downloading or updating Apple Intelligence's model assets.
 - Gatekeeper warnings on a build you assembled yourself without a signing identity. Published
   releases are signed and notarised; an unsigned local build warning is expected behaviour, not a
   vulnerability.
