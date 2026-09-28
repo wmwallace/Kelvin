@@ -13,10 +13,11 @@ that looks like a broken toolchain rather than a missing download:
 xcodebuild -downloadComponent MetalToolchain     # ~840 MB, once
 ```
 
-**The first run downloads ~1.6 GB of model weights** from Hugging Face into `~/.cache/huggingface`,
-at a pinned revision, unless you stage them locally (see below). This applies to source builds only —
-**released apps ship the weights inside the bundle and make no network requests at all**, which is
-enforced: `scripts/package-app.sh` refuses to produce a signed build without staged weights.
+**The app downloads no model.** Since 0.9 (D27) scenes are read by Apple's Vision framework and the
+on-device Foundation Model, both part of macOS. The MLX model survives only as a research instrument,
+`kelvin-perceive`, which fetches ~1.6 GB of weights from Hugging Face into `~/.cache/huggingface` the
+first time it runs — the app never links it, and `scripts/package-app.sh` refuses a bundle that
+contains weights.
 
 **Requirements:** macOS 14+, Xcode 16.3+ (Swift 6.1 for the app package; the core package needs
 only Swift 6.0).
@@ -44,7 +45,7 @@ The repository is two packages, deliberately:
 | | What | Cost |
 |---|---|---|
 | Root package | `KelvinCore` + `kelvin-cli` — the renderer, recipe engine, eval harness. **No MLX, no UI.** | seconds |
-| `Integrations/KelvinPerceptionMLX` | The SwiftUI app and the on-device vision model backend | minutes |
+| `Integrations/KelvinPerceptionMLX` | The SwiftUI app, plus `kelvin-perceive` (the retired MLX model, kept for research) | minutes |
 
 ```sh
 make build && make test      # the core package: 564 tests, ~35s
@@ -59,16 +60,15 @@ on a file-provider-backed directory (iCloud), such volumes stamp `com.apple.Find
 products, and `codesign` then refuses to sign the `.xctest` bundle, which breaks `swift test`. Pass
 `make BUILD_PATH=/somewhere test` if you want it elsewhere.
 
-To run against a local copy of the weights instead of the Hugging Face cache — the same path a
-release build takes:
+To run `kelvin-perceive` against a local copy of the weights instead of the Hugging Face cache:
 
 ```sh
 make stage-model     # copies the weights + their licence into Vendor/PerceptionModel
-make app-staged
+KELVIN_MODEL_PATH="$PWD/Vendor/PerceptionModel" swift run --package-path Integrations/KelvinPerceptionMLX kelvin-perceive …
 ```
 
-`stage-model` will refuse if the weights have no `LICENSE` beside them. That is deliberate: bundling
-weights is redistribution, and Apache-2.0 requires the licence to travel with them.
+`stage-model` will refuse if the weights have no `LICENSE` beside them. That is deliberate: copying
+weights around is redistribution, and Apache-2.0 requires the licence to travel with them.
 
 ## The five rules a patch has to respect
 
