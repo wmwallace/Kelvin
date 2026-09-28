@@ -9351,6 +9351,11 @@ struct CandidateRow: View {
                                                  : "\(candidate.label), \(signature)")
                             : "\(candidate.label), \(candidate.summary)")
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+        // `children: .ignore` REPLACES the button's element with a new one, and on macOS the new one
+        // inherits the label and the traits but not the press. VoiceOver's VO-Space reported success
+        // and chose nothing — on the one control the app exists for — while every plain Button in the
+        // panel worked. The action has to be handed back explicitly.
+        .accessibilityAction { onSelect() }
         // Picking a candidate is the one act this whole app is built around, and the selection
         // moves between rows — so the border and fill hand over rather than cutting. Colour and
         // stroke width only: no scale, no shadow, nothing that would make a row jump at the eye
