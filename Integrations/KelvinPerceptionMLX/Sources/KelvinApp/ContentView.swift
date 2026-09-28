@@ -164,6 +164,13 @@ enum KelvinScale {
                      blue: (a.2 + (b.2 - a.2) * f) / 255)
     }
 
+    /// A temperature as the app writes it, everywhere it writes one: rounded, and without a
+    /// thousands separator. The Temp slider rounded (`%.0f`) while the footer and the candidate
+    /// rows truncated (`Int(_:)`) and grouped, so a fixed cast of 7845.6 K read "7846 K" on the
+    /// slider and "7,845 K" under the photograph — two answers to one question, a hand's width
+    /// apart. Every readout goes through here so they cannot drift again.
+    static func readout(_ k: Double) -> String { String(format: "%.0f", k) }
+
     static let gradient = LinearGradient(
         colors: [color(2700), color(4200), color(5500), color(7000), color(9000)],
         startPoint: .leading, endPoint: .trailing)
@@ -9235,7 +9242,7 @@ private struct TemperatureLabel: View {
     @Bindable var appState: AppState
     var body: some View {
         let temp = appState.activeTemperature
-        Text(temp.map { "\(Int($0)) K" } ?? "as-shot")
+        Text(temp.map { "\(KelvinScale.readout($0)) K" } ?? "as-shot")
             .font(Theme.mono(12))
             .foregroundColor(temp.map(KelvinScale.color) ?? Theme.inkDim)
     }
@@ -9316,7 +9323,7 @@ struct CandidateRow: View {
                     Circle().fill(temp.map(KelvinScale.color) ?? Theme.inkFaint)
                         .frame(width: 9, height: 9)
                         .overlay(Circle().stroke(Theme.hairline, lineWidth: 1))
-                    Text(temp.map { "\(Int($0))K" } ?? "as-shot")
+                    Text(temp.map { "\(KelvinScale.readout($0))K" } ?? "as-shot")
                         .font(Theme.mono(9)).foregroundColor(Theme.inkFaint)
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
@@ -10006,7 +10013,10 @@ struct ToneSlider: View {
     }
 
     private var readout: String {
-        let sign = value > 0 ? "+" : ""
+        // Signed only on a scale that goes below zero, where "+" says which side of neutral the
+        // value sits. On Temp (2500…9500), Size or Range it says nothing — "+7846 K" is not a
+        // shift of 7846 kelvin — so those read as the plain value they are.
+        let sign = value > 0 && range.lowerBound < 0 ? "+" : ""
         return step < 1
             ? String(format: "%@%.2f%@", sign, value, unit)
             : String(format: "%@%.0f%@", sign, value, unit)
