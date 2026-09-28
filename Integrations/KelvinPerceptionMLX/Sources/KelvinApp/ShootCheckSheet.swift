@@ -97,9 +97,10 @@ extension AppState {
 
         let measured = await Offload.run(.io, qos: .userInitiated) { () -> SignatureBox in
             func signature(_ url: URL) -> ShootCheck.Signature? {
-                guard let cg = MediaCache.shared.thumbnailCG(for: url),
-                      let stats = try? ImageStatistics.compute(CIImage(cgImage: cg)) else { return nil }
-                return ShootCheck.Signature(stats)
+                guard let cg = MediaCache.shared.thumbnailCG(for: url) else { return nil }
+                let thumb = CIImage(cgImage: cg)
+                guard let stats = try? ImageStatistics.compute(thumb) else { return nil }
+                return ShootCheck.Signature(stats, colourfulness: ShootCheck.colourfulness(thumb))
             }
             var frames: [(id: URL, signature: ShootCheck.Signature)] = []
             for url in sampled where !CloudFile.isEvicted(url) {

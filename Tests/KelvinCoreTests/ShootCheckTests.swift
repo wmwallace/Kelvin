@@ -1,4 +1,5 @@
 import XCTest
+import CoreImage
 @testable import KelvinCore
 
 /// Which frames the shoot check previews (`ShootCheck.pick`).
@@ -38,6 +39,42 @@ final class ShootCheckTests: XCTestCase {
         XCTAssertEqual(ShootCheck.reason(for: sig(-2), hero: sig(0)), "Much darker")
         XCTAssertEqual(ShootCheck.reason(for: sig(0, warmth: 2), hero: sig(0)), "Warmer light")
         XCTAssertEqual(ShootCheck.reason(for: sig(0.1), hero: sig(0)), "Like the one you chose")
+    }
+
+    /// Reported: a black-and-white dog under "Like the one you chose", beside a Natural chosen on a
+    /// colour car. Picked for a combined distance no single axis crossed, then labelled as alike.
+    func testAPickedFrameIsNeverCalledAlike() {
+        // Somewhat different on three axes, past none: 0.4 stops, 0.5 shadow, 0.35 warmth.
+        let frame = sig(-0.4, shadows: 0.5, warmth: 0.35)
+        XCTAssertGreaterThanOrEqual(frame.distance(to: sig(0)), ShootCheck.minimumDistance,
+                                    "the picker would take this frame")
+        XCTAssertEqual(ShootCheck.reason(for: frame, hero: sig(0)), "A little darker")
+        let spread = sig(0.2, shadows: 0.3, highlights: 0.2, warmth: 0.2)
+        XCTAssertGreaterThanOrEqual(spread.distance(to: sig(0)), ShootCheck.minimumDistance)
+        XCTAssertEqual(ShootCheck.reason(for: spread, hero: sig(0)), "Slightly different light")
+    }
+
+    func testBlackAndWhiteIsNamedFirst() {
+        var mono = sig(-2)                       // much darker, too — but grey is what the eye sees
+        mono.colourfulness = 0.02
+        var hero = sig(0)
+        hero.colourfulness = 0.24
+        XCTAssertEqual(ShootCheck.reason(for: mono, hero: hero), "Black and white")
+        XCTAssertEqual(ShootCheck.reason(for: hero, hero: mono), "In colour")
+        // Unmeasured, or in the gap between the two thresholds, claims neither.
+        XCTAssertEqual(ShootCheck.reason(for: sig(-2), hero: hero), "Much darker")
+        var pastel = sig(-2)
+        pastel.colourfulness = 0.06
+        XCTAssertEqual(ShootCheck.reason(for: pastel, hero: hero), "Much darker")
+    }
+
+    func testColourfulnessSeparatesGreyFromColour() throws {
+        let grey = ShootCheck.colourfulness(CIImage(color: CIColor(red: 0.4, green: 0.4, blue: 0.4))
+            .cropped(to: CGRect(x: 0, y: 0, width: 64, height: 48)))
+        let red = ShootCheck.colourfulness(CIImage(color: CIColor(red: 0.8, green: 0.2, blue: 0.2))
+            .cropped(to: CGRect(x: 0, y: 0, width: 64, height: 48)))
+        XCTAssertLessThan(try XCTUnwrap(grey), ShootCheck.monochromeBelow)
+        XCTAssertGreaterThan(try XCTUnwrap(red), ShootCheck.colourAbove)
     }
 
     func testSignatureFromStatistics() {
