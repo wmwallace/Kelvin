@@ -5629,14 +5629,24 @@ final class AppState {
                 let bitmaps = bake.base
                     .merging(brush.out) { _, baked in baked }
                     .merging(wand.out) { _, grown in grown }
-                var rendered = Renderer.render(input.proxy, with: input.recipe, maskBitmaps: bitmaps)
+                let rendered = Renderer.render(input.proxy, with: input.recipe, maskBitmaps: bitmaps)
+                let photoCG = side.ctx.createCGImage(rendered, from: rendered.extent)
+                let concrete = photoCG.map { CIImage(cgImage: $0) } ?? rendered
+                // THE OVERLAY IS FOR THE EYE, NEVER FOR THE INSTRUMENTS. It used to be composited
+                // into `rendered` before anything was measured, so the histogram and the craft check
+                // both read a photograph with 60% red laid over the selected mask. Reported as the
+                // "strong colour cast" warning coming back, Fix button and all, the moment a Vehicle
+                // mask was selected on a frame whose cast had already been fixed — and Fix would
+                // then have corrected the real photograph against a red that was never in it. So
+                // the photograph is rasterised and measured first, and the overlay goes on top of
+                // those finished pixels for display only.
+                var shownCG = photoCG
                 if let request = side.overlay,
                    let ov = AppState.overlayMask(request, bitmaps: bitmaps, proxy: input.proxy) {
-                    rendered = Renderer.renderMaskOverlay(rendered, maskBitmap: ov.bitmap, invert: ov.invert, feather: ov.feather, tightness: ov.tightness, opacity: 0.6)
+                    let shown = Renderer.renderMaskOverlay(concrete, maskBitmap: ov.bitmap, invert: ov.invert, feather: ov.feather, tightness: ov.tightness, opacity: 0.6)
+                    shownCG = side.ctx.createCGImage(shown, from: shown.extent)
                 }
-                let cg = side.ctx.createCGImage(rendered, from: rendered.extent)
-                let concrete = cg.map { CIImage(cgImage: $0) } ?? rendered
-                return RenderOutput(ci: concrete, cg: cg, histogram: HistogramReader.read(concrete),
+                return RenderOutput(ci: concrete, cg: shownCG, histogram: HistogramReader.read(concrete),
                                     brushCache: brush.cache, wandCache: wand.cache)
             }
             // PUBLISH THE PIXELS, NOT THE RECIPE FOR THEM. `rendered` is a lazy CIImage — a filter
